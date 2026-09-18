@@ -1,0 +1,80 @@
+# ===== Voix -> MIDI — ignorer tout ce qui n'est pas une source =====
+
+# --- Environnements virtuels ---
+.venv/
+venv/
+env/
+.venv.*/
+ENV/
+
+# --- Cache Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.egg-info/
+.eggs/
+
+# --- Build / distribution ---
+build/
+dist/
+wheels/
+*.whl
+pip-wheel-metadata/
+
+# --- Couverture & outils qualité ---
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+
+# --- Freebuff (données locales de l'assistant) ---
+.freebuff/
+
+# --- Artefacts audio générés ---
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.mid
+*.midi
+demo.*
+live_*
+
+# --- Partitions générées (export MusicXML) ---
+*.musicxml
+
+# exceptions : garder un éventuel audio d'exemple versionné
+!tests/data/*.wav
+
+# --- Rapports générés (si non versionnés) ---
+out.json
+out.csv
+out.musicxml
+
+# --- IDE / éditeurs ---
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Docker (fichiers locaux, images exportées) ---
+*.tar
+docker-compose.override.yml
+
+# --- Notes personnelles ---
+*.log

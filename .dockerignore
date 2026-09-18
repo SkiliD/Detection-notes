@@ -1,0 +1,47 @@
+# Environnements et caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Git
+.git/
+.gitignore
+
+# Freebuff (données locales de l'assistant)
+.freebuff/
+
+# Artefacts audio du projet
+demo.wav
+demo.mid
+demo.json
+demo.csv
+live_*.mid
+live_*.json
+live_*.csv
+
+# Tests et scripts (inutiles dans l'image)
+tests/
+scripts/
+
+# IDE et OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Docker (lui-même)
+Dockerfile
+.dockerignore
