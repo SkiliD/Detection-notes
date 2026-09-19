@@ -7,7 +7,8 @@ import numpy as np
 import soundfile as sf
 
 from conftest import SR, silence, sine_note
-from v2m.core.pipeline import analyze_signal, export_result
+from v2m.core.pipeline import analyze_signal
+from v2m.core.report import export_result
 
 
 def _melody() -> np.ndarray:
@@ -49,7 +50,7 @@ def test_export_result_one_interface(tmp_path):
 
     lines = open(tmp_path / "out.csv", encoding="utf-8").read().strip().splitlines()
     assert len(lines) == 5  # header + 4 notes
-    assert lines[0].startswith("index,start_s")
+    assert lines[0].startswith("index,measure,beat,start_s")
 
     xml = open(tmp_path / "out.musicxml", encoding="utf-8").read()
     assert xml.count("<measure ") >= 1

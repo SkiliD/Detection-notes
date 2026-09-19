@@ -1,4 +1,11 @@
-"""Segmentation temps réel d'une courbe de hauteur (hystérésis on/off)."""
+"""Real-time segmentation of a pitch curve (on/off hysteresis).
+
+Live has no look-ahead, so the offline rules (see notes.py: a legato glide is
+not a note) are applied differently: the pitch only CONFIRMS a note once it
+HOLDS, and the attack evidence (onsets.AttackTracker) pins the onset and marks
+a re-articulation. Without attacks the segmenter still works, but a note starts
+whenever its pitch settles — which is the end of the glide into it.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +14,12 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .music import hz_to_midi, midi_to_name
+from .onsets import AttackTracker
+
+HOLD_ST = 0.6            # pitch spread (semitones) tolerated to call it held
+MEMORY_S = 1.0           # seconds of frames kept in the pending window
+MAX_ATTACKS = 64         # recent attack times kept for the display/tests
+CLEAN_FRAMES = 5         # live pitch median (~115 ms): see LiveNoteSegmenter
 
 
 @dataclass
@@ -16,23 +29,86 @@ class LiveNote:
     midi: int
     confidence: float = 0.9
     figure: str | None = None
+    articulated: bool = False  # the singer re-attacked: a note of its own
 
     @property
     def duration(self) -> float:
         return self.end - self.start
 
 
-class LiveNoteSegmenter:
-    """Machine à états : IDLE -> PENDING -> ACTIVE.
+class LivePitchStream:
+    """Captured blocks -> pitch frames -> notes, with the attack evidence.
 
-    - Une note n'est validée ("on") qu'après `confirm_s` de hauteur stable.
-    - Elle se termine ("off") après `release_s` sans voix ou changement de
-      hauteur. Cela évite le clignotement de notes parasites.
+    Both front-ends (the GUI thread and the CLI session) need exactly this
+    chain: YIN on every block, the silence gate, the streaming attack tracker
+    and the segmenter. It lives here so the two live paths cannot drift
+    apart — they had already started to.
+
+    The pitch window is short (512 samples, ~23 ms) on purpose: the offline
+    path can afford 2048, the live display cannot — measured on a synthetic
+    voice, eighth notes at 150 BPM came out as 3/8 with a 2048 window (the
+    tracker averaged two notes into one) and 7/8 with 512. Short windows
+    cost more frames per second but each is 16x cheaper, and the low end
+    holds (a 55 Hz tone is read the same at every window).
     """
 
     def __init__(
         self,
-        confirm_s: float = 0.08,
+        sr: int,
+        gate_rms: float,
+        window: int = 512,
+        hop: int = 256,
+    ):
+        self.sr = sr
+        self.gate_rms = gate_rms
+        self.window = window
+        self.hop = hop
+        self.yin: "YinBlock | None" = None
+        self.attacks = AttackTracker()
+        self.seg = LiveNoteSegmenter()
+        self._attack_pending = False
+
+    def feed(self, block: np.ndarray, t: float) -> tuple[float, list[tuple[float, float]]]:
+        """Feed one captured block; return (level, frames pushed).
+
+        The attack flag is carried to the next frame when a block yields no
+        pitch frame, so the evidence is never silently dropped.
+        """
+        from .pitch import YinBlock  # local: keeps the module import-light
+
+        if self.yin is None:
+            self.yin = YinBlock(self.sr, window=self.window, hop=self.hop)
+        x = np.asarray(block, dtype=np.float64)
+        rms = AttackTracker.level(x)
+        if self.attacks.push(t, x):
+            self._attack_pending = True
+        frames: list[tuple[float, float]] = []
+        for ft, hz in self.yin.push(block):
+            if rms < self.gate_rms:
+                hz = float("nan")
+            self.seg.push(ft, hz, attack=self._attack_pending)
+            self._attack_pending = False
+            frames.append((ft, hz))
+        return rms, frames
+
+    def elapsed_notes(self) -> int:
+        return len(self.seg.notes)
+
+
+class LiveNoteSegmenter:
+    """State machine: IDLE -> PENDING -> ACTIVE.
+
+    - A note is only confirmed ("on") when its pitch has HELD for
+      `confirm_s`; the onset is then the attack that started it, or the
+      moment it settled. This is what keeps a glide from becoming a note.
+    - It ends ("off") on a new attack, on a pitch change of more than
+      `semitones`, or after `release_s` without voicing — so a blip or a
+      spurious frame does not split or invent a note.
+    """
+
+    def __init__(
+        self,
+        confirm_s: float = 0.14,
         release_s: float = 0.12,
         min_note_s: float = 0.10,
         semitones: float = 0.6,
@@ -45,33 +121,60 @@ class LiveNoteSegmenter:
         self.state = "IDLE"
         self.pending_start: float | None = None
         self.pending_midis: list[float] = []
+        self.pending_times: list[float] = []
+        self.pending_attack: float | None = None
         self.note_start: float | None = None
         self.note_midis: list[float] = []
         self.last_voiced_t: float | None = None
         self.last_hz: float = float("nan")
         self.notes: list[LiveNote] = []
+        self.attacks: list[float] = []
+        self.note_articulated = False
+        self.recent_midis: list[float] = []
 
     # ------------------------------------------------------------------
-    def push(self, t: float, hz: float) -> str:
-        """Avance d'une frame. Renvoie 'on', 'off' ou ''."""
+    def push(self, t: float, hz: float, attack: bool = False) -> str:
+        """Advance one frame. Return 'on', 'off' or ''.
+
+        `attack` is the live attack evidence (onsets.AttackTracker). It is
+        what makes a re-articulated note separable from a held one, and what
+        dates the onset at the consonant instead of at the moment the pitch
+        settles.
+        """
         ev = ""
-        voiced = hz == hz and hz > 0  # pas NaN
+        if attack:
+            self.attacks.append(t)
+            del self.attacks[:-MAX_ATTACKS]
+        voiced = hz == hz and hz > 0  # not NaN
         if voiced:
             self.last_hz = hz
-            m = float(hz_to_midi(hz))
+            m = self._clean(float(hz_to_midi(hz)))
+
+            if (
+                attack
+                and self.state == "ACTIVE"
+                and self.note_start is not None
+                and t - self.note_start >= self.min_note_s
+            ):
+                # the singer articulated again: a new note begins here
+                self._close_note(t)
+                ev = "off"
 
             if self.state == "IDLE":
-                self._start_pending(t, m)
+                self._start_pending(t, m, t if attack else None)
             elif self.state == "PENDING":
-                ref = float(np.median(self.pending_midis))
-                if abs(m - ref) <= self.semitones:
-                    self.pending_midis.append(m)
-                else:
-                    self._start_pending(t, m)
-                if t - self.pending_start >= self.confirm_s:
+                # a glide is FOLLOWED, never restarted: the pending window
+                # keeps the ladder of plateaus and only closes when the pitch
+                # holds, which is where the note really is.
+                self._extend_pending(t, m, t if attack else None)
+                window = self._hold_window(t)
+                if window is not None:
                     self.state = "ACTIVE"
-                    self.note_start = self.pending_start
-                    self.note_midis = list(self.pending_midis)
+                    # onset: the consonant when there was one, else the
+                    # moment the pitch settled
+                    self.note_start = self.pending_attack if self.pending_attack is not None else window[0][0]
+                    self.note_articulated = self.pending_attack is not None
+                    self.note_midis = [mm for _, mm in window]
                     ev = "on"
             elif self.state == "ACTIVE":
                 ref = float(np.median(self.note_midis))
@@ -89,32 +192,110 @@ class LiveNoteSegmenter:
                     ev = "off"
             elif self.state == "PENDING" and self.last_voiced_t is not None:
                 if t - self.last_voiced_t >= self.release_s:
-                    self.state = "IDLE"
-                    self.pending_start = None
-                    self.pending_midis = []
+                    self._reset_pending()
         return ev
 
     # ------------------------------------------------------------------
-    def _start_pending(self, t: float, m: float) -> None:
+    def _clean(self, m: float) -> float:
+        """Median of the last few live frames (the live pitch is not cleaned).
+
+        Offline, `notes.clean_pitch` runs a 9-frame median before segmenting;
+        live there is no such pass, so a vibrato keeps its full oscillation
+        and `HOLD_ST` has to be wide enough to accept it — which a slow slide
+        can then slip through. A 5-frame median (~115 ms) removes most of the
+        oscillation while preserving the note transitions (a median does not
+        blur a hard edge, unlike a moving average).
+        """
+        self.recent_midis.append(m)
+        if len(self.recent_midis) > CLEAN_FRAMES:
+            del self.recent_midis[0]
+        return float(np.median(self.recent_midis))
+
+    def _start_pending(self, t: float, m: float, attack_t: float | None = None) -> None:
         self.state = "PENDING"
         self.pending_start = t
         self.pending_midis = [m]
+        self.pending_times = [t]
+        self.pending_attack = attack_t
+
+    def _extend_pending(self, t: float, m: float, attack_t: float | None = None) -> None:
+        self.pending_midis.append(m)
+        self.pending_times.append(t)
+        if attack_t is not None and self.pending_attack is None:
+            self.pending_attack = attack_t
+        keep = [i for i, tt in enumerate(self.pending_times) if t - tt <= MEMORY_S]
+        if len(keep) < len(self.pending_times):
+            self.pending_midis = [self.pending_midis[i] for i in keep]
+            self.pending_times = [self.pending_times[i] for i in keep]
+
+    def _hold_window(self, t: float) -> list[tuple[float, float]] | None:
+        """The last `confirm_s` of frames when the pitch held there, else None.
+
+        This is the live form of "a note is a stable pitch": a glide keeps
+        moving, so it never fills the window — until it arrives, where the
+        note is confirmed at last (with its onset dated by the attack).
+
+        Two traps, both measured. The hold must SPAN `confirm_s`, not merely
+        fit inside it: a window holding the last frames of a glide satisfied
+        the spread test 40 ms after the note began, and confirmed a note on
+        every second frame of a 0.4 s portamento (thirteen notes for one
+        sung note). And it needs three frames or more, because live pitches
+        are not cleaned — two frames of a ladder can sit within `HOLD_ST` by
+        accident.
+        """
+        window = [(tt, mm) for tt, mm in zip(self.pending_times, self.pending_midis) if t - tt <= self.confirm_s]
+        if len(window) < 3:
+            return None
+        hop = (window[-1][0] - window[0][0]) / (len(window) - 1)
+        if t - window[0][0] < self.confirm_s - hop:
+            return None  # the window is not full yet: the pitch has not held
+        pitches = [mm for _, mm in window]
+        if max(pitches) - min(pitches) > HOLD_ST:
+            return None
+        return window
+
+    def _reset_pending(self) -> None:
+        self.state = "IDLE"
+        self.pending_start = None
+        self.pending_midis = []
+        self.pending_times = []
+        self.pending_attack = None
 
     def _close_note(self, end_t: float) -> None:
         if self.note_start is None or not self.note_midis:
-            self.state = "IDLE"
+            self._reset_pending()
             return
         start = self.note_start
         midi = int(round(float(np.median(self.note_midis))))
         if end_t - start >= self.min_note_s:
-            self.notes.append(LiveNote(start=start, end=end_t, midi=midi))
+            self.notes.append(
+                LiveNote(start=start, end=end_t, midi=midi, articulated=self.note_articulated)
+            )
         self.note_start = None
         self.note_midis = []
-        self.state = "IDLE"
+        self.note_articulated = False
+        self._reset_pending()
+
+    # ------------------------------------------------------------------
+    def active_note(self, t: float) -> LiveNote | None:
+        """The note being sung right now, as a preview (never stored).
+
+        `notes` only grows when a note ends, so the live display needs this
+        to draw a note while it is still being held. The returned object is
+        a throwaway: mutating it does not touch the session.
+        """
+        if self.state != "ACTIVE" or self.note_start is None or not self.note_midis:
+            return None
+        midi = int(round(float(np.median(self.note_midis))))
+        return LiveNote(
+            start=self.note_start,
+            end=max(t, self.note_start + 0.05),
+            midi=midi,
+        )
 
     # ------------------------------------------------------------------
     def current(self) -> tuple[float, float] | None:
-        """(midi flottant, hz) de la note en cours, ou None."""
+        """(float midi, hz) of the current note, or None."""
         if self.state == "ACTIVE" and self.note_midis:
             return float(np.median(self.note_midis)), self.last_hz
         if self.state == "PENDING" and self.pending_midis:
@@ -129,18 +310,21 @@ class LiveNoteSegmenter:
         return f"{name}  {self.last_hz:.1f} Hz"
 
     def flush(self, t: float) -> None:
-        """Force la fermeture de la note en cours + fusion des fragments.
+        """Force-close the current note and merge fragments.
 
-        Fusionne les notes consécutives de même hauteur séparées d'un trou
-        court (<= release_s) : un parasite ou une reprise rapide du même son
-        ne doit pas scinder la note musicale.
+        Merges consecutive same-pitch notes separated by a short gap
+        (<= release_s): a blip or a quick re-attack of the same sound must
+        not split the musical note.
         """
         if self.state == "ACTIVE":
             self._close_note(self.last_voiced_t if self.last_voiced_t is not None else t)
         merged: list[LiveNote] = []
         for n in self.notes:
+            # an articulated note is a note of its own: the singer re-attacked
+            # it, so the same-pitch merge below must not undo that decision
             if (
                 merged
+                and not n.articulated
                 and n.midi == merged[-1].midi
                 and n.start - merged[-1].end <= self.release_s
             ):

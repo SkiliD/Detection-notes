@@ -36,7 +36,7 @@ coverage.xml
 # --- Freebuff (données locales de l'assistant) ---
 .freebuff/
 
-# --- Artefacts audio générés ---
+# --- Artefacts audio générés (analyse, démo, tests) ---
 *.wav
 *.mp3
 *.flac
@@ -45,19 +45,20 @@ coverage.xml
 *.aac
 *.mid
 *.midi
-demo.*
 live_*
 
-# --- Partitions générées (export MusicXML) ---
+# --- Sorties d'analyse : partitions + rapports (export_result) ---
+# Tout ce que le pipeline écrit avec un préfixe arbitraire :
+# .musicxml / .pdf (gravure MuseScore-LilyPond) / .json / .csv
 *.musicxml
+*.pdf
+*.json
+*.csv
+# NB : le repo ne versionne aucun .json/.csv/.pdf aujourd'hui ; si un jour
+# un fichier de config JSON doit être suivi, le négocier ici avec un !.
 
 # exceptions : garder un éventuel audio d'exemple versionné
 !tests/data/*.wav
-
-# --- Rapports générés (si non versionnés) ---
-out.json
-out.csv
-out.musicxml
 
 # --- IDE / éditeurs ---
 .idea/
@@ -78,3 +79,17 @@ docker-compose.override.yml
 
 # --- Notes personnelles ---
 *.log
+
+# --- Exécution locale (fichiers racine jetables de validation) ---
+/demo_out.*
+/test68.*
+/demo_docker.*
+/demo_t1.*
+/demo_t2.*
+/demo_dbg.*
+/_ours.pdf
+/_via_py.pdf
+# captures et logs temporaires des vérifications GUI / PDF
+/shot_*.png
+/_*.txt
+/_dbg.log

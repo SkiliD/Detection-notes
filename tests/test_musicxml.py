@@ -1,4 +1,4 @@
-"""Tests export MusicXML : XML valide, mesures, armure, ties, triolets."""
+"""Tests export MusicXML : XML valide, mesures, armure, ties, triolets, silences."""
 
 import xml.etree.ElementTree as ET
 
@@ -93,10 +93,59 @@ def test_rests_fill_silences():
     root = _parse(xml)
     measures = root.findall("part/measure")
     assert len(measures) == 2
-    # 4 temps de silence en mesure 1 + 3 temps de silence en mesure 2
-    # (le beat 0 de la mesure 2 porte la note, beats 1-3 sont silencieux)
-    rest_notes = root.findall("part/measure/note/rest")
-    assert len(rest_notes) == 7
+    # mesure 1 entière silencieuse -> UNE pause entière (pas 4 soupirs) ;
+    # mesure 2 : la note au beat 0, puis 3 temps silencieux -> une blanche pointée
+    m1_rests = [n for n in measures[0].findall("note") if n.find("rest") is not None]
+    assert [(n.find("type").text, len(n.findall("dot"))) for n in m1_rests] == [("whole", 0)]
+    m2_rests = [n for n in measures[1].findall("note") if n.find("rest") is not None]
+    assert [(n.find("type").text, len(n.findall("dot"))) for n in m2_rests] == [("half", 1)]
+
+
+# ----------------------------------------------------------------- silences
+
+
+def test_leading_rest_uses_a_whole_rest_per_empty_measure():
+    # note au 5e temps : la mesure 1 entière est silencieuse -> une pause
+    notes = [Note(start=2.0, end=2.5, midi=60, confidence=0.9)]
+    xml = build_score_xml(notes, BPM, KEY_C)
+    root = _parse(xml)
+    m1 = root.findall("part/measure")[0]
+    types = [n.find("type").text for n in m1.findall("note") if n.find("rest") is not None]
+    assert types == ["whole"]
+
+
+def test_breath_rest_between_phrases_is_a_quarter_rest():
+    # 0,5 s de respiration (1 temps à 120 BPM) -> soupir, pas silence générique
+    from v2m.core.rests import Rest
+
+    notes = [
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),
+        Note(start=1.0, end=1.5, midi=62, confidence=0.9),
+        Note(start=2.0, end=2.5, midi=64, confidence=0.9),
+    ]
+    rests = [Rest(start=0.5, end=1.0), Rest(start=1.5, end=2.0)]
+    xml = build_score_xml(notes, BPM, KEY_C, rests=rests)
+    root = _parse(xml)
+    m1 = root.findall("part/measure")[0]
+    types = [n.find("type").text for n in m1.findall("note") if n.find("rest") is not None]
+    assert types == ["quarter", "quarter"]
+
+
+def test_unlabeled_rest_still_engraves_its_duration():
+    # un silence sans figure (tempo inconnu) se grave d'après sa durée
+    from v2m.core.rests import Rest
+
+    notes = [
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),
+        Note(start=1.5, end=2.0, midi=62, confidence=0.9),
+    ]
+    rests = [Rest(start=0.5, end=1.5)]          # 2 temps, figure inconnue
+    xml = build_score_xml(notes, BPM, KEY_C, rests=rests)
+    root = _parse(xml)
+    rest_notes = [n for n in root.findall("part/measure/note") if n.find("rest") is not None]
+    assert len(rest_notes) == 1                           # fusionnée, pas fragmentée
+    assert rest_notes[0].find("duration").text == "24"    # 2 temps = 24 divisions
+    assert rest_notes[0].find("type").text == "half"      # vraie valeur, pas générique
 
 
 def test_save_musicxml_writes_file(tmp_path):

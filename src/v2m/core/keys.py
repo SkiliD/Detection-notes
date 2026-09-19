@@ -1,4 +1,4 @@
-"""Détection de tonalité : Krumhansl-Schmuckler sur l'histogramme des pitch-classes."""
+"""Key detection: Krumhansl-Schmuckler on the pitch-class histogram."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ KS_MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
 class KeyCandidate:
     tonic: str       # "C", "F#", ...
     mode: str        # "major" | "minor"
-    score: float     # corrélation de Pearson avec le profil
+    score: float     # Pearson correlation with the profile
 
     @property
     def label(self) -> str:
@@ -28,11 +28,11 @@ class KeyCandidate:
 @dataclass
 class KeyResult:
     best: KeyCandidate
-    alternatives: list[KeyCandidate]  # jusqu'à 2 autres candidates
+    alternatives: list[KeyCandidate]  # up to 2 other candidates
 
 
 def pitch_class_histogram(notes, weights: str = "duration") -> np.ndarray:
-    """Histogramme des 12 pitch-classes pondéré par durée (ou confiance)."""
+    """Histogram of the 12 pitch classes weighted by duration (or confidence)."""
     hist = np.zeros(12)
     for n in notes:
         w = (n.end - n.start) if weights == "duration" else n.confidence
@@ -47,9 +47,9 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def detect_key(notes, top_k: int = 3) -> KeyResult:
-    """Krumhansl-Schmuckler : corrélation histogramme vs 24 profils maj/min.
+    """Krumhansl-Schmuckler: histogram correlation against 24 maj/min profiles.
 
-    Renvoie la meilleure candidate + les suivantes (jusqu'à top_k).
+    Returns the best candidate plus the runner-ups (up to top_k).
     """
     hist = pitch_class_histogram(notes)
     if hist.sum() <= 0:
@@ -60,8 +60,8 @@ def detect_key(notes, top_k: int = 3) -> KeyResult:
 
     cands: list[KeyCandidate] = []
     for shift in range(12):
-        # tonic = PC_NAMES[shift] : le degré j du profil correspond à la
-        # pitch-class (shift + j) % 12 -> roll de -shift
+        # tonic = PC_NAMES[shift]: profile degree j maps to pitch class
+        # (shift + j) % 12 -> roll by -shift
         rolled = np.roll(hist, -shift)
         for mode, profile in (("major", KS_MAJ), ("minor", KS_MIN)):
             cands.append(

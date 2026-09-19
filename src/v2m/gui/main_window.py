@@ -1,4 +1,4 @@
-"""Fenêtre principale de l'application Voix -> MIDI."""
+"""Main window of the Voix -> MIDI application."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -28,17 +27,50 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import audio_io
-from ..core.pipeline import AnalyzeOptions, export_result
-from .widgets import LiveIndicator, PianoRoll, ResultsPanel, WaveformView
+from ..core.audio_io import LiveCapture
+from ..core.figures import label_notes
+from ..core.i18n import get_language, set_language, tr
+from ..core.liveseg import LiveNoteSegmenter, LivePitchStream
+from ..core.pdf_export import PdfExportError, find_notation_tool
+from ..core.pipeline import AnalyzeOptions
+from ..core.playback import NotePlayer
+from ..core.report import engrave_pdf, export_result
+from ..core.tempo import estimate_bpm_live
+from .staff import StaffView
+from .widgets import (
+    STYLESHEET,
+    ErrorBanner,
+    LiveIndicator,
+    PianoRoll,
+    PianoView,
+    ResultsPanel,
+    WaveformView,
+    action_button_style,
+)
 
-AUDIO_FILTER = "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac);;Tous les fichiers (*)"
+AUDIO_EXTS = audio_io.AUDIO_EXTS  # single source of truth (core.audio_io)
+
+
+def audio_filter() -> str:
+    """File-dialog filter in the current language.
+
+    Built on demand: `tr()` must run after the persisted language is
+    restored, so this cannot be a module constant.
+    """
+    return tr("ui audio filter")
+
+
+def clock(t: float) -> str:
+    """Elapsed seconds as mm:ss (live status line)."""
+    t = max(0.0, float(t))
+    return f"{int(t // 60):02d}:{int(t % 60):02d}"
 
 
 class AnalyzeThread(QThread):
-    """Analyse d'un fichier dans un thread."""
+    """Analyze an audio file in a background thread."""
 
     progress = pyqtSignal(float, str)
-    finishedOk = pyqtSignal(object)
+    finishedOk = pyqtSignal(object, bytes)  # result + raw signal (for the waveform)
     failed = pyqtSignal(str)
 
     def __init__(self, path: str, opts: AnalyzeOptions):
@@ -48,9 +80,9 @@ class AnalyzeThread(QThread):
 
     def run(self) -> None:
         try:
-            y = audio_io.load_file(self.path)
+            y = audio_io.load_file(self.path)  # decoded exactly once
             res = self._analyze(y)
-            self.finishedOk.emit(res)
+            self.finishedOk.emit(res, np.asarray(y, dtype=np.float32).tobytes())
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -67,12 +99,15 @@ class AnalyzeThread(QThread):
 
 
 class LiveThread(QThread):
-    """Capture micro + pitch temps réel."""
+    """Microphone capture + real-time pitch tracking.
+
+    The capture itself (device stream, block queue, worker thread) lives in
+    `core.audio_io.LiveCapture`, which keeps YIN out of the audio callback.
+    This thread only owns the segmenter and the finished signal.
+    """
 
     blockStats = pyqtSignal(float, float)
     pitchFrame = pyqtSignal(float, float)
-    noteOn = pyqtSignal(float, int)
-    noteOff = pyqtSignal(float, int)
     recordingFinished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -80,97 +115,96 @@ class LiveThread(QThread):
         super().__init__()
         self.min_conf = min_conf
         self._stop = False
-        self._chunks: list[np.ndarray] = []
-        self._stream = None
-        self.seg = None
-        self.yin = None
+        self.capture: LiveCapture | None = None
+        self.seg: LiveNoteSegmenter | None = None
+        self.stream: LivePitchStream | None = None
 
     def run(self) -> None:
-        import sounddevice as sd
-
-        from ..core.liveseg import LiveNoteSegmenter
-        from ..core.pitch import YinBlock
-
-        self.seg = LiveNoteSegmenter()
-        self.yin = None
-        samplerate = 44_100
-
-        def callback(indata, frames, t_info, status):  # noqa: ANN001
-            if status:
-                print(f"[micro] {status}")
-            mono = np.asarray(indata[:, 0], dtype=np.float32)
-            self._chunks.append(mono.copy())
-            rms = float(np.sqrt(np.mean(mono.astype(np.float64) ** 2)))
-            t_block = sum(len(c) for c in self._chunks) / samplerate
-            self.blockStats.emit(t_block, rms)
-            if self.yin is None:
-                self.yin = YinBlock(samplerate, window=2048, hop=1024)
-            for ft, hz in self.yin.push(mono):
-                if rms < 0.008:
-                    hz = float("nan")
-                ev = self.seg.push(ft, hz)
-                self.pitchFrame.emit(ft, hz)
-                if ev == "on" and self.seg.notes:
-                    self.noteOn.emit(ft, self.seg.notes[-1].midi)
-                elif ev == "off" and self.seg.notes:
-                    self.noteOff.emit(ft, self.seg.notes[-1].midi)
-
+        self.stream = None
+        self.seg = None
+        self.capture = LiveCapture(on_block=self._process_block, sr=audio_io.SR)
         try:
-            self._stream = sd.InputStream(
-                samplerate=samplerate, channels=1, blocksize=1024, callback=callback
-            )
-            self._stream.start()
+            self.capture.start()
         except Exception as e:
-            self.failed.emit(f"Micro indisponible : {e}")
+            self.failed.emit(tr("err ui mic").format(e=e))
             return
 
         while not self._stop:
             self.msleep(50)
-        self._stream.stop()
-        self._stream.close()
+        self.capture.stop()
+        self.recordingFinished.emit(self.capture.signal())
 
-        y = self._signal()
-        self.recordingFinished.emit(y)
+    def _process_block(self, block: np.ndarray, t: float) -> None:
+        """Pitch-track one captured block and feed the live chain."""
+        if self.stream is None:
+            self.stream = LivePitchStream(self.capture.samplerate, gate_rms=audio_io.GATE_RMS)
+            self.seg = self.stream.seg
+        closed = self.stream.elapsed_notes()
+        rms, frames = self.stream.feed(block, t)
+        self.blockStats.emit(t, rms)
+        for ft, hz in frames:
+            self.pitchFrame.emit(ft, hz)
+        if self.seg is not None and self.stream.elapsed_notes() > closed:
+            # Label figures at note END (approximate BPM from the note
+            # onsets so far) so the closed note shows its figure as
+            # soon as it lands on the rolling piano roll.
+            bpm = estimate_bpm_live(self.seg.notes)
+            if bpm:
+                label_notes(self.seg.notes, bpm)
 
     def stop(self) -> None:
         self._stop = True
 
     def elapsed(self) -> float:
-        return sum(len(c) for c in self._chunks) / 44_100
-
-    def _signal(self) -> np.ndarray:
-        if not self._chunks:
-            return np.zeros(0, dtype=np.float32)
-        y = np.concatenate(self._chunks).astype(np.float32)
-        if 44_100 == audio_io.SR:
-            return y
-        n_out = int(len(y) * audio_io.SR / 44_100)
-        idx = np.linspace(0, len(y) - 1, n_out)
-        return np.interp(idx, np.arange(len(y)), y).astype(np.float32)
+        return self.capture.elapsed() if self.capture is not None else 0.0
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Voix → MIDI — détection de notes, tempo et tonalité")
+        get_language()  # restore the persisted choice before building the UI
+        self.setWindowTitle(tr("ui window title"))
         self.resize(1280, 780)
         self.setAcceptDrops(True)
 
-        self.result = None            # dernière AnalysisResult
+        self.result = None            # last AnalysisResult
         self.analyze_thread: AnalyzeThread | None = None
         self.live_thread: LiveThread | None = None
         self.source_path: str | None = None
+        self._signal_cache: dict[str, np.ndarray] = {}  # source -> decoded audio
+        self._live_signal: np.ndarray | None = None
         self._live_pitch_t: list[float] = []
         self._live_pitch_m: list[float] = []
+        self._live_curve = None
+        self._live_t = 0.0          # capture time of the last audio block
+        self.player: NotePlayer | None = None
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(33)  # ~30 fps playhead updates
+        self._play_timer.timeout.connect(self._on_play_tick)
+        # live follow: ~20 fps scrolling window + cursor (the audio thread is
+        # far too uneven to drive the view directly)
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(50)
+        self._live_timer.timeout.connect(self._on_live_tick)
 
+        # Single error banner shown above every page (no modal error popups).
         self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        self.error_banner = ErrorBanner()
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self.error_banner)
+        root.addWidget(self.stack, stretch=1)
+        self.setCentralWidget(central)
+
         self.page_home = self._build_home_page()
         self.page_analyze = self._build_analyze_page()
         self.page_live = self._build_live_page()
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_analyze)
         self.stack.addWidget(self.page_live)
+        self.retranslate()
 
     # ------------------------------------------------------------------
     # Pages
@@ -178,44 +212,74 @@ class MainWindow(QMainWindow):
     def _build_home_page(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addStretch(1)
-        title = QLabel("<h1>🎤 Voix → MIDI</h1>")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(title)
-        sub = QLabel("Détecte les notes, le tempo et la tonalité de votre voix,\npuis exporte un fichier MIDI + un rapport JSON/CSV.")
-        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(sub)
-        lay.addSpacing(30)
-
-        btn_file = QPushButton("📁  Analyser un fichier audio")
-        btn_file.setMinimumHeight(52)
-        btn_file.setStyleSheet("font-size: 16px;")
-        btn_file.clicked.connect(self.on_open_file)
-        lay.addWidget(btn_file)
-
-        btn_live = QPushButton("🎤  Chanter au micro (temps réel)")
-        btn_live.setMinimumHeight(52)
-        btn_live.setStyleSheet("font-size: 16px;")
-        btn_live.clicked.connect(self.on_start_live)
-        lay.addWidget(btn_live)
-
-        hint = QLabel("Astuce : glissez-déposez un fichier audio dans cette fenêtre.")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet("color: #888;")
-        lay.addWidget(hint)
         lay.addStretch(2)
+        self._title = QLabel("<h1>🎤 Voix → MIDI</h1>")
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._title)
+        self._subtitle = QLabel("")
+        self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._subtitle)
+        lay.addSpacing(22)
+
+        # first-run guidance: three numbered steps, always visible
+        self._steps = QLabel("")
+        self._steps.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._steps.setWordWrap(True)
+        self._steps.setMaximumWidth(720)
+        self._steps.setStyleSheet(
+            "color: #8a97a5; font-size: 9pt;"
+            "background: #20262e; border: 1px solid #2e3742; border-radius: 8px;"
+            "padding: 10px 18px;"
+        )
+        steps_lay = QHBoxLayout()
+        steps_lay.addStretch(1)
+        steps_lay.addWidget(self._steps)
+        steps_lay.addStretch(1)
+        lay.addLayout(steps_lay)
+        lay.addSpacing(18)
+
+        self.btn_file = QPushButton("")
+        self.btn_file.setMinimumHeight(54)
+        self.btn_file.setStyleSheet(action_button_style(primary=True))
+        self.btn_file.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_file.clicked.connect(self.on_open_file)
+        lay.addWidget(self.btn_file)
+
+        self.btn_live = QPushButton("")
+        self.btn_live.setMinimumHeight(54)
+        self.btn_live.setStyleSheet(action_button_style(primary=False))
+        self.btn_live.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_live.clicked.connect(self.on_start_live)
+        lay.addWidget(self.btn_live)
+
+        # language selector: click to toggle fr <-> en, persisted on disk
+        self.btn_lang = QPushButton("")
+        self.btn_lang.setMinimumHeight(40)
+        self.btn_lang.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_lang.clicked.connect(self.on_toggle_language)
+        lang_lay = QHBoxLayout()
+        lang_lay.addStretch(1)
+        lang_lay.addWidget(self.btn_lang)
+        lang_lay.addStretch(1)
+        lay.addLayout(lang_lay)
+
+        self._hint = QLabel("")
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setStyleSheet("color: #7f8b99;")
+        lay.addWidget(self._hint)
+        lay.addStretch(3)
         return w
 
     def _build_analyze_page(self) -> QWidget:
         w = QWidget()
         root = QVBoxLayout(w)
 
-        # barre du haut
+        # top bar
         top = QHBoxLayout()
-        self.btn_back = QPushButton("← Accueil")
+        self.btn_back = QPushButton("")
         self.btn_back.clicked.connect(lambda: self.stack.setCurrentWidget(self.page_home))
         top.addWidget(self.btn_back)
-        self.label_file = QLabel("Aucun fichier")
+        self.label_file = QLabel("")
         self.label_file.setStyleSheet("font-weight: bold;")
         top.addWidget(self.label_file, stretch=1)
         root.addLayout(top)
@@ -224,39 +288,66 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 100)
         root.addWidget(self.progress)
 
-        # zone centrale : vues + panneau
+        # center: views + side panel
         body = QHBoxLayout()
         left = QVBoxLayout()
         self.waveform = WaveformView()
         self.piano = PianoRoll()
+        self.piano.seek_requested.connect(self.on_seek)
+        self.staff = StaffView()
         left.addWidget(self.waveform, stretch=1)
+        left.addWidget(self.staff, stretch=2)   # the score itself
         left.addWidget(self.piano, stretch=2)
+
+        # playback bar: play/stop the analysis + live playhead position
+        pb = QHBoxLayout()
+        self.btn_play = QPushButton("")
+        self.btn_play.setMinimumWidth(64)
+        self.btn_play.clicked.connect(self.on_toggle_play)
+        self.label_play_pos = QLabel("")
+        pb.addWidget(self.btn_play)
+        pb.addWidget(self.label_play_pos, stretch=1)
+        left.addLayout(pb)
+        # keyboard view: detected notes light their keys while playing
+        self.piano_keys = PianoView()
+        left.addWidget(self.piano_keys)
         body.addLayout(left, stretch=3)
 
         right = QVBoxLayout()
         self.results = ResultsPanel()
         right.addWidget(self.results, stretch=1)
 
-        opts = QGroupBox("Options d'export")
+        opts = QGroupBox("")
         form = QGridLayout(opts)
-        self.chk_quantize = QCheckBox("Quantifier sur la grille 1/16")
+        self._grp_opts = opts
+
+        self.chk_quantize = QCheckBox("")
         form.addWidget(self.chk_quantize, 0, 0, 1, 2)
-        form.addWidget(QLabel("Transposition (demi-tons)"), 1, 0)
+        self._lbl_transpose = QLabel("")
+        form.addWidget(self._lbl_transpose, 1, 0)
         self.spin_transpose = QSpinBox()
         self.spin_transpose.setRange(-48, 48)
         form.addWidget(self.spin_transpose, 1, 1)
-        self.chk_notation = QCheckBox("Mode notation (figures colorées)")
+        self.chk_notation = QCheckBox("")
         self.chk_notation.toggled.connect(self._on_notation_toggled)
         form.addWidget(self.chk_notation, 2, 0, 1, 2)
+        self.chk_pdf = QCheckBox("")
+        self.chk_pdf.setEnabled(find_notation_tool() is not None)
+        form.addWidget(self.chk_pdf, 3, 0, 1, 2)
+        # badge explaining WHY the PDF option is off (first-run clarity)
+        self.lbl_pdf_note = QLabel("")
+        self.lbl_pdf_note.setStyleSheet("color: #7f8b99; font-size: 8pt; font-style: italic;")
+        self.lbl_pdf_note.setWordWrap(True)
+        form.addWidget(self.lbl_pdf_note, 4, 0, 1, 2)
         right.addWidget(opts)
 
-        btn_export = QPushButton("💾  Ré-exporter avec ces options")
-        btn_export.clicked.connect(self.on_export_again)
-        right.addWidget(btn_export)
+        self.btn_export = QPushButton("")
+        self.btn_export.clicked.connect(self.on_export_again)
+        right.addWidget(self.btn_export)
 
-        btn_open = QPushButton("📁  Ouvrir un autre fichier")
-        btn_open.clicked.connect(self.on_open_file)
-        right.addWidget(btn_open)
+        self.btn_open = QPushButton("")
+        self.btn_open.clicked.connect(self.on_open_file)
+        right.addWidget(self.btn_open)
         body.addLayout(right, stretch=1)
         root.addLayout(body, stretch=1)
         return w
@@ -265,10 +356,10 @@ class MainWindow(QMainWindow):
         w = QWidget()
         root = QVBoxLayout(w)
         top = QHBoxLayout()
-        btn_back = QPushButton("← Arrêter / Accueil")
-        btn_back.clicked.connect(self.on_stop_live)
-        top.addWidget(btn_back)
-        self.label_live_status = QLabel("Préparation du micro…")
+        self.btn_stop_live = QPushButton("")
+        self.btn_stop_live.clicked.connect(self.on_stop_live)
+        top.addWidget(self.btn_stop_live)
+        self.label_live_status = QLabel("")
         top.addWidget(self.label_live_status, stretch=1)
         root.addLayout(top)
 
@@ -277,22 +368,160 @@ class MainWindow(QMainWindow):
         mid.addWidget(self.live_indicator, stretch=1)
         self.piano_live = PianoRoll()
         mid.addWidget(self.piano_live, stretch=3)
-        root.addLayout(mid, stretch=1)
+        root.addLayout(mid, stretch=2)
+        # the score as it is being sung, scrolling under the staff
+        self.staff_live = StaffView(live=True)
+        root.addWidget(self.staff_live, stretch=2)
         return w
 
     # ------------------------------------------------------------------
-    # Fichier
+    # Language (fr / en, persisted)
+    # ------------------------------------------------------------------
+    def on_toggle_language(self) -> None:
+        """Toggle fr <-> en and retranslate the whole UI immediately."""
+        set_language("en" if get_language() == "fr" else "fr")
+        self.retranslate()
+        self.results.retranslate()
+
+    def retranslate(self) -> None:
+        """Refresh every window string in the current language."""
+        self.setWindowTitle(tr("ui window title"))
+        self._title.setText("<h1>🎤 Voix → MIDI</h1>")
+        self._subtitle.setText(tr("ui app subtitle"))
+        self._steps.setText(tr("ui steps"))
+        self.btn_file.setText(tr("ui open file"))
+        self.btn_live.setText(tr("ui sing live"))
+        self.btn_lang.setText(
+            tr("ui lang button") if get_language() == "fr" else "🌐  Langue : English"
+        )
+        self._hint.setText(tr("ui drop hint"))
+        self.btn_back.setText(tr("ui back home"))
+        if self.source_path:
+            self.label_file.setText(Path(self.source_path).name)
+        else:
+            self.label_file.setText(tr("ui no file"))
+        self._grp_opts.setTitle(tr("ui export options"))
+        self.chk_quantize.setText(tr("ui quantize"))
+        self._lbl_transpose.setText(tr("ui transpose"))
+        self.chk_notation.setText(tr("ui notation mode"))
+        self.chk_pdf.setText(tr("ui pdf option"))
+        self.chk_pdf.setToolTip(tr("ui pdf tooltip"))
+        self.lbl_pdf_note.setVisible(not self.chk_pdf.isEnabled())
+        self.lbl_pdf_note.setText(tr("ui pdf badge"))
+        self.btn_export.setText(tr("ui re-export"))
+        self.btn_open.setText(tr("ui open another"))
+        self.btn_play.setText("▶")
+        self.btn_play.setToolTip(tr("ui play tooltip"))
+        self.label_play_pos.setText(tr("ui play pos"))
+        self.btn_stop_live.setText(tr("ui stop live"))
+        for view in (self.staff, self.staff_live):
+            view.setToolTip(tr("ui staff tooltip"))
+        if self.live_thread is None or not self.live_thread.isRunning():
+            self.label_live_status.setText(tr("ui mic preparing"))
+        self.results.retranslate()
+
+    # ------------------------------------------------------------------
+    # Errors (inline red banner)
+    # ------------------------------------------------------------------
+    def show_error(self, message: str, timeout: int = 0) -> None:
+        """Show an error in the red banner; auto-hide after `timeout` ms if set."""
+        self.error_banner.show_error(message)
+        if timeout:
+            QTimer.singleShot(timeout, self.error_banner.clear)
+
+    def _on_error(self, msg: str) -> None:
+        self.show_error(msg, timeout=8_000)
+
+    # ------------------------------------------------------------------
+    # Playback (ear-check of the analysis, synced playhead)
+    # ------------------------------------------------------------------
+    def on_toggle_play(self) -> None:
+        if self.result is None:
+            return
+        if self.player is not None and self.player.playing:
+            self.stop_playback()
+            return
+        if self.player is None or self.player.signal is None:
+            return
+        self.btn_play.setText("■")
+        self.player.play()
+        self._play_timer.start()
+
+    def on_seek(self, t: float) -> None:
+        """Double-click on the piano roll: play from there (or just move)."""
+        if self.result is None or self.player is None:
+            return
+        self.player.stop()
+        self._play_timer.stop()
+        self.piano.set_playhead(t, follow=False)
+        self.waveform.set_position(t)
+        if t < self.player.duration - 0.05:
+            self.player.play_from(t)
+            self.btn_play.setText("■")
+            self._play_timer.start()
+
+    def _on_play_tick(self) -> None:
+        if self.player is None:
+            self._play_timer.stop()
+            return
+        t = self.player.position()
+        self.piano.set_playhead(t)
+        self.waveform.set_position(t)
+        self.piano_keys.set_playhead(t)
+        self.label_play_pos.setText(
+            f"{int(t // 60):02d}:{int(t % 60):02d} / {int(self.player.duration // 60):02d}:{int(self.player.duration % 60):02d}"
+        )
+        if not self.player.playing:
+            self._play_timer.stop()
+            self.btn_play.setText("▶")
+
+    def stop_playback(self) -> None:
+        self._play_timer.stop()
+        if self.player is not None:
+            self.player.stop()
+        self.btn_play.setText("▶")
+        self.piano_keys.set_playhead(-1.0)  # all keys up
+
+    # ------------------------------------------------------------------
+    # File analysis
     # ------------------------------------------------------------------
     def on_open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Choisir un fichier audio", "", AUDIO_FILTER)
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("ui choose file"), "", audio_filter()
+        )
         if not path:
             return
         self.start_analysis(path)
 
     def start_analysis(self, path: str) -> None:
+        """Validate the input early, then run the analysis in a thread."""
+        self.error_banner.clear()
+        self.btn_play.setText("▶")
+        self.label_play_pos.setText(tr("ui analyzing file"))
+        p = Path(path)
+        if not p.exists():
+            self.show_error(tr("err ui missing").format(path=path))
+            self.stack.setCurrentWidget(self.page_home)
+            return
+        if p.suffix.lower() not in AUDIO_EXTS:
+            self.show_error(
+                tr("err ui unsupported format").format(
+                    ext=p.suffix or "?",
+                    fmts=", ".join(e.lstrip(".") for e in AUDIO_EXTS),
+                )
+            )
+            return
+        try:
+            if p.stat().st_size == 0:
+                self.show_error(tr("err ui empty").format(name=p.name))
+                return
+        except OSError as e:
+            self.show_error(tr("err ui unreadable").format(e=e))
+            return
+
         self.stack.setCurrentWidget(self.page_analyze)
         self.source_path = path
-        self.label_file.setText(Path(path).name)
+        self.label_file.setText(p.name)
         self.progress.setValue(0)
         opts = AnalyzeOptions(min_conf=0.6)
         self.analyze_thread = AnalyzeThread(path, opts)
@@ -305,22 +534,18 @@ class MainWindow(QMainWindow):
         self.progress.setValue(int(f * 100))
         self.label_file.setText(f"{Path(self.source_path).name} — {msg}")
 
-    def _on_analysis_done(self, res) -> None:
+    def _on_analysis_done(self, res, signal_bytes: bytes) -> None:
         self.result = res
-        self.label_file.setText(Path(res.source).name)
-        self.results.set_results(res)
-        self.waveform.set_signal(audio_io.load_file(res.source), audio_io.SR)
-        self.piano.set_notation_mode(self.chk_notation.isChecked())
-        self.piano.set_notes(res.notes)
-        self.piano.set_pitch_curve(res.pitch)
+        # keep the decoded signal so re-display never re-decodes the file
+        self._signal_cache = {res.source: np.frombuffer(signal_bytes, dtype=np.float32)}
+        self._live_signal = None  # a file view must never show a live take
+        self.stop_playback()
+        self.player = NotePlayer(res.notes, sr=audio_io.SR)
+        self._show_result(res)
         self._export_results()
 
     def _on_notation_toggled(self, checked: bool) -> None:
         self.piano.set_notation_mode(checked)
-
-    def _on_error(self, msg: str) -> None:
-        QMessageBox.critical(self, "Erreur", msg)
-        self.stack.setCurrentWidget(self.page_home)
 
     # ------------------------------------------------------------------
     # Exports
@@ -332,16 +557,25 @@ class MainWindow(QMainWindow):
         src = Path(res.source if res.source != "live" else f"live_{time.strftime('%Y%m%d_%H%M%S')}")
         stem = src.with_suffix("") if src.suffix else src
         quantize_s = res.quantize_step(16) if self.chk_quantize.isChecked() else None
-        export_result(
-            res,
-            stem,
-            quantize_s=quantize_s,
-            transpose=self.spin_transpose.value(),
-        )
-        self.statusBar().showMessage(
-            f"Exporté : {stem.name}.mid, {stem.name}.musicxml, {stem.name}.json, {stem.name}.csv",
-            10_000,
-        )
+        pdf_written = False
+        try:
+            export_result(
+                res, stem, quantize_s=quantize_s, transpose=self.spin_transpose.value()
+            )
+            if self.chk_pdf.isChecked():
+                engrave_pdf(stem)  # optional, external tool — after the artifacts
+                pdf_written = True
+        except PdfExportError as e:
+            # the other artifacts were written; only the PDF is missing
+            self.show_error(tr("err ui pdf").format(e=e), timeout=6_000)
+        except Exception as e:  # never crash the UI on a failed export
+            self.show_error(tr("err ui export failed").format(e=e), timeout=8_000)
+            return
+        exts = [".mid", ".musicxml", ".json", ".csv"] + ([".pdf"] if pdf_written else [])
+        files = ", ".join(f"{stem.name}{ext}" for ext in exts)
+        # the action acknowledges itself where the eye already is
+        self.label_play_pos.setText(tr("ui exported ok"))
+        self.statusBar().showMessage(tr("ui status exported").format(files=files), 10_000)
 
     def on_export_again(self) -> None:
         self._export_results()
@@ -350,46 +584,87 @@ class MainWindow(QMainWindow):
     # Live
     # ------------------------------------------------------------------
     def on_start_live(self) -> None:
+        self.error_banner.clear()
         self.stack.setCurrentWidget(self.page_live)
-        self.label_live_status.setText("🎤 Enregistrement… (chantez !)")
         self._live_pitch_t = []
         self._live_pitch_m = []
-        # courbe live sur le piano roll
+        self._live_t = 0.0
+        self.label_live_status.setText(tr("ui live progress").format(t="00:00", notes=0))
+        # live pitch curve on the scrolling piano roll (drop the previous take's)
+        self.piano_live.begin_live()
+        self.staff_live.clear()
+        if self._live_curve is not None:
+            self.piano_live.removeItem(self._live_curve)
         self._live_curve = self.piano_live.plot(
             [], [], pen=None, symbol="o", symbolSize=3, symbolBrush=(120, 200, 255, 180)
         )
         self.live_thread = LiveThread(min_conf=0.5)
-        self.live_thread.blockStats.connect(self.live_indicator.update_rms)
+        self.live_thread.blockStats.connect(self._on_live_block)
         self.live_thread.pitchFrame.connect(self._on_live_pitch)
-        self.live_thread.noteOn.connect(self._on_live_note_on)
-        self.live_thread.noteOff.connect(self._on_live_note_off)
         self.live_thread.recordingFinished.connect(self._on_live_finished)
-        self.live_thread.failed.connect(self._on_error)
+        self.live_thread.failed.connect(self._on_live_failed)
         self.live_thread.start()
+        self._live_timer.start()
+
+    def _on_live_block(self, t: float, rms: float) -> None:
+        """Telemetry from each captured block: capture time + input level."""
+        self._live_t = t
+        self.live_indicator.update_rms(rms)
+
+    def _on_live_tick(self) -> None:
+        """Live follow (~20 fps): render the take, scroll, move the cursor.
+
+        Single owner of the live rendering: the audio thread only publishes
+        notes, so the roll stays in sync even if a block or an event is late.
+        """
+        thr = self.live_thread
+        if thr is None or thr.seg is None:
+            return
+        t = self._live_t or thr.elapsed()
+        notes = thr.seg.notes
+        preview = thr.seg.active_note(t)
+        self.piano_live.set_notation_mode(True)
+        self.piano_live.set_notes(notes)
+        self.piano_live.set_live_preview(preview)
+        midis = [n.midi for n in notes[-64:]]
+        if preview is not None:
+            midis.append(preview.midi)
+        self.piano_live.set_live_pitch_range(midis)
+        self.piano_live.set_live_cursor(t)
+        self.staff_live.set_live(
+            notes,
+            preview,
+            bpm=estimate_bpm_live(notes) or 120.0,
+        )
+        self.label_live_status.setText(
+            tr("ui live progress").format(t=clock(t), notes=len(notes))
+        )
 
     def _on_live_pitch(self, t: float, hz: float) -> None:
         cur = self.live_thread.seg.current() if self.live_thread and self.live_thread.seg else None
         self.live_indicator.update_note(cur[0] if cur else None, hz)
-        if hz == hz and hz > 0:
+        if hz == hz and hz > 0:  # NaN check
             self._live_pitch_t.append(t)
             self._live_pitch_m.append(69 + 12 * np.log2(hz / 440.0))
-            # garde ~15 s de fenêtre
-            while self._live_pitch_t and t - self._live_pitch_t[0] > 15.0:
+            # keep the pitch cloud inside the scrolling window
+            while self._live_pitch_t and t - self._live_pitch_t[0] > self.piano_live.LIVE_SPAN:
                 self._live_pitch_t.pop(0)
                 self._live_pitch_m.pop(0)
             self._live_curve.setData(self._live_pitch_t, self._live_pitch_m)
 
-    def _on_live_note_on(self, t: float, midi: int) -> None:
-        self.piano_live.set_notes(self.live_thread.seg.notes)
-
-    def _on_live_note_off(self, t: float, midi: int) -> None:
-        self.piano_live.set_notes(self.live_thread.seg.notes)
+    def _on_live_failed(self, msg: str) -> None:
+        self._live_timer.stop()
+        self.label_live_status.setText(tr("ui mic preparing"))
+        self._on_error(msg)
 
     def _on_live_finished(self, y: np.ndarray) -> None:
-        """Analyse finale de l'enregistrement live."""
-        self.label_live_status.setText("Analyse finale…")
+        """Final analysis of the live recording."""
+        self._live_timer.stop()
+        self.piano_live.set_live_preview(None)
+        self.label_live_status.setText(tr("ui analyzing"))
+        self._live_signal = y
         if len(y) < audio_io.SR // 2:
-            QMessageBox.information(self, "Enregistrement court", "Enregistrement trop court pour être analysé.")
+            self.show_error(tr("err ui too short"))
             self.stack.setCurrentWidget(self.page_home)
             return
 
@@ -419,25 +694,57 @@ class MainWindow(QMainWindow):
 
     def _on_live_analysis_done(self, res) -> None:
         self.result = res
+        self._signal_cache = {}  # live takes over; drop stale file caches
         self.source_path = "live"
+        # Export FIRST: the take is the user's data, a cosmetic hiccup below
+        # must never cost it (it used to silently skip the export entirely).
+        self._export_results()
+        self.stop_playback()
+        self.player = NotePlayer(res.notes, sr=audio_io.SR)
+        try:
+            self._show_result(res)
+        except Exception as e:  # a broken view must not swallow the take
+            self.show_error(str(e), timeout=8_000)
+        self.statusBar().showMessage(
+            tr("ui status live done").format(
+                bpm=res.tempo.bpm, key=res.key.best.label, n=len(res.notes)
+            ),
+            12_000,
+        )
+
+    def _show_result(self, res) -> None:
+        """Fill the analysis page from a fresh result (file or live take)."""
         self.stack.setCurrentWidget(self.page_analyze)
-        self.label_file.setText("Enregistrement live")
+        self.label_file.setText(tr("ui live file") if res.source == "live" else Path(res.source).name)
         self.progress.setValue(100)
         self.results.set_results(res)
+        signal = self._live_signal
+        if res.source == "live" and signal is not None:
+            self.waveform.set_signal(signal, audio_io.SR)
+        elif res.source in self._signal_cache:
+            self.waveform.set_signal(self._signal_cache[res.source], audio_io.SR)
+        self.piano.set_notation_mode(self.chk_notation.isChecked())
         self.piano.set_notes(res.notes)
+        self.piano_keys.set_notes(res.notes)
         self.piano.set_pitch_curve(res.pitch)
-        self._export_results()
-        QMessageBox.information(
-            self,
-            "Analyse terminée",
-            f"Tempo : {res.tempo.bpm} BPM\nTonalité : {res.key.best.label}\nNotes : {len(res.notes)}\n\nFichiers exportés dans le dossier courant.",
+        self.staff.set_score(
+            res.notes,
+            bpm=res.tempo.bpm if res.tempo else 120.0,
+            meter=getattr(res, "meter", None),
+            key=getattr(res.key, "best", None),
+            positions=getattr(res, "note_positions", None),
+            rests=getattr(res, "rests", None),
         )
 
     def on_stop_live(self) -> None:
+        self._live_timer.stop()
+        self.piano_live.set_live_preview(None)
+        self.staff_live.clear()
         if self.live_thread is not None and self.live_thread.isRunning():
-            self.label_live_status.setText("Arrêt…")
+            self.label_live_status.setText(tr("ui stopping"))
             self.live_thread.stop()
-            self.live_thread.wait(3000)
+            # the capture thread also drains its queued blocks: give it room
+            self.live_thread.wait(6000)
             self.live_thread = None
         else:
             self.stack.setCurrentWidget(self.page_home)
@@ -447,13 +754,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         urls = event.mimeData().urls()
-        if urls and any(u.toLocalFile().lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")) for u in urls):
+        if urls and any(u.toLocalFile().lower().endswith(AUDIO_EXTS) for u in urls):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path.lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")):
+            if path.lower().endswith(AUDIO_EXTS):
                 self.start_analysis(path)
                 break
 
@@ -461,6 +768,7 @@ class MainWindow(QMainWindow):
 def run_gui() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Voix → MIDI")
+    app.setStyleSheet(STYLESHEET)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

@@ -1,12 +1,12 @@
-"""Écriture d'un fichier MIDI : notes + tempo + armures de tonalité."""
+"""MIDI file writing: notes + tempo + key signatures."""
 
 from __future__ import annotations
 
 import mido
 
 
-# Noms de tonalités acceptés par mido pour le meta-event Key Signature (FF 59).
-# Toutes les mineures existent en dièses ; trois majeures se notent en bémols.
+# Key names accepted by mido for the Key Signature meta event (FF 59).
+# All minor keys exist as sharps; three major keys are written with flats.
 _MAJOR_MIDO = {
     "C": "C", "C#": "C#", "D": "D", "D#": "Eb", "E": "E", "F": "F",
     "F#": "F#", "G": "G", "G#": "Ab", "A": "A", "A#": "Bb", "B": "B",
@@ -14,7 +14,7 @@ _MAJOR_MIDO = {
 
 
 def _mido_key(tonic: str, mode: str) -> str:
-    """Encode (tonique, mode) en chaîne mido : ex. ('A','minor') -> 'Am'."""
+    """Encode (tonic, mode) as a mido key string: e.g. ('A','minor') -> 'Am'."""
     if mode == "minor":
         return f"{tonic}m"
     return _MAJOR_MIDO.get(tonic, "C")
@@ -28,21 +28,21 @@ def build_midi(
     quantize_s: float | None = None,
     transpose: int = 0,
 ) -> mido.MidiFile:
-    """Construit le MidiFile.
+    """Build the MidiFile.
 
-    - Piste 0 : méta (tempo, armures des candidates de tonalité, fin)
-    - Piste 1 : notes de la voix
-    - `quantize_s` : si fourni (ex. durée d'une double-croche), aligne
-      débuts/fins sur la grille.
+    - Track 0: meta (tempo, best key signature, end)
+    - Track 1: voice notes
+    - `quantize_s`: when given (e.g. a sixteenth duration), snaps
+      starts/ends to the grid.
     """
     mid = mido.MidiFile(ticks_per_beat=tpq)
 
-    # --- Piste méta : tempo + tonalité ---
+    # --- meta track: tempo + key ---
     meta = mido.MidiTrack()
     mid.tracks.append(meta)
     meta.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
     if key is not None and key.best.score > 0:
-        # une seule armure : les candidates alternatives figurent dans le rapport JSON
+        # one signature only: alternative candidates live in the JSON report
         meta.append(
             mido.MetaMessage(
                 "key_signature", key=_mido_key(key.best.tonic, key.best.mode), time=0
@@ -50,7 +50,7 @@ def build_midi(
         )
     meta.append(mido.MetaMessage("end_of_track", time=0))
 
-    # --- Piste voix : notes ---
+    # --- voice track: notes ---
     voice = mido.MidiTrack()
     mid.tracks.append(voice)
     voice.append(mido.MetaMessage("track_name", name="Voice", time=0))
@@ -84,9 +84,5 @@ def build_midi(
 
 
 def quantize_step_s(bpm: float, division: int = 16) -> float:
-    """Durée d'une division de mesure (16 = double-croche) en secondes."""
+    """Duration of one grid division (16 = sixteenth) in seconds."""
     return 60.0 / bpm / (division / 4.0)
-
-
-def save_midi(mid: mido.MidiFile, path: str) -> None:
-    mid.save(path)

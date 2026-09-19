@@ -1,16 +1,16 @@
-"""Étiquetage des figures de notes (ronde → double-croche, pointées, triolets).
+"""Note figure labeling (whole -> sixteenth, dotted, triplets).
 
-Principe : la durée réelle (s) de chaque note est convertie en temps musicaux
-via le tempo détecté (durée_en_temps = durée_s × BPM / 60), puis comparée à
-un catalogue de figures avec une tolérance relative (le chant humain n'est
-pas métronomique).
+Method: each note's real duration (s) is converted to musical beats via the
+detected tempo (beats = duration_s * BPM / 60), then matched against a
+catalog of figures with a relative tolerance (human singing is not a
+metronome).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# (nom, durée en temps, type MusicXML)
+# (name, duration in beats, MusicXML type)
 BASES = [
     ("ronde", 4.0, "whole"),
     ("blanche", 2.0, "half"),
@@ -19,28 +19,28 @@ BASES = [
     ("double-croche", 0.25, "16th"),
 ]
 
-DOT_MULT = 1.5        # point : ×1,5
-TUPLET_MULT = 2.0 / 3.0  # triolet à 3 contre 2
+DOT_MULT = 1.5           # dotted: x1.5
+TUPLET_MULT = 2.0 / 3.0  # triplet: 3 against 2
 
-DEFAULT_TOLERANCE = 0.18  # ±18 % autour de la durée idéale
+DEFAULT_TOLERANCE = 0.18  # +/-18% around the ideal duration
 
 
 @dataclass(frozen=True)
 class FigureCandidate:
-    """Une figure du catalogue."""
+    """One entry of the figure catalog."""
 
-    name: str                 # ex. "noire pointée", "triolet de croche"
-    beats: float              # durée idéale en temps
-    type_: str                # type MusicXML de base
-    dots: int                 # 0 ou 1
-    tuplet: tuple[int, int] | None  # ex. (3, 2)
+    name: str                 # e.g. "noire pointée", "triolet de croche"
+    beats: float              # ideal duration in beats
+    type_: str                # base MusicXML type
+    dots: int                 # 0 or 1
+    tuplet: tuple[int, int] | None  # e.g. (3, 2)
 
 
 def build_candidates() -> list[FigureCandidate]:
-    """Catalogue : bases simples, pointées, et triolets (sans cumul point+triolet)."""
+    """Catalog: plain, dotted, and triplet figures (no dot+triplet combos)."""
     cands: list[FigureCandidate] = []
     for base_name, base_beats, type_ in BASES:
-        # simple et pointée
+        # plain and dotted
         for dots, mult in ((0, 1.0), (1, DOT_MULT)):
             name = f"{base_name} pointée" if dots else base_name
             cands.append(FigureCandidate(name, base_beats * mult, type_, dots, None))
@@ -56,23 +56,34 @@ def build_candidates() -> list[FigureCandidate]:
 CANDIDATES = build_candidates()
 
 
-# Pénalité de complexité : à erreur quasi égale, on préfère une figure simple,
-# puis pointée, puis triolet (une noire à +15 % est une noire en retard, pas
-# un triolet de blanche). Le triolet ne gagne que si c'est clairement lui.
+# Complexity penalty: at near-equal error, prefer a plain figure, then a
+# dotted one, then a triplet (a quarter at +15% is a late quarter, not a
+# half triplet). A triplet only wins when it is clearly the right answer.
 _COMPLEXITY_PENALTY = {0: 1.0, 1: 1.06, (3, 2): 1.10}
 
 
-def classify_duration(beats: float, tolerance: float = DEFAULT_TOLERANCE) -> FigureCandidate | None:
-    """Trouve la figure la plus proche d'une durée en temps (None si hors tolérance).
+def classify_duration(
+    beats: float,
+    tolerance: float = DEFAULT_TOLERANCE,
+    allow_triplets: bool = True,
+) -> FigureCandidate | None:
+    """Find the figure closest to a duration in beats (None if out of tolerance).
 
-    L'erreur comparée est pondérée par la complexité de la figure (cf.
-    _COMPLEXITY_PENALTY) ; au-delà de la tolérance, aucune classe.
+    The compared error is weighted by figure complexity (see
+    _COMPLEXITY_PENALTY); beyond the tolerance, no class is assigned.
+    `allow_triplets=False` excludes triplet figures: rests use it, since a
+    written silence between phrases never lives inside a triplet bracket —
+    and at some tempos a plain beat classifies as a triplet before the
+    plain figure (measured: 1.17 beats -> "triolet de blanche" at 13.5%
+    vs "noire" at 16.9%), which would mislabel the rest.
     """
     if beats <= 0:
         return None
     best: FigureCandidate | None = None
     best_err = float("inf")
     for c in CANDIDATES:
+        if c.tuplet is not None and not allow_triplets:
+            continue
         err = abs(beats - c.beats) / c.beats * _COMPLEXITY_PENALTY[c.tuplet if c.tuplet else c.dots]
         if err < best_err:
             best, best_err = c, err
@@ -82,7 +93,7 @@ def classify_duration(beats: float, tolerance: float = DEFAULT_TOLERANCE) -> Fig
 
 
 def label_notes(notes, bpm: float) -> None:
-    """Étiquette chaque note en place : note.figure = nom de figure ou None."""
+    """Label each note in place: note.figure = figure name or None."""
     if not bpm or bpm <= 0:
         return
     for n in notes:
@@ -92,7 +103,7 @@ def label_notes(notes, bpm: float) -> None:
 
 
 def figures_summary(notes) -> dict[str, int]:
-    """Comptage des figures détectées (les non classées sont exclues)."""
+    """Count detected figures (unclassified notes are excluded)."""
     counts: dict[str, int] = {}
     for n in notes:
         if n.figure:
@@ -105,7 +116,7 @@ _SHORT = {"ronde": "R", "blanche": "B", "noire": "N", "croche": "C",
 
 
 def short_label(figure: str | None) -> str:
-    """Étiquette courte pour l'affichage : 'N.', 'C', '3N' (triolet)…"""
+    """Short display label: 'N.', 'C', '3N' (triplet)..."""
     if not figure:
         return ""
     if figure.startswith("triolet de "):

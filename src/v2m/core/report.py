@@ -1,0 +1,152 @@
+"""Report and export: one interface to all artifacts.
+
+`export_result(res, stem, ...)` writes .mid / .musicxml / .json / .csv (and
+optionally .pdf) from an `AnalysisResult` and returns the report dict (one
+schema shared by the three contexts: CLI, GUI, live).
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+
+from .figures import figures_summary
+from .meter import count_measures, note_positions
+from .midi_export import build_midi
+from .music import midi_to_name, midi_to_name_fr
+from .musicxml import save_musicxml
+from .pdf_export import PdfToolMissing, export_pdf, find_notation_tool, install_hint
+
+
+def export_result(
+    res,
+    stem: str | Path,
+    quantize_s: float | None = None,
+    transpose: int = 0,
+    with_pitch_curve: bool = False,
+    meter=None,
+) -> dict:
+    """Write the artifacts under the `stem` prefix and return the JSON dict.
+
+    `meter`: detected Meter for the score (default: res.meter).
+    `with_pitch_curve`: adds the pitch curve to the JSON (CLI usage).
+
+    The PDF is a separate step (`engrave_pdf`): it needs an external tool
+    and must never cost the data artifacts, nor the report returned here.
+    """
+    if res.tempo is None or res.key is None:
+        raise ValueError("export_result requires a complete analysis (tempo + key)")
+    stem = Path(stem)
+    meter = meter or res.meter
+    positions = res.note_positions
+    if positions is None:
+        positions = note_positions(res.notes, res.tempo.bpm, meter)
+    pos_by_idx = {i: p for i, p in enumerate(positions)} if positions else {}
+
+    mid = build_midi(
+        res.notes,
+        bpm=res.tempo.bpm,
+        key=res.key,
+        quantize_s=quantize_s,
+        transpose=transpose,
+    )
+    mid.save(str(stem) + ".mid")
+    save_musicxml(
+        res.notes,
+        res.tempo.bpm,
+        res.key,
+        str(stem) + ".musicxml",
+        meter=meter,
+        chord_progression=getattr(res, "chord_progression", None),
+        rests=getattr(res, "rests", None),
+    )
+
+    rep = {
+        "source": res.source,
+        "duration_s": round(res.duration_s, 3),
+        "tempo": {"bpm": res.tempo.bpm},
+        "meter": meter.label if meter else None,
+        "num_measures": count_measures(res.notes, res.tempo.bpm, meter),
+        "key": {
+            "best": res.key.best.label,
+            "score": round(res.key.best.score, 4),
+            "alternatives": [
+                {"label": a.label, "score": round(a.score, 4)} for a in res.key.alternatives
+            ],
+        },
+        "n_notes": len(res.notes),
+        "rests": [
+            {
+                "start_s": round(r.start, 4),
+                "end_s": round(r.end, 4),
+                "duration_s": round(r.duration, 4),
+                "figure": r.figure,
+            }
+            for r in (getattr(res, "rests", None) or [])
+        ],
+        "figures_summary": figures_summary(res.notes),
+        "chord": (
+            {"label": res.chord.best.label, "score": res.chord.best.score,
+             "alternatives": [c.label for c in res.chord.alternatives]}
+            if res.chord else None
+        ),
+        "chord_segments": [
+            {"start_s": round(t0, 3), "end_s": round(t1, 3), "label": c.label}
+            for t0, t1, c in (res.chord_segments or [])
+        ],
+        "chord_progression": [
+            {"measures": [m0, m1], "label": c.label}
+            for m0, m1, c in (getattr(res, "chord_progression", None) or [])
+        ],
+        "notes": [
+            {
+                "start_s": round(n.start, 4),
+                "end_s": round(n.end, 4),
+                "duration_s": round(n.duration, 4),
+                "midi": n.midi,
+                "name": midi_to_name(n.midi),
+                "name_fr": midi_to_name_fr(n.midi),
+                "confidence": round(n.confidence, 3),
+                "strength": round(getattr(n, "strength", 0.0), 2),
+                "figure": n.figure,
+                "position": list(pos_by_idx[i]) if i in pos_by_idx else None,
+            }
+            for i, n in enumerate(res.notes)
+        ],
+        "quantized": bool(quantize_s),
+        "transpose_semitones": transpose,
+    }
+    if with_pitch_curve and res.pitch is not None:
+        rep["pitch_curve_hz"] = [
+            round(float(v), 2) if v == v else None  # NaN -> null
+            for v in res.pitch.hz[::2]
+        ]
+        rep["pitch_times_s"] = [round(float(t), 4) for t in res.pitch.times[::2]]
+    with open(str(stem) + ".json", "w", encoding="utf-8") as f:
+        json.dump(rep, f, indent=2, ensure_ascii=False)
+    with open(str(stem) + ".csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["index", "measure", "beat", "start_s", "end_s", "duration_s",
+                    "midi", "name", "name_fr", "confidence", "figure"])
+        for i, n in enumerate(res.notes):
+            pos = pos_by_idx.get(i)
+            w.writerow([i, pos[0] if pos else "", pos[1] if pos else "",
+                        round(n.start, 4), round(n.end, 4), round(n.duration, 4),
+                        n.midi, midi_to_name(n.midi), midi_to_name_fr(n.midi),
+                        round(n.confidence, 3), n.figure or ""])
+    return rep
+
+
+def engrave_pdf(stem: str | Path) -> str:
+    """Engrave `<stem>.musicxml` into `<stem>.pdf` (MuseScore or LilyPond).
+
+    Raises `PdfToolMissing` when no tool is installed and `PdfExportError`
+    when the conversion itself fails, so the caller can decide how loud that
+    is; the artifacts written by `export_result` are already on disk either
+    way.
+    """
+    stem = Path(stem)
+    if find_notation_tool() is None:
+        raise PdfToolMissing(f"PDF ignored: {install_hint()}")
+    return export_pdf(str(stem) + ".musicxml", str(stem) + ".pdf")

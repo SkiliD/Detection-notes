@@ -1,55 +1,102 @@
-"""Chargement audio (fichier) et capture micro (temps réel)."""
+"""Audio loading (file) and microphone capture (real-time)."""
 
 from __future__ import annotations
 
+import queue
+import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
 
+from .i18n import tr
+
 try:
     import sounddevice as sd
-except Exception:  # pragma: no cover - pas de périphérique audio dans CI
+except Exception:  # pragma: no cover - no audio device in CI
     sd = None
 
-SR = 22_050  # fréquence de travail pour l'analyse
+SR = 22_050        # analysis sample rate
+GATE_RMS = 0.008   # below this level a live block counts as silence
+
+# Accepted input containers, shared by the CLI and the GUI (a tuple:
+# `str.endswith` accepts it, unlike a set).
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")
+
+
+class AudioLoadError(ValueError):
+    """Raised when an audio file cannot be read or decoded."""
 
 
 def load_file(path: str, sr: int = SR) -> np.ndarray:
-    """Charge un fichier audio en mono, resamplé à `sr` (float32 dans [-1, 1])."""
-    import librosa
+    """Load an audio file as mono, resampled to `sr` (float32 in [-1, 1]).
 
-    y, _ = librosa.load(path, sr=sr, mono=True)
+    Raises AudioLoadError with a clear message on missing, empty or
+    undecodable input instead of leaking a low-level exception.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise AudioLoadError(tr("err missing file").format(path=p))
+    try:
+        import librosa
+
+        y, _ = librosa.load(str(p), sr=sr, mono=True)
+    except AudioLoadError:
+        raise
+    except Exception as e:
+        raise AudioLoadError(tr("err undecodable").format(name=p.name, e=e)) from e
+    if len(y) == 0:
+        raise AudioLoadError(tr("err empty file").format(name=p.name))
     return np.asarray(y, dtype=np.float32)
 
 
 @dataclass
 class LiveCapture:
-    """Capture micro par blocs, avec callback utilisateur.
+    """Microphone capture in blocks, with a user callback.
 
-    Les blocs sont resamplés grossièrement vers `sr` (linéaire) pour rester
-    cohérents avec le moteur d'analyse.
+    `on_block(block, t)` is called from a **worker thread**, never from the
+    PortAudio callback: YIN and the note segmentation cost milliseconds per
+    block and make the driver drop audio when they run inline (holes in the
+    take). The callback only copies the block and queues it.
+
+    Blocks are roughly resampled towards `sr` (linear) to stay consistent
+    with the analysis engine.
     """
 
-    samplerate: int = 44_100          # fréquence du périphérique
-    blocksize: int = 1024             # ~23 ms par bloc
-    sr: int = SR                      # fréquence d'analyse
+    samplerate: int = 44_100          # device sample rate
+    blocksize: int = 1024             # ~23 ms per block
+    sr: int = SR                      # analysis sample rate
     on_block: Optional[Callable[[np.ndarray, float], None]] = None
     chunks: list = field(default_factory=list, repr=False)
-    t0: float = 0.0
     _stream: object = None
+    _queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
+    _worker: Optional[threading.Thread] = field(default=None, repr=False)
+    _n_samples: int = field(default=0, repr=False)
 
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
         if status:
-            print(f"[micro] {status}")
+            print(f"[mic] {status}")
         mono = np.asarray(indata[:, 0], dtype=np.float32)
         self.chunks.append(mono.copy())
+        self._n_samples += len(mono)
         if self.on_block is not None:
-            self.on_block(mono, self.elapsed())
+            self._queue.put((mono, self.elapsed()))
+
+    def _drain(self) -> None:
+        """Hand the queued blocks to `on_block` (its own thread)."""
+        while True:
+            item = self._queue.get()
+            if item is None:  # sentinel: everything captured has been handled
+                return
+            block, t = item
+            try:
+                self.on_block(block, t)
+            except Exception as e:  # one bad block must not end the capture
+                print(f"[live] {e}")
 
     def elapsed(self) -> float:
-        n = sum(len(c) for c in self.chunks)
-        return n / self.samplerate
+        return self._n_samples / self.samplerate
 
     def start(self) -> None:
         if sd is None:
@@ -61,15 +108,24 @@ class LiveCapture:
             callback=self._callback,
         )
         self._stream.start()
+        if self.on_block is not None:
+            self._worker = threading.Thread(
+                target=self._drain, daemon=True, name="v2m-live-dsp"
+            )
+            self._worker.start()
 
     def stop(self) -> None:
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        if self._worker is not None:
+            self._queue.put(None)  # finish the backlog before reporting the take
+            self._worker.join(timeout=5.0)
+            self._worker = None
 
     def signal(self) -> np.ndarray:
-        """Signal complet enregistré, resamplé vers `sr` (pour analyse finale)."""
+        """Full recorded signal, resampled to `sr` (for the final analysis)."""
         if not self.chunks:
             return np.zeros(0, dtype=np.float32)
         y = np.concatenate(self.chunks).astype(np.float32)

@@ -1,4 +1,4 @@
-"""Détection du tempo (BPM) et des positions de temps."""
+"""Tempo detection (BPM) and beat positions."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ BPM_RANGE = (60.0, 180.0)
 @dataclass
 class TempoResult:
     bpm: float
-    beats: np.ndarray  # temps (s) des temps estimés
+    beats: np.ndarray  # times (s) of the estimated beats
 
 
 def detect_tempo(
@@ -21,10 +21,10 @@ def detect_tempo(
     sr: int,
     bpm_range: tuple[float, float] = BPM_RANGE,
 ) -> TempoResult:
-    """Tempo via onset strength + beat tracking, avec repli x2 / ÷2.
+    """Tempo via onset strength + beat tracking, with x2 / /2 fallback.
 
-    Sur une voix seule (peu de percussif), l'estimateur peut se tromper
-    d'un facteur 2 : on contraint au range demandé.
+    On a lone voice (little percussive content) the estimator may be off by
+    a factor of 2: constrain it to the requested range.
     """
     onset = librosa.onset.onset_strength(y=y, sr=sr)
     tempo, beats = librosa.beat.beat_track(
@@ -33,7 +33,7 @@ def detect_tempo(
     bpm = float(np.atleast_1d(tempo)[0])
     beat_times = librosa.frames_to_time(beats, sr=sr)
 
-    # repli : si le BPM est hors range, essayer x2 et /2
+    # fallback: if the BPM is out of range, try x2 and /2
     lo, hi = bpm_range
     if not (lo <= bpm <= hi):
         candidates = [bpm, bpm * 2, bpm / 2, bpm * 2 / 3, bpm * 3 / 2]
@@ -45,6 +45,27 @@ def detect_tempo(
     return TempoResult(bpm=round(bpm, 1), beats=np.asarray(beat_times, dtype=float))
 
 
+def estimate_bpm_live(notes, min_notes: int = 4) -> float | None:
+    """Approximate BPM during live recording.
+
+    Median of onset intervals, folded into 60-180 by powers of 2. Good
+    enough to label figures on screen; the final analysis refines it with
+    refine_bpm_with_onsets.
+    """
+    if len(notes) < min_notes:
+        return None
+    starts = [n.start for n in notes]
+    gaps = [b - a for a, b in zip(starts, starts[1:]) if b - a > 0.1]
+    if not gaps:
+        return None
+    bpm = 60.0 / float(np.median(gaps))
+    while bpm < 60.0:
+        bpm *= 2.0
+    while bpm > 180.0:
+        bpm /= 2.0
+    return round(bpm, 1)
+
+
 def refine_bpm_with_onsets(
     onsets: np.ndarray,
     bpm: float,
@@ -52,16 +73,15 @@ def refine_bpm_with_onsets(
     step: float = 0.0005,
     min_hits: int = 3,
 ) -> float:
-    """Raffine un BPM en maximisant la cohérence de phase des attaques.
+    """Refine a BPM by maximizing onset phase coherence.
 
-    `librosa.beat.beat_track` peut renvoyer un tempo arrondi (ex. 117,5
-    pour un vrai 120) : les frontières de notes finissent alors hors de
-    toute grille (0,5 s = 1,378 temps à 117,5) et le rendu en figures de
-    notes se fragmente. On scanne bpm±span_rel (relatif) ; pour chaque
-    candidat, la grille k·période est alignée par moindres carrés sur les
-    attaques (fenêtre ±15 % de période) et on garde le meilleur score :
-    hits − 0,5·écart quadratique. Pas de pénalité de proximité : dans un
-    span de ±8 %, les demi/double tempo équivalents sont hors de portée.
+    `librosa.beat.beat_track` may return a rounded tempo (e.g. 117.5 for a
+    true 120): note boundaries then fall off any grid (0.5 s = 1.378 beats
+    at 117.5) and figure rendering fragments. Scan bpm+/-span_rel (relative);
+    for each candidate, the k*period grid is least-squares aligned to the
+    onsets (+/-15% of period window) and the best score wins:
+    hits - 0.5*quadratic error. No proximity penalty: within a +/-8% span,
+    the half/double tempo equivalents are out of reach.
     """
     if bpm <= 0 or len(onsets) < min_hits:
         return float(bpm)
@@ -73,8 +93,8 @@ def refine_bpm_with_onsets(
         k = np.round(onsets / c_period)
         targets = k * c_period
         resid = onsets - targets
-        # fenêtre serrée : un BPM faux de 1 % accumule ~75 ms de dérive
-        # en 9 temps et perd la majorité de ses hits
+        # tight window: a 1%-wrong BPM accumulates ~75 ms of drift over
+        # 9 beats and loses most of its hits
         tol = max(0.045, 0.15 * c_period)
         good = np.abs(resid) <= tol
         n_hits = int(good.sum())
@@ -85,8 +105,8 @@ def refine_bpm_with_onsets(
         if score > best_score:
             best_score, best_bpm = score, float(cand)
 
-    # polissage : régression linéaire temps = k·période + offset sur les
-    # attaques en phase → période exacte (ex. 120,75 → 120,00)
+    # polish: linear regression time = k*period + offset on the in-phase
+    # onsets -> exact period (e.g. 120.75 -> 120.00)
     p = 60.0 / best_bpm
     k = np.round(onsets / p)
     tol = max(0.045, 0.15 * p)
@@ -97,7 +117,7 @@ def refine_bpm_with_onsets(
         slope = float(np.polyfit(kk, tt, 1)[0])
         if slope > 0.05:
             refined = 60.0 / slope
-            # garde-fou : rester dans le span relatif du scan
+            # guardrail: stay within the relative scan span
             if bpm * (1 - span_rel - 0.02) <= refined <= bpm * (1 + span_rel + 0.02):
                 best_bpm = refined
     return best_bpm
