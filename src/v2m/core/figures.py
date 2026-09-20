@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .grid import BeatGrid
+
 # (name, duration in beats, MusicXML type)
 BASES = [
     ("ronde", 4.0, "whole"),
@@ -92,13 +94,14 @@ def classify_duration(
     return None
 
 
-def label_notes(notes, bpm: float) -> None:
-    """Label each note in place: note.figure = figure name or None."""
-    if not bpm or bpm <= 0:
-        return
+def label_notes(notes, grid: BeatGrid) -> None:
+    """Label each note in place: note.figure = figure name or None.
+
+    `grid` is the take's `grid.BeatGrid`: the duration in beats is its
+    business, not this module's (the conversion is written once, there).
+    """
     for n in notes:
-        beats = (n.end - n.start) * bpm / 60.0
-        c = classify_duration(beats)
+        c = classify_duration(grid.beats(n.duration))
         n.figure = c.name if c is not None else None
 
 

@@ -14,13 +14,19 @@ DEFAULT_MIN_NOTE_S = 0.060   # 60 ms
 DEFAULT_GAP_S = 0.050        # gaps < 50 ms are interpolated
 DEFAULT_SEMITONES = 0.5      # note break when |dmidi| > 0.5
 NEAR_MERGE_ST = 0.4          # merge segments whose medians are close
-ATTACK_TOL_S = 0.080         # an attack this close confirms a note start
+ATTACK_TOL_S = 0.120         # an attack this close confirms a note start
 MIN_UNCONFIRMED_S = 0.120    # a note nobody attacked must last this long
 SWEEP_MIN_ST = 0.5           # travel (semitones) required to call a glide
 SWEEP_THROUGH_ST = 0.4       # how far the middle may deviate from a straight path
 SWEEP_TAIL_FRAMES = 3        # hand-over window (~60 ms)
 SWEEP_TAIL_ST = 0.30         # a glide is still moving through that window
 SAME_ONSET_S = 0.100         # two onsets this close are one articulation
+
+# Why ATTACK_TOL_S equals MIN_UNCONFIRMED_S: measured on a real take
+# (chant.wav), a consonant lands 90-130 ms before the plateau the pitch
+# tracker reports. Narrower (80 ms) left 4 notes "orphaned" from their own
+# attack; wider would reach past the shortest note the segmenter can emit,
+# so a nearer attack can only be the same articulation (see AGENTS.md).
 
 
 @dataclass

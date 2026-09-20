@@ -1,6 +1,8 @@
-"""Tests meter.py : détection simple vs composée (6/8) et positions."""
+"""Tests meter.py : détection simple vs composée (6/8), et positions rendues
+par la Grille (grid.py) que la détection alimente."""
 
-from v2m.core.meter import DEFAULT_METER, Meter, detect_meter, note_positions
+from v2m.core.grid import DEFAULT_METER, BeatGrid, Meter
+from v2m.core.meter import detect_meter
 from v2m.core.notes import Note
 
 BPM = 120.0
@@ -64,13 +66,13 @@ def test_too_few_notes_returns_none():
 def test_default_meter():
     assert DEFAULT_METER.label == "4/4"
     assert not DEFAULT_METER.is_compound
-    assert DEFAULT_METER.measure_seconds(BPM) == 2.0
+    assert BeatGrid(BPM, DEFAULT_METER).measure_seconds == 2.0
 
 
 def test_note_positions():
     meter = Meter(3, 4)
     notes = _notes_from_starts([0.0, BEAT, 2 * BEAT, 3 * BEAT, 4 * BEAT])
-    assert note_positions(notes, BPM, meter) == [
+    assert BeatGrid(BPM, meter).positions(notes) == [
         (1, 1.0), (1, 2.0), (1, 3.0), (2, 1.0), (2, 2.0),
     ]
 
@@ -79,7 +81,7 @@ def test_note_positions_compound():
     meter = Meter(6, 8)
     eighth = 60.0 / BPM / 2
     notes = _notes_from_starts([0.0, 3 * eighth, 1.5, 1.5 + 3 * eighth])
-    assert note_positions(notes, BPM, meter) == [
+    assert BeatGrid(BPM, meter).positions(notes) == [
         (1, 1.0), (1, 2.0), (2, 1.0), (2, 2.0),
     ]
 
@@ -88,7 +90,7 @@ def test_compound_meter_length():
     """6/8 = 6 croches = 3 noires = 1,5 s à 120 BPM ; 2 temps pointés affichés."""
     meter = Meter(6, 8)
     assert meter.measure_quarters == 3.0
-    assert meter.measure_seconds(BPM) == 1.5
+    assert BeatGrid(BPM, meter).measure_seconds == 1.5
     assert meter.n_slots == 2
     assert meter.slot_quarters == 1.5
     assert meter.is_compound

@@ -6,9 +6,11 @@ from v2m.core.figures import (
     label_notes,
     short_label,
 )
+from v2m.core.grid import BeatGrid
 from v2m.core.notes import Note
 
 BPM = 120.0
+GRID = BeatGrid(BPM)  # l'étiquetage passe par la Grille, pas par un bpm nu
 
 
 def _beats(n: float) -> float:
@@ -67,16 +69,18 @@ def test_label_notes_on_analysis_like_notes():
         Note(start=_beats(3.2), end=_beats(3.2) + _beats(0.5), midi=65, confidence=0.9),  # croche
         Note(start=_beats(4), end=_beats(4) + 0.13, midi=67, confidence=0.9),  # double-croche
     ]
-    label_notes(notes, BPM)
+    label_notes(notes, GRID)
     assert [n.figure for n in notes] == [
         "noire", "noire pointée", "triolet de noire", "croche", "double-croche",
     ]
 
 
-def test_label_notes_zero_bpm_noop():
-    notes = [Note(start=0, end=0.5, midi=60, confidence=0.9)]
-    label_notes(notes, 0.0)
-    assert notes[0].figure is None
+def test_label_notes_falls_back_on_a_sane_tempo():
+    """Un tempo absent ne laisse plus les figures vides : la Grille retombe sur
+    un tempo plausible (décidé en un endroit, `grid.BeatGrid`)."""
+    notes = [Note(start=0.0, end=_beats(1), midi=60, confidence=0.9)]
+    label_notes(notes, BeatGrid(0.0))
+    assert notes[0].figure == "noire"
 
 
 def test_summary_and_short_labels():
@@ -86,7 +90,7 @@ def test_summary_and_short_labels():
         Note(start=_beats(2), end=_beats(3), midi=60, confidence=0.9),
         Note(start=_beats(3), end=_beats(4), midi=60, confidence=0.9),
     ]
-    label_notes(notes, BPM)
+    label_notes(notes, GRID)
     assert figures_summary(notes) == {"noire": 4}
     assert [short_label(f) for f in ("noire", "croche pointée", "triolet de noire", None)] == [
         "N", "C.", "3N", "",

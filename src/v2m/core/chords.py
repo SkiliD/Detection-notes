@@ -140,8 +140,7 @@ def _pc_of(name: str) -> int:
 
 def detect_chord_progression(
     notes,
-    bpm: float,
-    meter,
+    grid,
     num_measures: int,
     min_notes: int = 2,
     top_k: int = 1,
@@ -152,13 +151,13 @@ def detect_chord_progression(
     overlap with the measure span, so a tied note counts where it sounds).
     Consecutive measures sharing the same best chord are merged into one
     span — the output reads like a chord chart (C | C | F | G).
+
+    `grid` gives the measure length; the meter it carries is the one the
+    measures were counted on.
     """
-    if not notes or bpm <= 0 or num_measures <= 0:
+    if not notes or num_measures <= 0:
         return []
-    if meter is None:
-        measure_s = 4 * 60.0 / bpm
-    else:
-        measure_s = meter.measure_seconds(bpm)
+    measure_s = grid.measure_seconds
     if measure_s <= 0:
         return []
 

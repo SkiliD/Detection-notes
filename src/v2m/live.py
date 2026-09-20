@@ -9,6 +9,7 @@ import numpy as np
 from .core import audio_io
 from .core.audio_io import LiveCapture
 from .core.figures import label_notes
+from .core.grid import BeatGrid
 from .core.i18n import note_display_pair, tr, tr_figure
 from .core.liveseg import LivePitchStream
 from .core.pipeline import AnalyzeOptions, analyze_signal
@@ -44,7 +45,7 @@ class LiveSession:
         # label at note END so the figure lands with the note itself
         bpm = estimate_bpm_live(notes)
         if bpm:
-            label_notes(notes, bpm)
+            label_notes(notes, BeatGrid(bpm))
         fig = f"  [{tr_figure(n.figure)}]" if n.figure else ""
         print(f"  ♪ {note_display_pair(n.midi)}  ({n.duration:.2f} s){fig}")
 

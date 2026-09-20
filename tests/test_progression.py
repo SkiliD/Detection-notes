@@ -1,12 +1,13 @@
 """Tests for measure-aligned chord progressions (chords.detect_chord_progression)."""
 
 from v2m.core.chords import detect_chord_progression
-from v2m.core.meter import Meter
+from v2m.core.grid import BeatGrid, Meter
 from v2m.core.notes import Note
 
 BPM = 120.0
 BEAT = 60.0 / BPM  # 0.5 s
 M4 = Meter(4, 4)
+GRID4 = BeatGrid(BPM, M4)
 
 
 def _note_at(t: float, dur: float, pc: int, base: int = 60) -> Note:
@@ -30,7 +31,7 @@ def test_c_major_followed_by_f_and_g():
     chords = [{0, 4, 7}, {5, 9, 12}, {7, 11, 14}]
     notes = _progression_notes(chords)
     num_measures = 3
-    prog = detect_chord_progression(notes, BPM, M4, num_measures)
+    prog = detect_chord_progression(notes, GRID4, num_measures)
     labels = [c.label for _, _, c in prog]
     assert "C" in labels
     assert "F" in labels
@@ -43,7 +44,7 @@ def test_c_major_followed_by_f_and_g():
 def test_consecutive_equal_chords_merge():
     chords = [{0, 4, 7}, {0, 4, 7}, {5, 9, 12}]
     notes = _progression_notes(chords)
-    prog = detect_chord_progression(notes, BPM, M4, 3)
+    prog = detect_chord_progression(notes, GRID4, 3)
     labels = [c.label for _, _, c in prog]
     assert labels.count("C") == 1
     c_span = next((m0, m1) for m0, m1, c in prog if c.label == "C")
@@ -53,18 +54,18 @@ def test_consecutive_equal_chords_merge():
 def test_measure_without_enough_notes_is_skipped():
     notes = _progression_notes([{0, 4, 7}], beats_per_chord=8)
     # measures 3-4 have no notes at all
-    prog = detect_chord_progression(notes, BPM, M4, 4)
+    prog = detect_chord_progression(notes, GRID4, 4)
     for m0, _, _ in prog:
         assert m0 <= 2
 
 
 def test_default_grid_without_meter():
     notes = _progression_notes([{0, 4, 7}, {7, 11, 14}])
-    prog = detect_chord_progression(notes, BPM, None, 2)
+    prog = detect_chord_progression(notes, BeatGrid(BPM), 2)
     assert prog
     labels = [c.label for _, _, c in prog]
     assert "C" in labels or "G" in labels
 
 
 def test_empty_notes_returns_empty():
-    assert detect_chord_progression([], BPM, M4, 4) == []
+    assert detect_chord_progression([], GRID4, 4) == []

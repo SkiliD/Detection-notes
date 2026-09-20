@@ -3,9 +3,12 @@
 import mido
 import pytest
 
+from v2m.core.grid import BeatGrid
 from v2m.core.keys import detect_key
-from v2m.core.midi_export import build_midi, quantize_step_s
+from v2m.core.midi_export import build_midi
 from v2m.core.notes import Note
+
+GRID = BeatGrid(120.0)
 
 
 def _sample_notes() -> list[Note]:
@@ -17,7 +20,7 @@ def _sample_notes() -> list[Note]:
 
 
 def test_midi_has_tempo_meta(tmp_path):
-    mid = build_midi(_sample_notes(), bpm=120.0, key=None)
+    mid = build_midi(_sample_notes(), GRID, key=None)
     path = str(tmp_path / "out.mid")
     mid.save(path)
     reloaded = mido.MidiFile(path)
@@ -29,7 +32,7 @@ def test_midi_has_tempo_meta(tmp_path):
 def test_midi_has_key_signature(tmp_path):
     notes = _sample_notes()
     key = detect_key(notes)
-    mid = build_midi(notes, bpm=120.0, key=key)
+    mid = build_midi(notes, GRID, key=key)
     path = str(tmp_path / "out.mid")
     mid.save(path)
     reloaded = mido.MidiFile(path)
@@ -44,7 +47,7 @@ def test_midi_has_key_signature(tmp_path):
 
 
 def test_midi_note_count_and_pitch(tmp_path):
-    mid = build_midi(_sample_notes(), bpm=120.0, key=None)
+    mid = build_midi(_sample_notes(), GRID, key=None)
     path = str(tmp_path / "out.mid")
     mid.save(path)
     reloaded = mido.MidiFile(path)
@@ -53,7 +56,7 @@ def test_midi_note_count_and_pitch(tmp_path):
 
 
 def test_midi_transpose_and_velocity():
-    mid = build_midi(_sample_notes(), bpm=120.0, key=None, transpose=12)
+    mid = build_midi(_sample_notes(), GRID, key=None, transpose=12)
     ons = [m for t in mid.tracks for m in t if m.type == "note_on" and m.velocity > 0]
     assert sorted(m.note for m in ons) == [72, 76, 79]
     # vélocité liée à la confiance (0.9 -> élevée)
@@ -61,11 +64,11 @@ def test_midi_transpose_and_velocity():
 
 
 def test_quantize_aligns_to_grid():
-    step = quantize_step_s(120.0, division=16)  # double-croche à 120 BPM
+    step = GRID.step_seconds(per_beat=4.0)  # double-croche à 120 BPM
     assert abs(step - 0.125) < 1e-9
     mid = build_midi(
         [Note(start=0.13, end=0.49, midi=60, confidence=0.9)],
-        bpm=120.0,
+        GRID,
         key=None,
         quantize_s=step,
     )

@@ -4,7 +4,8 @@ Principles:
 - divisions = 12 (common multiple of 3 and 4): every plain, dotted AND
   triplet figure has an integer duration in divisions.
 - 1 quarter beat = 12 divisions, a 4/4 measure = 48 divisions.
-- Each beat is attributed to the note overlapping it most (30 ms threshold).
+- Each beat is written note by note: a note's own duration, then a rest for
+  what is left of the beat (no note is stretched to fill the beat).
 - A note spanning several beats is rendered beat by beat with ties
   (stop when it started before, start when it continues after) — including
   across measure boundaries, as MusicXML requires.
@@ -22,30 +23,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
-from .meter import Meter
+from .grid import DRAWABLE, BeatGrid
 from .music import midi_to_name_fr
 
-_DEFAULT_METER = Meter(4, 4, 1.0)
 
 STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
-# divisions=12: steps -> (MusicXML type, number of dots)
-_TYPE_BY_STEPS = {
-    48: ("whole", 0),
-    36: ("half", 1),
-    32: ("whole", 0),      # whole triplet
-    24: ("half", 0),
-    18: ("quarter", 1),
-    16: ("half", 0),       # half triplet
-    12: ("quarter", 0),
-    9: ("eighth", 1),
-    8: ("quarter", 0),     # quarter triplet
-    6: ("eighth", 0),
-    4: ("eighth", 0),      # eighth triplet
-    3: ("16th", 0),
-    2: ("16th", 0),        # sixteenth triplet
-    1: ("32nd", 0),
+DIVISIONS = 12  # steps per quarter beat — the export's own grid
+
+# Below this overlap a "note" on a beat is a segmentation artifact, not a
+# sound: the beat is written without it.
+MIN_OVERLAP_S = 0.030
+
+# steps -> (MusicXML type, number of dots), taken from the grid's catalog
+# (`DRAWABLE`): what a duration is written as is decided in ONE place, and the
+# staff engraves the same value. A catalog value the 12-division grid cannot
+# express is skipped — the dotted 16th, 4.5 steps — because the integer
+# <duration> is what fills the measure, and rounding it down to 4 would collide
+# with the triplet eighth below and mislabel every 4-step span.
+_TYPE_BY_STEPS: dict[int, tuple[str, int]] = {
+    int(steps): (type_, dots)
+    for type_, beats, dots in DRAWABLE
+    if (steps := beats * DIVISIONS).is_integer()
 }
+# Triplet flavours and the 32nd: no catalog value exists for a triplet (it is
+# neither plain nor dotted) and the 32nd is below the catalog's 16th floor.
+_TYPE_BY_STEPS.update(
+    {32: ("whole", 0), 16: ("half", 0), 8: ("quarter", 0),
+     4: ("eighth", 0), 2: ("16th", 0), 1: ("32nd", 0)}
+)
 
 _TUPLET_STEPS = {32, 16, 8, 4, 2}  # steps that correspond to triplets
 
@@ -98,7 +104,7 @@ def _rest_run_xml(steps: int, figure: str | None) -> str:
             default=0,
         )
         while fig_steps and steps >= fig_steps:
-            parts.append(_note_xml(None, fig_steps, figure=figure))
+            parts.append(_note_xml(None, fig_steps))
             steps -= fig_steps
     for s, _td in _REST_FILL_ORDER:
         while steps >= s:
@@ -151,18 +157,15 @@ def _note_xml(
     tuplet_side: str | None = None,
     color: str | None = None,
     lyric: str | None = None,
-    figure: str | None = None,
 ) -> str:
-    """One <note> (or a rest when midi is None).
+    """One <note> (or a rest when midi is None), typed by its duration.
 
-    For rests, `figure` (a canonical French rest name) overrides the
-    duration-derived type when it is a known shape, so the engraved silence
-    shows its real value (soupir, demi-pause...).
+    A silence is typed from its written duration, never from a detected
+    label: the <duration> is what fills the measure, so a label that
+    disagreed with it would leave a file importers read differently.
     """
     steps = max(1, int(steps))
     type_, dots = _TYPE_BY_STEPS.get(steps, ("quarter", 0))
-    if midi is None and figure in _REST_TYPE_BY_FIGURE:
-        type_, dots = _REST_TYPE_BY_FIGURE[figure]
     is_tuplet = steps in _TUPLET_STEPS
     parts = [f'<note color="{color}">'] if color else ["<note>"]
     parts.append("<rest/>" if midi is None else _pitch_xml(midi))
@@ -238,13 +241,12 @@ def _find_triplet_blocks(notes) -> list[_TripletBlock]:
 
 def _render_triplet_block(
     block: _TripletBlock,
-    bpm: float,
+    grid: BeatGrid,
     colored: bool = False,
     with_lyric: bool = False,
 ) -> str:
     """Render the block: equal durations + start/stop bracket."""
-    beat_s = 60.0 / bpm
-    total_steps = max(1, int(round((block.end - block.start) / beat_s * 12)))
+    total_steps = max(1, grid.steps(block.end - block.start, per_beat=DIVISIONS))
     per = max(1, total_steps // len(block.notes))
     out = []
     for i, n in enumerate(block.notes):
@@ -261,46 +263,16 @@ def _render_triplet_block(
     return "".join(out)
 
 
-def _snap_notes(notes, bpm: float, divisions_per_beat: int = 4):
-    """Snap boundaries to the sixteenth grid.
-
-    The detected tempo drifts slightly from the real human tempo; without
-    snapping, boundaries fall off-grid and generate fragments (16th/32nd).
-    Each boundary joins its nearest grid step.
-    """
-    from types import SimpleNamespace
-
-    step_s = (60.0 / bpm) / divisions_per_beat
-    out = []
-    for n in notes:
-        s = round(n.start / step_s) * step_s
-        e = round(n.end / step_s) * step_s
-        if e - s < step_s / 2:
-            e = s + step_s
-        out.append(
-            SimpleNamespace(
-                start=s, end=e, midi=n.midi, confidence=n.confidence, figure=n.figure
-            )
-        )
-    return out
-
-
-def _beat_owner(notes, b_start: float, b_end: float):
-    """Note covering this beat most (None if overlap < 30 ms)."""
-    best, best_ov = None, 0.030
-    for n in notes:
-        ov = min(n.end, b_end) - max(n.start, b_start)
-        if ov > best_ov:
-            best, best_ov = n, ov
-    return best
-
-
 def _rest_figure(t0: float, t1: float, rests) -> str | None:
     """Figure of the detected breath covering the most of [t0, t1].
 
     A labeled rest counts when its center falls inside the written gap; the
     longest overlap wins (a gap can straddle a rest boundary after
     snapping). Unlabeled or missing rests return None (generic fill).
+
+    Used by the silent-run decomposition, so a labeled breath engraves as
+    the figure a musician would write instead of generic quarters; the
+    duration itself is what types each rest (`_note_xml`).
     """
     best, best_ov = None, 0.0
     for r in rests or []:
@@ -318,11 +290,10 @@ def _rest_figure(t0: float, t1: float, rests) -> str | None:
 
 def build_score_xml(
     notes,
-    bpm: float,
+    grid: BeatGrid,
     key=None,
     title: str = "Transcription",
     snap: bool = True,
-    meter=None,
     chord_progression=None,
     with_note_colors: bool = True,
     with_solfa_lyrics: bool = True,
@@ -330,21 +301,21 @@ def build_score_xml(
 ) -> str:
     """Generate the full MusicXML (string).
 
-    `meter`: detected Meter (core/meter.py); None -> 4/4 default.
+    `grid`: the take's beat grid, carrying the tempo and the meter
+    (core/grid.py); it decides the measure length and the fallback 4/4.
     `chord_progression`: [(m0, m1, ChordCandidate)] measure-aligned chords
     (core/chords.py) rendered as <harmony> elements; None -> no chord symbols.
     `with_note_colors`: color each notehead by detection confidence.
     `with_solfa_lyrics`: sol-fa note names (Do, Ré, Mi...) under each note.
     """
+    bpm = grid.bpm
     if snap:
-        notes = _snap_notes(notes, bpm)
-    if meter is None:
-        meter = _DEFAULT_METER
-    divisions = 12
-    beat_s = 60.0 / bpm                                  # quarter-beat seconds
-    grid_s = beat_s * (3.0 if meter.is_compound else 1.0)  # one displayed beat
-    grid_steps = int(round(grid_s / beat_s * 12))          # divisions per beat
-    measure_s = meter.beats_per_measure * grid_s
+        notes = grid.snap_notes(notes)
+    divisions = DIVISIONS
+    grid_s = grid.slot_seconds           # one displayed beat
+    grid_steps = grid.steps(grid_s, per_beat=DIVISIONS)   # per written beat
+    measure_s = grid.measure_seconds
+    meter = grid.meter
 
     max_end = max((n.end for n in notes), default=0.0)
     total_measures = max(1, int(max_end / measure_s + 0.999))
@@ -366,7 +337,7 @@ def build_score_xml(
         for part in (
             f"Tempo: {bpm:.1f} BPM",
             f"Key: {key_label}" if key_label else None,
-            f"Meter: {meter.label}" if meter else None,
+            f"Meter: {meter.label}",
             f"Chord: {chord_progression and ' / '.join(c.label for _, _, c in chord_progression[:8])}",
         )
         if part
@@ -426,7 +397,7 @@ def build_score_xml(
                 (
                     k
                     for k in blocks
-                    if abs(k.start - b_start) < beat_s * 0.4
+                    if abs(k.start - b_start) < grid.step_seconds() * 0.4
                     and k.end <= m_end + 1e-6
                     and k.start >= m_start - 1e-6
                 ),
@@ -436,7 +407,7 @@ def build_score_xml(
                 out.append(
                     _render_triplet_block(
                         blk,
-                        bpm,
+                        grid,
                         colored=with_note_colors,
                         with_lyric=with_solfa_lyrics,
                     )
@@ -445,53 +416,29 @@ def build_score_xml(
                 b += 1
                 continue
 
-            # --- whole beat held by a single note ---
-            owner = _beat_owner(notes, b_start, b_end)
-            beat_dur = b_end - b_start
-            # a significant concurrent note (> 20% of the beat) forces
-            # subdivision; below that it is a detection artifact absorbed
-            # into the dominant note (a real sixteenth covers 25% of a beat,
-            # so it is preserved)
-            others = [
-                n
-                for n in notes
-                if n is not owner
-                and (min(n.end, b_end) - max(n.start, b_start)) > 0.20 * beat_dur
-            ]
-            if owner is not None and not others:
-                ties = []
-                if owner.start < b_start - 1e-6:
-                    ties.append("stop")
-                if owner.end > b_end + 1e-6:
-                    ties.append("start")
-                out.append(
-                    _note_xml(
-                        owner.midi,
-                        grid_steps,
-                        ties=tuple(ties),
-                        color=_confidence_color(owner.confidence) if with_note_colors else None,
-                        lyric=midi_to_name_fr(owner.midi) if with_solfa_lyrics else None,
-                    )
-                )
-                b += 1
-                continue
-
             # --- subdivide the beat ---
+            # One path only: every beat a note touches is written note by
+            # note. A note keeps its own written duration and what is left of
+            # the beat becomes a rest, so a short isolated note is no longer
+            # stretched to the whole beat (nor its silence swallowed). A note
+            # covering the whole beat still comes out as one beat-long note,
+            # tied across when it continues — which is all the old
+            # "beat owner" shortcut ever did.
             inside = [
                 n
                 for n in notes
-                if min(n.end, b_end) - max(n.start, b_start) > 0.030
+                if min(n.end, b_end) - max(n.start, b_start) > MIN_OVERLAP_S
             ]
             inside.sort(key=lambda n: n.start)
             if inside:
                 cursor = b_start
                 for n in inside:
                     if n.start > cursor + 1e-6:
-                        gap = max(1, int(round((n.start - cursor) / beat_s * 12)))
-                        out.append(_note_xml(None, gap, figure=_rest_figure(cursor, n.start, rests)))
+                        gap = max(1, grid.steps(n.start - cursor, per_beat=DIVISIONS))
+                        out.append(_note_xml(None, gap))
                     seg_start = max(n.start, b_start)
                     seg_end = min(n.end, b_end)
-                    steps = max(1, int(round((seg_end - seg_start) / beat_s * 12)))
+                    steps = max(1, grid.steps(seg_end - seg_start, per_beat=DIVISIONS))
                     ties = []
                     if n.start < b_start - 1e-6:
                         ties.append("stop")
@@ -508,8 +455,8 @@ def build_score_xml(
                     )
                     cursor = seg_end
                 if b_end - cursor > 1e-6:
-                    tail_steps = max(1, int(round((b_end - cursor) / beat_s * 12)))
-                    out.append(_note_xml(None, tail_steps, figure=_rest_figure(cursor, b_end, rests)))
+                    tail_steps = max(1, grid.steps(b_end - cursor, per_beat=DIVISIONS))
+                    out.append(_note_xml(None, tail_steps))
                 b += 1
                 continue
 
@@ -520,8 +467,9 @@ def build_score_xml(
             while b + run < meter.beats_per_measure:
                 nb_start = m_start + (b + run) * grid_s
                 nb_end = nb_start + grid_s
-                if _beat_owner(notes, nb_start, nb_end) is not None or any(
-                    min(n.end, nb_end) - max(n.start, nb_start) > 0.030 for n in notes
+                if any(
+                    min(n.end, nb_end) - max(n.start, nb_start) > MIN_OVERLAP_S
+                    for n in notes
                 ):
                     break
                 run += 1
@@ -539,11 +487,10 @@ def build_score_xml(
 
 def save_musicxml(
     notes,
-    bpm: float,
+    grid: BeatGrid,
     key,
     path: str,
     title: str = "Transcription",
-    meter=None,
     chord_progression=None,
     with_note_colors: bool = True,
     with_solfa_lyrics: bool = True,
@@ -553,10 +500,9 @@ def save_musicxml(
         f.write(
             build_score_xml(
                 notes,
-                bpm,
+                grid,
                 key,
                 title=title,
-                meter=meter,
                 chord_progression=chord_progression,
                 with_note_colors=with_note_colors,
                 with_solfa_lyrics=with_solfa_lyrics,

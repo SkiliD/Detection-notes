@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from v2m.core.liveseg import LiveNote
-from v2m.core.meter import Meter
+from v2m.core.grid import BeatGrid, Meter
 from v2m.core.notes import Note
 from v2m.gui.staff import HEADER_H, S, StaffView
 
@@ -59,7 +59,7 @@ def test_score_needs_no_meter_or_key(qapp):
     """A take whose meter stayed undetected still renders (4/4 assumed)."""
     view = StaffView()
     view.resize(420, 160)
-    view.set_score([_note(60, 0.0), _note(64, 0.5)], bpm=120.0, meter=None, key=None)
+    view.set_score([_note(60, 0.0), _note(64, 0.5)], grid=BeatGrid(120.0), key=None)
     lay = view.layout()
     assert lay.beats_per_measure == 4.0 and lay.meter_label == "4/4"
     assert lay.fifths == 0
@@ -71,7 +71,7 @@ def test_every_system_draws_its_notes(qapp):
     notes = [_note(60 + (i % 7), i * 0.5) for i in range(16)]   # 4 measures
     view = StaffView()
     view.resize(560, 260)
-    view.set_score(notes, bpm=120.0, meter=Meter(4, 4), key="C major")
+    view.set_score(notes, grid=BeatGrid(120.0, Meter(4, 4)), key="C major")
     lay = view.layout()
     assert lay.measures == 4
 
@@ -89,7 +89,7 @@ def test_live_view_scrolls_to_the_newest_notes(qapp):
     notes = [_note(60 + (i % 5), i * 0.5) for i in range(40)]   # 40 beats
     view = StaffView(live=True)
     view.resize(420, 160)
-    view.set_live(notes, bpm=120.0)
+    view.set_live(notes, grid=BeatGrid(120.0))
 
     start, end = view.visible_window()
     lay = view.layout()
@@ -111,7 +111,7 @@ def test_live_view_shows_the_note_being_sung(qapp):
     notes = [_note(60, 0.0, figure="noire")]
     view = StaffView(live=True)
     view.resize(400, 160)
-    view.set_live(notes, LiveNote(start=0.5, end=0.8, midi=67), bpm=120.0)
+    view.set_live(notes, LiveNote(start=0.5, end=0.8, midi=67), grid=BeatGrid(120.0))
     lay = view.layout()
     assert len(lay.notes) == 2
     assert lay.notes[-1].preview is True
@@ -144,7 +144,7 @@ def test_score_engraves_the_breaths_between_phrases(qapp):
     rests = [Rest(start=0.5, end=2.5, figure="pause")]
     view = StaffView()
     view.resize(420, 160)
-    view.set_score(notes, bpm=120.0, rests=rests)
+    view.set_score(notes, grid=BeatGrid(120.0), rests=rests)
     lay = view.layout()
     assert len(lay.rests) == 1
     assert lay.rests[0].shape == "pause"
@@ -158,6 +158,6 @@ def test_rests_without_notes_engrave_nothing(qapp):
 
     view = StaffView()
     view.resize(420, 160)
-    view.set_score([], bpm=120.0, rests=[Rest(start=0.0, end=2.0, figure="pause")])
+    view.set_score([], grid=BeatGrid(120.0), rests=[Rest(start=0.0, end=2.0, figure="pause")])
     assert view.layout().rests == []
     assert not view.grab().isNull()

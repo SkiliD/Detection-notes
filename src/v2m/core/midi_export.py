@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import mido
 
+from .grid import BeatGrid
+
 
 # Key names accepted by mido for the Key Signature meta event (FF 59).
 # All minor keys exist as sharps; three major keys are written with flats.
@@ -22,7 +24,7 @@ def _mido_key(tonic: str, mode: str) -> str:
 
 def build_midi(
     notes,
-    bpm: float,
+    grid: BeatGrid,
     key,
     tpq: int = 480,
     quantize_s: float | None = None,
@@ -32,15 +34,15 @@ def build_midi(
 
     - Track 0: meta (tempo, best key signature, end)
     - Track 1: voice notes
-    - `quantize_s`: when given (e.g. a sixteenth duration), snaps
-      starts/ends to the grid.
+    - `grid` carries the tempo (its `bpm` goes into the tempo meta) and turns
+      seconds into ticks; `quantize_s` (e.g. a sixteenth) snaps starts/ends.
     """
     mid = mido.MidiFile(ticks_per_beat=tpq)
 
     # --- meta track: tempo + key ---
     meta = mido.MidiTrack()
     mid.tracks.append(meta)
-    meta.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
+    meta.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(grid.bpm), time=0))
     if key is not None and key.best.score > 0:
         # one signature only: alternative candidates live in the JSON report
         meta.append(
@@ -70,7 +72,7 @@ def build_midi(
     events.sort(key=lambda e: (e[0], 0 if e[1] == "off" else 1))
 
     last_t = 0.0
-    sec_per_tick = 60.0 / (bpm * tpq)
+    sec_per_tick = grid.seconds(1.0) / tpq
     for t, kind, pitch, vel in events:
         dt_s = max(0.0, t - last_t)
         ticks = int(round(dt_s / sec_per_tick))
@@ -81,8 +83,3 @@ def build_midi(
             voice.append(mido.Message("note_off", note=pitch, velocity=0, time=ticks))
     voice.append(mido.MetaMessage("end_of_track", time=0))
     return mid
-
-
-def quantize_step_s(bpm: float, division: int = 16) -> float:
-    """Duration of one grid division (16 = sixteenth) in seconds."""
-    return 60.0 / bpm / (division / 4.0)

@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 from ..core import audio_io
 from ..core.audio_io import LiveCapture
 from ..core.figures import label_notes
+from ..core.grid import BeatGrid
 from ..core.i18n import get_language, set_language, tr
 from ..core.liveseg import LiveNoteSegmenter, LivePitchStream
 from ..core.pdf_export import PdfExportError, find_notation_tool
@@ -150,7 +151,7 @@ class LiveThread(QThread):
             # soon as it lands on the rolling piano roll.
             bpm = estimate_bpm_live(self.seg.notes)
             if bpm:
-                label_notes(self.seg.notes, bpm)
+                label_notes(self.seg.notes, BeatGrid(bpm))
 
     def stop(self) -> None:
         self._stop = True
@@ -634,7 +635,7 @@ class MainWindow(QMainWindow):
         self.staff_live.set_live(
             notes,
             preview,
-            bpm=estimate_bpm_live(notes) or 120.0,
+            grid=BeatGrid(estimate_bpm_live(notes)),
         )
         self.label_live_status.setText(
             tr("ui live progress").format(t=clock(t), notes=len(notes))
@@ -729,8 +730,7 @@ class MainWindow(QMainWindow):
         self.piano.set_pitch_curve(res.pitch)
         self.staff.set_score(
             res.notes,
-            bpm=res.tempo.bpm if res.tempo else 120.0,
-            meter=getattr(res, "meter", None),
+            grid=res.grid or BeatGrid(res.tempo.bpm if res.tempo else None),
             key=getattr(res.key, "best", None),
             positions=getattr(res, "note_positions", None),
             rests=getattr(res, "rests", None),

@@ -15,9 +15,9 @@ from .chords import (
     detect_chords,
 )
 from .figures import label_notes
+from .grid import BeatGrid, Meter
 from .keys import KeyResult, detect_key
-from .meter import Meter, count_measures, detect_meter, note_positions
-from .midi_export import quantize_step_s
+from .meter import detect_meter
 from .notes import Note, compute_onset_strengths, track_to_notes
 from .onsets import detect_attacks
 from .pitch import PitchTrack, track_pitch_offline
@@ -40,12 +40,13 @@ class AnalysisResult:
     chord_segments: Optional[list] = None  # (start_s, end_s, ChordCandidate) — legacy 2 s
     chord_progression: Optional[list] = None  # (m0, m1, ChordCandidate) per measure
     rests: Optional[list[Rest]] = None  # breaths/phrase gaps (lead-in included)
+    grid: Optional[BeatGrid] = None  # the metric frame: seconds <-> beats
     sr: int = audio_io.SR
 
     def quantize_step(self, division: int = 16) -> float:
         """Seconds per grid division (16 = sixteenth) at the detected tempo."""
-        if self.tempo and self.tempo.bpm > 0:
-            return quantize_step_s(self.tempo.bpm, division)
+        if self.grid is not None:
+            return self.grid.step_seconds(per_beat=division / 4.0)
         return 0.0
 
 
@@ -115,22 +116,27 @@ def analyze_signal(
     positions: Optional[list] = None
     num_measures = 0
     progression: list = []
+    grid: Optional[BeatGrid] = None
     if tempo and tempo.bpm > 0:
-        label_notes(notes, tempo.bpm)
+        # the figures only need the beat, so they are labeled as soon as the
+        # tempo is known; the measure-aware grid comes right after, once the
+        # accent evidence has decided the meter
+        grid = BeatGrid(tempo.bpm)
+        label_notes(notes, grid)
         # accents (relative onset strengths) feed the 3/4 vs 4/4 decision
         compute_onset_strengths(notes, y, sr)
         meter = detect_meter(notes, tempo.bpm)
-        # positions on the effective grid: detected meter, else rendered 4/4
-        positions = note_positions(notes, tempo.bpm, meter)
-        num_measures = count_measures(notes, tempo.bpm, meter)
-        progression = detect_chord_progression(notes, tempo.bpm, meter, num_measures)
+        grid = grid.with_meter(meter)
+        positions = grid.positions(notes)
+        num_measures = grid.measures(notes)
+        progression = detect_chord_progression(notes, grid, num_measures)
 
     report(0.96, "Détection des respirations…")
     # breaths between phrases, written as rests on the score. An addition,
     # never a prerequisite: any failure here degrades to no rests at all
     # instead of costing the analysis the user already waited for.
     try:
-        rests = detect_rests(notes, tempo.bpm if tempo else None)
+        rests = detect_rests(notes, grid)
     except Exception:  # noqa: BLE001 - see comment above
         rests = []
 
@@ -149,6 +155,7 @@ def analyze_signal(
         chord_segments=chord_segments,
         chord_progression=progression,
         rests=rests,
+        grid=grid,
         sr=sr,
     )
 

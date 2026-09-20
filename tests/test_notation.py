@@ -1,7 +1,7 @@
 """Tests notation : orthographe des hauteurs, armures, durées, mise en page."""
 
 from v2m.core.liveseg import LiveNote
-from v2m.core.meter import Meter
+from v2m.core.grid import BeatGrid, Meter
 from v2m.core.notation import (
     accidental_needed,
     key_fifths,
@@ -16,6 +16,9 @@ from v2m.core.notes import Note
 
 def _note(midi, start=0.0, dur_s=0.5, figure=None):
     return Note(start=start, end=start + dur_s, midi=midi, confidence=0.9, figure=figure)
+
+
+GRID = BeatGrid(120.0)
 
 
 # ------------------------------------------------------------------ spelling
@@ -79,29 +82,29 @@ def test_accidental_needed_only_outside_the_key():
 
 # ----------------------------------------------------------------- durations
 def test_notated_duration_uses_the_detected_figure():
-    w = notated_duration(_note(60, figure="noire"), bpm=120.0)
+    w = notated_duration(_note(60, figure="noire"), grid=GRID)
     assert (w.type_, w.beats, w.dots) == ("quarter", 1.0, 0)
-    w = notated_duration(_note(60, figure="croche pointée"), bpm=120.0)
+    w = notated_duration(_note(60, figure="croche pointée"), grid=GRID)
     assert (w.type_, w.beats, w.dots) == ("eighth", 0.75, 1)
-    w = notated_duration(_note(60, figure="triolet de croche"), bpm=120.0)
+    w = notated_duration(_note(60, figure="triolet de croche"), grid=GRID)
     assert w.tuplet == (3, 2) and w.type_ == "eighth"
 
 
 def test_notated_duration_falls_back_to_a_drawable_value():
     # 0.7 beats is closest to a dotted eighth (0.75), not to a quarter
-    w = notated_duration(_note(60, dur_s=0.35), bpm=120.0)
+    w = notated_duration(_note(60, dur_s=0.35), grid=GRID)
     assert (w.type_, w.beats, w.dots) == ("eighth", 0.75, 1)
     # half a second at 120 BPM = one quarter beat
-    assert notated_duration(_note(60, dur_s=0.5), bpm=120.0).beats == 1.0
+    assert notated_duration(_note(60, dur_s=0.5), grid=GRID).beats == 1.0
     # a very short blip never becomes a 64th: the smallest value floor applies
-    assert notated_duration(_note(60, dur_s=0.01), bpm=120.0).beats >= 0.25
+    assert notated_duration(_note(60, dur_s=0.01), grid=GRID).beats >= 0.25
 
 
 # -------------------------------------------------------------------- layout
 def test_layout_places_notes_on_the_detected_grid():
     notes = [_note(60, 0.0), _note(62, 0.5), _note(64, 2.0)]
     positions = [(1, 1.0), (1, 2.0), (2, 1.0)]
-    lay = layout_staff(notes, bpm=120.0, meter=Meter(4, 4), key="C major", positions=positions)
+    lay = layout_staff(notes, grid=GRID, key="C major", positions=positions)
     assert [n.onset for n in lay.notes] == [0.0, 1.0, 4.0]
     assert [n.measure for n in lay.notes] == [1, 1, 2]
     assert lay.beats_per_measure == 4.0
@@ -113,7 +116,7 @@ def test_layout_places_notes_on_the_detected_grid():
 def test_layout_honours_compound_meter_units():
     notes = [_note(60, 0.0), _note(62, 0.75)]
     lay = layout_staff(
-        notes, bpm=120.0, meter=Meter(6, 8), positions=[(1, 1.0), (1, 2.0)]
+        notes, grid=BeatGrid(120.0, Meter(6, 8)), positions=[(1, 1.0), (1, 2.0)]
     )
     assert lay.beats_per_measure == 3.0   # two dotted-quarter beats
     assert lay.slot_quarters == 1.5
@@ -128,7 +131,7 @@ def test_layout_chains_durations_without_a_grid():
         _note(62, 0.5, dur_s=0.25, figure="croche"),
         _note(64, 0.75, dur_s=0.25, figure="croche"),
     ]
-    lay = layout_staff(notes, bpm=120.0)
+    lay = layout_staff(notes, grid=GRID)
     assert [n.onset for n in lay.notes] == [0.0, 1.0, 1.5]
     assert [n.written.type_ for n in lay.notes] == ["quarter", "eighth", "eighth"]
     assert lay.measures == 1
@@ -138,7 +141,7 @@ def test_layout_chains_durations_without_a_grid():
 def test_layout_appends_the_preview_without_touching_the_notes():
     notes = [_note(60, 0.0, dur_s=0.5, figure="noire")]
     preview = LiveNote(start=0.5, end=0.9, midi=67)      # being sung right now
-    lay = layout_staff(notes, bpm=120.0, key="C major", preview=preview)
+    lay = layout_staff(notes, grid=GRID, key="C major", preview=preview)
     assert len(lay.notes) == 2
     assert len(notes) == 1                               # the model is untouched
     last = lay.notes[-1]
@@ -149,13 +152,13 @@ def test_layout_appends_the_preview_without_touching_the_notes():
 
 def test_layout_engraves_accidentals_outside_the_key():
     notes = [_note(66, 0.0), _note(67, 0.5)]             # F# then G, in C major
-    lay = layout_staff(notes, bpm=120.0, meter=Meter(4, 4), key="C major")
+    lay = layout_staff(notes, grid=GRID, key="C major")
     assert lay.notes[0].accidental is True
     assert lay.notes[1].accidental is False
 
 
 def test_layout_of_an_empty_take_is_empty():
-    lay = layout_staff([], bpm=120.0)
+    lay = layout_staff([], grid=GRID)
     assert lay.notes == [] and lay.measures == 0 and lay.total_beats == 0.0
 
 
@@ -163,10 +166,10 @@ def test_layout_of_an_empty_take_is_empty():
 def test_notated_rest_duration_follows_the_figure():
     from v2m.core.rests import Rest
 
-    w = notated_rest_duration(Rest(start=0.0, end=0.5, figure="soupir"), bpm=120.0)
+    w = notated_rest_duration(Rest(start=0.0, end=0.5, figure="soupir"), grid=GRID)
     assert (w.type_, w.beats, w.dots) == ("quarter", 1.0, 0)
     # sans figure (tempo inconnu) : la valeur dessinable la plus proche
-    w = notated_rest_duration(Rest(start=0.0, end=4.0), bpm=60.0)
+    w = notated_rest_duration(Rest(start=0.0, end=4.0), BeatGrid(60.0))
     assert (w.type_, w.beats) == ("whole", 4.0)
 
 
@@ -178,7 +181,7 @@ def test_layout_engraves_rests_between_phrases_on_the_grid():
     notes = [_note(60, 0.0), _note(62, 2.0)]
     positions = [(1, 1.0), (2, 1.0)]
     rests = [Rest(start=0.5, end=1.0, figure="soupir")]
-    lay = layout_staff(notes, bpm=120.0, meter=Meter(4, 4), positions=positions, rests=rests)
+    lay = layout_staff(notes, grid=GRID, positions=positions, rests=rests)
     assert [n.onset for n in lay.notes] == [0.0, 4.0]
     assert len(lay.rests) == 1
     r = lay.rests[0]
@@ -196,7 +199,7 @@ def test_layout_chains_rests_so_phrases_are_separated():
         _note(67, 1.5, dur_s=0.5, figure="noire"),
     ]
     rests = [Rest(start=0.5, end=1.5, figure="pause")]
-    lay = layout_staff(notes, bpm=120.0, rests=rests)
+    lay = layout_staff(notes, grid=GRID, rests=rests)
     assert [n.onset for n in lay.notes] == [0.0, 5.0]     # 1 note + 4 temps de pause
     assert [r.onset for r in lay.rests] == [1.0]
     assert lay.rests[0].shape == "pause"
@@ -211,7 +214,7 @@ def test_rest_without_figure_falls_back_to_the_closest_value():
         _note(62, 3.5, dur_s=0.5, figure="noire"),
     ]
     rests = [Rest(start=0.5, end=2.5)]          # 2 s à 120 BPM = 4 temps
-    lay = layout_staff(notes, bpm=120.0, rests=rests)
+    lay = layout_staff(notes, grid=GRID, rests=rests)
     r = lay.rests[0]
     assert r.shape is None
     assert (r.written.type_, r.written.beats) == ("whole", 4.0)

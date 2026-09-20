@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .figures import CANDIDATES
-from .meter import Meter
+from .grid import BeatGrid
 
 LETTERS = ("C", "D", "E", "F", "G", "A", "B")
 LETTER_PC = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -36,18 +36,6 @@ FLAT_STEPS = (34, 37, 33, 36, 32, 35, 31)
 # Treble staff geometry (step values).
 STAFF_LINES = (30, 32, 34, 36, 38)
 MIDDLE_LINE = 34  # B4
-
-# Drawable durations when a note carries no figure (dotted values included).
-_SIMPLE_DURATIONS = (
-    ("whole", 4.0, 0),
-    ("half", 2.0, 0),
-    ("quarter", 1.0, 0),
-    ("eighth", 0.5, 0),
-    ("16th", 0.25, 0),
-    ("half", 3.0, 1),
-    ("quarter", 1.5, 1),
-    ("eighth", 0.75, 1),
-)
 
 
 @dataclass(frozen=True)
@@ -216,15 +204,18 @@ _FIGURE_WRITTEN = {
 }
 
 
-def notated_duration(note, bpm: float) -> Written:
-    """Written duration of a note: its figure, else the closest drawable one."""
-    figure = getattr(note, "figure", None)
-    if figure in _FIGURE_WRITTEN:
-        return _FIGURE_WRITTEN[figure]
-    beats = (note.end - note.start) * bpm / 60.0 if bpm > 0 else 1.0
-    beats = max(0.25, beats)
-    type_, ideal, dots = min(_SIMPLE_DURATIONS, key=lambda c: abs(beats - c[1]))
-    return Written(type_, ideal, dots)
+def _written(figure, seconds: float, grid: BeatGrid, table: dict) -> Written:
+    """A figure's own written value, else the grid's nearest drawable one."""
+    known = table.get(figure)
+    if known is not None:
+        return known
+    type_, beats, dots = grid.written(seconds)
+    return Written(type_, beats, dots)
+
+
+def notated_duration(note, grid: BeatGrid) -> Written:
+    """Written duration of a note: its figure, else what the grid decides."""
+    return _written(getattr(note, "figure", None), note.duration, grid, _FIGURE_WRITTEN)
 
 
 # ----------------------------------------------------------------------
@@ -244,26 +235,19 @@ _REST_WRITTEN = {
 }
 
 
-def notated_rest_duration(rest, bpm: float) -> Written:
+def notated_rest_duration(rest, grid: BeatGrid) -> Written:
     """Written duration of a silence, same grammar as the notes.
 
     The rest's own figure ("soupir"...) is authoritative when present;
-    otherwise the closest drawable value from the real duration.
+    otherwise the grid's nearest drawable value for the real duration.
     """
-    figure = getattr(rest, "figure", None)
-    if figure in _REST_WRITTEN:
-        return _REST_WRITTEN[figure]
-    beats = (rest.end - rest.start) * bpm / 60.0 if bpm > 0 else 1.0
-    beats = max(0.25, beats)
-    type_, ideal, dots = min(_SIMPLE_DURATIONS, key=lambda c: abs(beats - c[1]))
-    return Written(type_, ideal, dots)
+    return _written(getattr(rest, "figure", None), rest.duration, grid, _REST_WRITTEN)
 
 
 def layout_staff(
     notes,
     *,
-    bpm: float = 120.0,
-    meter: Meter | None = None,
+    grid: BeatGrid,
     key=None,
     positions=None,
     rests=None,
@@ -283,8 +267,8 @@ def layout_staff(
     instead of glued to the previous note.
     """
     fifths = key_fifths(key)
-    beats_per_measure = meter.measure_quarters if meter is not None else 4.0
-    slot_quarters = meter.slot_quarters if meter is not None else 1.0
+    beats_per_measure = grid.measure_beats
+    slot_quarters = grid.slot_beats
     rest_list = sorted(rests, key=lambda r: r.start) if rests else []
 
     out: list[StaffNote] = []
@@ -292,7 +276,7 @@ def layout_staff(
     cursor = 0.0
     ri = 0
     for i, note in enumerate(notes):
-        written = notated_duration(note, bpm)
+        written = notated_duration(note, grid)
         on_grid = positions is not None and i < len(positions)
         if on_grid:
             measure_no, beat_no = positions[i]
@@ -302,7 +286,7 @@ def layout_staff(
         while ri < len(rest_list) and rest_list[ri].end <= note.start + 0.02:
             r = rest_list[ri]
             ri += 1
-            w_rest = notated_rest_duration(r, bpm)
+            w_rest = notated_rest_duration(r, grid)
             if on_grid:
                 if onset - cursor >= 0.25:  # a drawable seam exists
                     silences.append(
@@ -320,7 +304,7 @@ def layout_staff(
         )
 
     if preview is not None:
-        written = notated_duration(preview, bpm)
+        written = notated_duration(preview, grid)
         out.append(
             _place(
                 preview,
@@ -341,7 +325,7 @@ def layout_staff(
         beats_per_measure=beats_per_measure,
         slot_quarters=slot_quarters,
         fifths=fifths,
-        meter_label=meter.label if meter is not None else "4/4",
+        meter_label=grid.meter.label,
         key_tonic=getattr(key, "tonic", None) or (str(key).partition(" ")[0] or None),
         key_mode=getattr(key, "mode", None) or (str(key).partition(" ")[2] or None),
     )

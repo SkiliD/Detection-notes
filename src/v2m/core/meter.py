@@ -17,6 +17,11 @@ Two stages, in this order:
 score stays in 4/4 by default; a caller may still pass an explicit Meter to
 `export_result` / `save_musicxml`.
 
+This module DETECTS; `grid.py` owns the `Meter` value object and the
+arithmetic that goes with it (seconds <-> beats, measures, positions). The
+detector runs upstream of the grid — it takes the scalar tempo — so its own
+beat period comes from a bpm-only `BeatGrid`.
+
 Accent evidence wins over the ternary grid, because a 3/4 waltz also aligns
 with that grid (beats 2-3 look like ternary offbeats) while the reverse is
 not true.
@@ -24,7 +29,7 @@ not true.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from .grid import BeatGrid, Meter
 
 COMPOUND_ALIGN_THRESHOLD = 0.75  # share of onsets on the ternary grid
 COMPOUND_MARGIN = 0.15           # ... and this much better than the simple grid
@@ -33,51 +38,6 @@ BPM_SCAN_STEP = 0.01            # scan step, relative (1%)
 MIN_NOTES = 6                   # below: no conclusion
 MIN_DOWNBEATS = 2               # accents needed per hypothesis
 ACCENT_CONTRAST = 0.15          # required strength gap between 3/4 and 4/4
-
-# denominator -> unit duration in quarter beats
-UNIT_QUARTERS = {2: 2.0, 4: 1.0, 8: 0.5}
-
-
-@dataclass(frozen=True)
-class Meter:
-    """A meter (e.g. 4/4 default, 6/8 detected)."""
-
-    beats_per_measure: int   # numerator
-    beat_unit: int           # denominator (4 = quarter, 8 = eighth)
-    score: float = 1.0       # share of onsets supporting it (compound)
-
-    @property
-    def label(self) -> str:
-        return f"{self.beats_per_measure}/{self.beat_unit}"
-
-    @property
-    def is_compound(self) -> bool:
-        return self.beat_unit == 8
-
-    @property
-    def n_slots(self) -> int:
-        """Displayed beats (6/8 -> 2 dotted beats, otherwise the numerator)."""
-        return self.beats_per_measure // 3 if self.is_compound else self.beats_per_measure
-
-    @property
-    def slot_quarters(self) -> float:
-        """Duration of one displayed beat in quarter beats (6/8 -> 1.5)."""
-        if self.is_compound:
-            return 3.0 * UNIT_QUARTERS[8]  # temps pointé
-        return UNIT_QUARTERS[self.beat_unit]
-
-    @property
-    def measure_quarters(self) -> float:
-        """Measure length in quarter beats."""
-        return self.n_slots * self.slot_quarters
-
-    def measure_seconds(self, bpm: float) -> float:
-        """Measure length in seconds at the given tempo."""
-        return self.measure_quarters * 60.0 / bpm
-
-
-DEFAULT_METER = Meter(4, 4)
-
 
 def detect_meter(notes, bpm: float) -> Meter | None:
     """Detect the meter: accents first (3/4 vs 4/4), then ternary (6/8).
@@ -139,10 +99,11 @@ def _detect_compound(starts: list[float], bpm: float) -> Meter | None:
     which is what actually separates a 6/8 (1.00 vs 0.50 measured on a
     reference phrase) from a steady 4/4 (0.71 vs 0.86).
     """
-    ternary = _best_alignment(starts, 1.5 * 60.0 / bpm)
+    beat = BeatGrid(bpm).seconds(1.0)
+    ternary = _best_alignment(starts, 1.5 * beat)
     if ternary < COMPOUND_ALIGN_THRESHOLD:
         return None
-    simple = _best_alignment(starts, 60.0 / bpm)
+    simple = _best_alignment(starts, beat)
     if ternary - simple < COMPOUND_MARGIN:
         return None
     return Meter(6, 8, round(ternary, 2))
@@ -155,9 +116,7 @@ def _detect_simple_by_accents(notes, bpm: float) -> Meter | None:
     carry the highest mean strength; the contrast between the two
     hypotheses decides. Returns None when the evidence is not clear.
     """
-    p = 60.0 / bpm
-    if p <= 0:
-        return None
+    p = BeatGrid(bpm).seconds(1.0)
     beats_idx = [int(round(n.start / p)) for n in notes]
     strengths = [n.strength for n in notes]
 
@@ -186,31 +145,3 @@ def _detect_simple_by_accents(notes, bpm: float) -> Meter | None:
     return Meter(4, 4, round(1.0 - contrast, 2))
 
 
-def note_positions(notes, bpm: float, meter: Meter | None) -> list[tuple[int, float]]:
-    """Position (measure, beat) of each note — both 1-based.
-
-    `meter=None` -> default 4/4 grid (the one rendering actually uses).
-    """
-    measure_s, slot_s = _grid_seconds(bpm, meter)
-    out: list[tuple[int, float]] = []
-    for n in notes:
-        m = int(n.start // measure_s) + 1
-        beat = (n.start % measure_s) / slot_s + 1.0
-        out.append((m, round(beat, 2)))
-    return out
-
-
-def count_measures(notes, bpm: float, meter: Meter | None) -> int:
-    """Number of measures covered (at least one, even for a short fragment)."""
-    if not notes:
-        return 0
-    measure_s, _ = _grid_seconds(bpm, meter)
-    last = max(n.end for n in notes)
-    return max(1, int(-(-last // measure_s)))  # ceil, ≥ 1
-
-
-def _grid_seconds(bpm: float, meter: Meter | None) -> tuple[float, float]:
-    """(seconds per measure, seconds per displayed beat) on the effective grid."""
-    if meter is None:
-        return 4 * 60.0 / bpm, 60.0 / bpm
-    return meter.measure_seconds(bpm), meter.slot_quarters * 60.0 / bpm

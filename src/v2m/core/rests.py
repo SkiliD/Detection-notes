@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .figures import classify_duration
+from .grid import BeatGrid
 
 # Below this a gap is a seam of the segmentation, not a breath. Measured on
 # a real take: sung phrases breathe ~0.2-0.5 s, while intra-note seams
@@ -79,14 +80,14 @@ def classify_rest(beats: float) -> str | None:
 
 def detect_rests(
     notes,
-    bpm: float | None = None,
+    grid: BeatGrid | None = None,
     include_lead_in: bool = True,
     min_rest_s: float = MIN_REST_S,
 ) -> list[Rest]:
     """Gaps between consecutive notes, as chronological `Rest` objects.
 
-    `bpm` labels each rest with its figure (soupir, demi-pause...) when the
-    duration fits the figure catalog; without a tempo the rests come back
+    `grid` labels each rest with its figure (soupir, demi-pause...) when the
+    duration fits the figure catalog; without it the rests come back
     unlabeled (the score still engraves them from their durations).
 
     Guard rails: unordered/overlapping/degenerate notes are tolerated
@@ -103,9 +104,9 @@ def detect_rests(
         if n.start - prev_end >= min_rest_s:
             rests.append(Rest(start=prev_end, end=n.start))
         prev_end = max(prev_end, n.end)
-    if bpm and bpm > 0:
+    if grid is not None:
         for r in rests:
-            r.figure = classify_rest(r.duration * bpm / 60.0)
+            r.figure = classify_rest(grid.beats(r.duration))
     return rests
 
 

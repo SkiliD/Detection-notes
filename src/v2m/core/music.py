@@ -16,6 +16,20 @@ NOTE_NAMES_FR = ("Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "
 NOTE_NAMES_SHARP = NOTE_NAMES
 
 
+def sane_bpm(bpm, default: float = 120.0) -> float:
+    """A tempo a grid can divide by: seconds <-> beats needs bpm > 0.
+
+    Steps that engrave or export divide by the tempo, so a missing or
+    failed detection (None, 0, NaN) falls back on a plausible default
+    instead of raising ZeroDivisionError inside a finished analysis.
+    """
+    try:
+        value = float(bpm)
+    except (TypeError, ValueError):
+        return default
+    return value if np.isfinite(value) and value > 0 else default
+
+
 def hz_to_midi(hz):
     """Frequency in Hz -> float MIDI number (NaN passes through)."""
     return 69.0 + 12.0 * np.log2(np.asarray(hz, dtype=float) / A4_HZ)

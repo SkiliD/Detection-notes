@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from .figures import figures_summary
-from .meter import count_measures, note_positions
+from .grid import BeatGrid
 from .midi_export import build_midi
 from .music import midi_to_name, midi_to_name_fr
 from .musicxml import save_musicxml
@@ -39,14 +39,17 @@ def export_result(
         raise ValueError("export_result requires a complete analysis (tempo + key)")
     stem = Path(stem)
     meter = meter or res.meter
+    # rebuilt from the EFFECTIVE meter (`meter` may override res.meter, e.g. a
+    # caller forcing 3/4) — the carried grid is the pipeline's own, not this
+    grid = BeatGrid(res.tempo.bpm, meter)
     positions = res.note_positions
     if positions is None:
-        positions = note_positions(res.notes, res.tempo.bpm, meter)
+        positions = grid.positions(res.notes)
     pos_by_idx = {i: p for i, p in enumerate(positions)} if positions else {}
 
     mid = build_midi(
         res.notes,
-        bpm=res.tempo.bpm,
+        grid=grid,
         key=res.key,
         quantize_s=quantize_s,
         transpose=transpose,
@@ -54,10 +57,9 @@ def export_result(
     mid.save(str(stem) + ".mid")
     save_musicxml(
         res.notes,
-        res.tempo.bpm,
+        grid,
         res.key,
         str(stem) + ".musicxml",
-        meter=meter,
         chord_progression=getattr(res, "chord_progression", None),
         rests=getattr(res, "rests", None),
     )
@@ -67,7 +69,7 @@ def export_result(
         "duration_s": round(res.duration_s, 3),
         "tempo": {"bpm": res.tempo.bpm},
         "meter": meter.label if meter else None,
-        "num_measures": count_measures(res.notes, res.tempo.bpm, meter),
+        "num_measures": grid.measures(res.notes),
         "key": {
             "best": res.key.best.label,
             "score": round(res.key.best.score, 4),

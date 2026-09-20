@@ -187,7 +187,8 @@ def test_geometry_alone_is_still_strict(name: str):
 def test_onsets_and_pitches_are_close():
     for name in ("consonnes", "gamme liée", "croches", "voix grave"):
         acc = _offline(name, True)
-        assert acc.worst_start_ms <= 80.0, (name, acc.line())  # < ATTACK_TOL_S
+        # la note détectée démarre sur la consonne, pas sur la stabilisation
+        assert acc.worst_start_ms <= 80.0, (name, acc.line())
         assert acc.worst_pitch_st == 0.0, (name, acc.line())
 
 

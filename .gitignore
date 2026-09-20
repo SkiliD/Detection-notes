@@ -57,8 +57,11 @@ live_*
 # NB : le repo ne versionne aucun .json/.csv/.pdf aujourd'hui ; si un jour
 # un fichier de config JSON doit être suivi, le négocier ici avec un !.
 
-# exceptions : garder un éventuel audio d'exemple versionné
+# exceptions : garder un éventuel audio d'exemple versionné, et la référence
+# des artefacts de test (tests/reference/artifacts.json, voir AGENTS.md) :
+# c'est une empreinte, pas une sortie d'analyse — elle doit être versionnée.
 !tests/data/*.wav
+!tests/reference/*.json
 
 # --- IDE / éditeurs ---
 .idea/

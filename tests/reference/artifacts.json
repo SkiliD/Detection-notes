@@ -1,0 +1,22 @@
+{
+  "chant.wav": {
+    "n_notes": 29,
+    "n_rests": 4,
+    "sha256": {
+      "score.json": "aa74326f6a73e501c405d3599b0dd6d536d6bc65d8e4c154a412bc2fa49810c6",
+      "score.mid": "ebf071ea3f0fe859d89444dad9854c693381b2465620c316a6f8aa04d37e373f",
+      "score.musicxml": "21ff81f2fadf8a083b6580e218ef1efe280cbc32b96e467641c9370b29e5083d"
+    },
+    "tempo_bpm": 171.02
+  },
+  "demo.wav": {
+    "n_notes": 15,
+    "n_rests": 0,
+    "sha256": {
+      "score.json": "4bdc589c565662cc0c9f2f7f229293c6b5954e2f1c806babd87761634b1f93b6",
+      "score.mid": "7e8982434a0edc32e21600967ac74dd65b701fd131c468c35756cc253d37f2ee",
+      "score.musicxml": "471cadf5d25fa7b797acea50e79b8dc2c282a4c5b80d393cc6a65ae009eb5e11"
+    },
+    "tempo_bpm": 120.18
+  }
+}

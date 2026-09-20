@@ -22,6 +22,7 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
 
 from ..core.i18n import tr, tr_key_label
+from ..core.grid import BeatGrid
 from ..core.notation import STAFF_LINES, StaffLayout, layout_staff
 
 # Dark-theme palette, shared with the plot views.
@@ -55,8 +56,7 @@ class StaffView(QWidget):
         self._notes: list = []
         self._rests: list = []
         self._preview = None
-        self._bpm = 120.0
-        self._meter = None
+        self._grid = BeatGrid(120.0)
         self._key = None
         self._positions = None
         self._k = 1.0  # engraving scale: grows into the room, shrinks if needed
@@ -67,26 +67,28 @@ class StaffView(QWidget):
     # Model
     # ------------------------------------------------------------------
     def set_score(
-        self, notes, *, bpm: float = 120.0, meter=None, key=None, positions=None,
+        self, notes, *, grid: BeatGrid | None = None, key=None, positions=None,
         rests=None,
     ) -> None:
         """Show a finished analysis (audio file, or a closed live take)."""
         self._notes = list(notes or [])
         self._rests = list(rests or [])
         self._preview = None
-        self._bpm = float(bpm) if bpm else 120.0
-        self._meter = meter
+        self._grid = grid or BeatGrid(None)
         self._key = key
         self._positions = positions
         self.update()
 
-    def set_live(self, notes, preview=None, *, bpm: float = 120.0) -> None:
-        """Show a take in progress: the notes so far + the note being sung."""
+    def set_live(self, notes, preview=None, *, grid: BeatGrid | None = None) -> None:
+        """Show a take in progress: the notes so far + the note being sung.
+
+        The grid of a live take has no meter yet (the fallback 4/4 stands)
+        and its tempo comes from the notes sung so far.
+        """
         self._notes = list(notes or [])
         self._rests = []  # no rest timing during the take: notes only
         self._preview = preview
-        self._bpm = float(bpm) if bpm else 120.0
-        self._meter = None      # no meter yet during the take: 4/4 default
+        self._grid = grid or BeatGrid(None)
         self._key = None
         self._positions = None  # chained by written durations
         self.update()
@@ -98,8 +100,7 @@ class StaffView(QWidget):
         """Current layout (also read by the tests)."""
         return layout_staff(
             self._notes,
-            bpm=self._bpm,
-            meter=self._meter,
+            grid=self._grid,
             key=self._key,
             positions=self._positions,
             rests=self._rests,
@@ -218,7 +219,7 @@ class StaffView(QWidget):
         font.setPointSizeF(max(6.5, S * 0.82))
         p.setFont(font)
         p.setPen(SOFT_INK)
-        parts = [f"{int(round(self._bpm))} {tr('key bpm unit')}", layout.meter_label]
+        parts = [f"{int(round(self._grid.bpm))} {tr('key bpm unit')}", layout.meter_label]
         if layout.key_tonic:
             parts.append(tr_key_label(f"{layout.key_tonic} {layout.key_mode or 'major'}"))
         p.drawText(QPointF(LEFT_PAD + 2.0, 14.0), "   ·   ".join(parts))
