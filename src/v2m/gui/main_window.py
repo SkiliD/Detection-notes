@@ -30,8 +30,9 @@ from ..core import audio_io
 from ..core.audio_io import LiveCapture
 from ..core.figures import label_notes
 from ..core.grid import BeatGrid
-from ..core.i18n import get_language, set_language, tr
+from ..core.i18n import get_language, note_display_pair, set_language, tr
 from ..core.liveseg import LiveNoteSegmenter, LivePitchStream
+from ..core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, hz_to_midi, on_piano
 from ..core.pdf_export import PdfExportError, find_notation_tool
 from ..core.pipeline import AnalyzeOptions
 from ..core.playback import NotePlayer
@@ -39,6 +40,8 @@ from ..core.report import engrave_pdf, export_result
 from ..core.tempo import estimate_bpm_live
 from .staff import StaffView
 from .widgets import (
+    HINT_CARD_STYLE,
+    NOTE_TEXT_COLOR,
     STYLESHEET,
     ErrorBanner,
     LiveIndicator,
@@ -50,6 +53,12 @@ from .widgets import (
 )
 
 AUDIO_EXTS = audio_io.AUDIO_EXTS  # single source of truth (core.audio_io)
+
+# The finder's one answer, in two states: a recognised note is large and in
+# the accent tint, the invite to sing stays calm — the same waiting style the
+# rest of the app uses (`#6a7480`, italic) so it never reads as a result.
+FINDER_NOTE_STYLE = f"font-size: 34pt; font-weight: bold; color: {NOTE_TEXT_COLOR};"
+FINDER_IDLE_STYLE = "font-size: 15pt; font-style: italic; color: #6a7480;"
 
 
 def audio_filter() -> str:
@@ -171,6 +180,7 @@ class MainWindow(QMainWindow):
         self.result = None            # last AnalysisResult
         self.analyze_thread: AnalyzeThread | None = None
         self.live_thread: LiveThread | None = None
+        self.finder_thread: LiveThread | None = None   # note finder (no take kept)
         self.source_path: str | None = None
         self._signal_cache: dict[str, np.ndarray] = {}  # source -> decoded audio
         self._live_signal: np.ndarray | None = None
@@ -202,9 +212,11 @@ class MainWindow(QMainWindow):
         self.page_home = self._build_home_page()
         self.page_analyze = self._build_analyze_page()
         self.page_live = self._build_live_page()
+        self.page_finder = self._build_finder_page()
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_analyze)
         self.stack.addWidget(self.page_live)
+        self.stack.addWidget(self.page_finder)
         self.retranslate()
 
     # ------------------------------------------------------------------
@@ -227,11 +239,7 @@ class MainWindow(QMainWindow):
         self._steps.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._steps.setWordWrap(True)
         self._steps.setMaximumWidth(720)
-        self._steps.setStyleSheet(
-            "color: #8a97a5; font-size: 9pt;"
-            "background: #20262e; border: 1px solid #2e3742; border-radius: 8px;"
-            "padding: 10px 18px;"
-        )
+        self._steps.setStyleSheet(HINT_CARD_STYLE)
         steps_lay = QHBoxLayout()
         steps_lay.addStretch(1)
         steps_lay.addWidget(self._steps)
@@ -252,6 +260,14 @@ class MainWindow(QMainWindow):
         self.btn_live.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_live.clicked.connect(self.on_start_live)
         lay.addWidget(self.btn_live)
+
+        # note finder: the only job of this page is "which note is this?"
+        self.btn_finder = QPushButton("")
+        self.btn_finder.setMinimumHeight(54)
+        self.btn_finder.setStyleSheet(action_button_style(primary=False))
+        self.btn_finder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_finder.clicked.connect(self.on_open_finder)
+        lay.addWidget(self.btn_finder)
 
         # language selector: click to toggle fr <-> en, persisted on disk
         self.btn_lang = QPushButton("")
@@ -373,6 +389,60 @@ class MainWindow(QMainWindow):
         # the score as it is being sung, scrolling under the staff
         self.staff_live = StaffView(live=True)
         root.addWidget(self.staff_live, stretch=2)
+        # recognition read as keys, not as numbers: the keys of the note
+        # being sung light up here, under the same keyboard as the results
+        self.piano_live_keys = PianoView()
+        root.addWidget(self.piano_live_keys)
+        return w
+
+    def _build_finder_page(self) -> QWidget:
+        """Note finder: the live note, on a piano keyboard, and nothing else.
+
+        No staff, no roll, no analysis, no export — the take is not kept.
+        """
+        w = QWidget()
+        root = QVBoxLayout(w)
+        top = QHBoxLayout()
+        self.btn_finder_back = QPushButton("")
+        self.btn_finder_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_finder_back.clicked.connect(self.on_close_finder)
+        top.addWidget(self.btn_finder_back)
+        self.btn_finder_toggle = QPushButton("")
+        self.btn_finder_toggle.setMinimumHeight(38)
+        self.btn_finder_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_finder_toggle.clicked.connect(self.on_toggle_finder)
+        top.addWidget(self.btn_finder_toggle)
+        # the button says what a click DOES; this line says what the app IS
+        # doing — the mic is open, or it is not (an empty page must explain
+        # itself rather than look broken)
+        self.label_finder_state = QLabel("")
+        self.label_finder_state.setStyleSheet("color: #8a97a5; font-size: 9pt;")
+        top.addWidget(self.label_finder_state)
+        top.addStretch(1)
+        root.addLayout(top)
+
+        self.label_finder_note = QLabel("")
+        self.label_finder_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_finder_note.setMinimumHeight(66)  # no jump when it appears
+        root.addWidget(self.label_finder_note)
+        # first-run guidance, in the same card as the home steps
+        self.label_finder_hint = QLabel("")
+        self.label_finder_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_finder_hint.setWordWrap(True)
+        self.label_finder_hint.setMaximumWidth(560)
+        self.label_finder_hint.setStyleSheet(HINT_CARD_STYLE)
+        hint_lay = QHBoxLayout()
+        hint_lay.addStretch(1)
+        hint_lay.addWidget(self.label_finder_hint)
+        hint_lay.addStretch(1)
+        root.addLayout(hint_lay)
+        root.addStretch(1)
+
+        # the whole classical piano: the keys ARE the answer, and nothing
+        # outside A0..C8 can ever light up
+        self.finder_keys = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
+        self.finder_keys.setMinimumHeight(150)
+        root.addWidget(self.finder_keys, stretch=2)
         return w
 
     # ------------------------------------------------------------------
@@ -415,8 +485,14 @@ class MainWindow(QMainWindow):
         self.btn_play.setToolTip(tr("ui play tooltip"))
         self.label_play_pos.setText(tr("ui play pos"))
         self.btn_stop_live.setText(tr("ui stop live"))
+        self.btn_finder.setText(tr("ui finder button"))
+        self.btn_finder_back.setText(tr("ui back home"))
+        self.label_finder_hint.setText(tr("ui finder hint"))
+        self._refresh_finder_state()
         for view in (self.staff, self.staff_live):
             view.setToolTip(tr("ui staff tooltip"))
+        for roll in (self.piano, self.piano_live):
+            roll.set_axis_labels(tr("ui axis note"), tr("ui axis time"))
         if self.live_thread is None or not self.live_thread.isRunning():
             self.label_live_status.setText(tr("ui mic preparing"))
         self.results.retranslate()
@@ -644,6 +720,9 @@ class MainWindow(QMainWindow):
     def _on_live_pitch(self, t: float, hz: float) -> None:
         cur = self.live_thread.seg.current() if self.live_thread and self.live_thread.seg else None
         self.live_indicator.update_note(cur[0] if cur else None, hz)
+        # the recognized note read as a KEY, not as a number
+        midi = int(round(cur[0])) if cur else None
+        self.piano_live_keys.set_pressed({midi} if midi is not None and on_piano(midi) else ())
         if hz == hz and hz > 0:  # NaN check
             self._live_pitch_t.append(t)
             self._live_pitch_m.append(69 + 12 * np.log2(hz / 440.0))
@@ -739,6 +818,7 @@ class MainWindow(QMainWindow):
     def on_stop_live(self) -> None:
         self._live_timer.stop()
         self.piano_live.set_live_preview(None)
+        self.piano_live_keys.set_pressed()
         self.staff_live.clear()
         if self.live_thread is not None and self.live_thread.isRunning():
             self.label_live_status.setText(tr("ui stopping"))
@@ -748,6 +828,88 @@ class MainWindow(QMainWindow):
             self.live_thread = None
         else:
             self.stack.setCurrentWidget(self.page_home)
+
+    # ------------------------------------------------------------------
+    # Note finder: "which note is this?" on a piano keyboard, nothing else
+    # ------------------------------------------------------------------
+    def on_open_finder(self) -> None:
+        self.error_banner.clear()
+        self.stack.setCurrentWidget(self.page_finder)
+        if not self._finder_running():
+            self.on_toggle_finder()
+
+    def on_toggle_finder(self) -> None:
+        if self._finder_running():
+            self._stop_finder()
+            return
+        self.error_banner.clear()
+        self._set_finder_note(None)
+        self.finder_thread = LiveThread(min_conf=0.5)
+        self.finder_thread.pitchFrame.connect(self._on_finder_pitch)
+        self.finder_thread.failed.connect(self._on_finder_failed)
+        self.finder_thread.start()
+        self._refresh_finder_state()
+
+    def on_close_finder(self) -> None:
+        """Leave the finder: the capture is dropped, never analysed nor exported."""
+        self._stop_finder()
+        self.stack.setCurrentWidget(self.page_home)
+
+    def _finder_running(self) -> bool:
+        return self.finder_thread is not None and self.finder_thread.isRunning()
+
+    def _stop_finder(self) -> None:
+        if self._finder_running():
+            self.finder_thread.stop()
+            self.finder_thread.wait(6000)
+        self.finder_thread = None
+        self._refresh_finder_state()
+
+    def _refresh_finder_state(self) -> None:
+        """The finder's chrome for the current language and mic state.
+
+        One writer for the three things that must agree: the button (its
+        label, and its weight — the inviting action is the filled one), the
+        state line, and the note area, which falls back on the invite when
+        nothing is being sung.
+        """
+        running = self._finder_running()
+        self.btn_finder_toggle.setText(
+            tr("ui finder stop") if running else tr("ui finder start")
+        )
+        self.btn_finder_toggle.setStyleSheet(action_button_style(primary=not running))
+        self.label_finder_state.setText(tr("ui finder live") if running else tr("ui finder off"))
+        if not running:
+            self._set_finder_note(None)
+
+    def _on_finder_pitch(self, t: float, hz: float) -> None:
+        """Pitch frame -> the key to light (the segmenter's median if it has one)."""
+        seg = self.finder_thread.seg if self.finder_thread is not None else None
+        cur = seg.current() if seg is not None else None
+        if cur is not None:
+            self._set_finder_note(cur[0])
+        elif hz == hz and hz > 0:
+            self._set_finder_note(float(hz_to_midi(hz)))
+
+    def _set_finder_note(self, midi_float) -> None:
+        """Show the note as a name and a lit key; nothing outside the piano.
+
+        The invite and the answer do not share a style: a 34 pt accent name is
+        an answer, and a first-run page must not shout one it does not have.
+        """
+        midi = None if midi_float is None else int(round(float(midi_float)))
+        if midi is None or not on_piano(midi):
+            self.label_finder_note.setText(tr("ui finder idle"))
+            self.label_finder_note.setStyleSheet(FINDER_IDLE_STYLE)
+            self.finder_keys.set_pressed()
+            return
+        self.label_finder_note.setText(note_display_pair(midi))
+        self.label_finder_note.setStyleSheet(FINDER_NOTE_STYLE)
+        self.finder_keys.set_pressed({midi})
+
+    def _on_finder_failed(self, msg: str) -> None:
+        self._stop_finder()
+        self._on_error(msg)
 
     # ------------------------------------------------------------------
     # Drag & drop

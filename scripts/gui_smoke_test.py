@@ -76,6 +76,26 @@ def main() -> int:
     assert not win.piano_keys.grab().isNull()
     print("piano keyboard ok", flush=True)
 
+    # note finder: 88 keys built, labels translated, no capture started here
+    assert not win.finder_thread
+    assert len(win.finder_keys._whites) == 52
+    win.finder_keys.set_pressed({57})
+    assert win.finder_keys._active == {57}
+    assert win.btn_finder.text() == _tr("ui finder button")
+    assert win.label_finder_hint.text() == _tr("ui finder hint")
+    assert win.label_finder_note.text() == _tr("ui finder idle")
+    # first run must read as states, not as a blank page: the mic says whether
+    # it is open, and the invite is not styled like an answer
+    assert win.btn_finder_toggle.text() == _tr("ui finder start")
+    assert win.label_finder_state.text() == _tr("ui finder off")
+    idle_style = win.label_finder_note.styleSheet()
+    win._set_finder_note(60)
+    assert win.label_finder_note.text() != _tr("ui finder idle")
+    assert win.label_finder_note.styleSheet() != idle_style
+    win._set_finder_note(None)
+    assert win.label_finder_note.styleSheet() == idle_style
+    print("note finder ok", flush=True)
+
     # language toggle: fr -> en -> fr, labels must follow
     from v2m.core.i18n import get_language, set_language
 
@@ -85,6 +105,9 @@ def main() -> int:
     assert get_language() == "en"
     assert win.btn_file.text() != fr_text, "button label must change language"
     assert win.btn_file.text() == "📁  Analyze an audio file"
+    # the roll's axis titles follow too (they used to stay French)
+    assert win.piano.getPlotItem().getAxis("bottom").labelText == _tr("ui axis time")
+    assert win.piano.getPlotItem().getAxis("left").labelText == _tr("ui axis note")
     win.on_toggle_language()
     assert get_language() == "fr"
     assert win.btn_file.text() == fr_text

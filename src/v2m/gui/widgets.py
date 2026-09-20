@@ -43,6 +43,18 @@ def figure_color(figure: str | None) -> tuple:
     return FIGURE_COLORS.get(key, UNCLASSIFIED_COLOR) + (210,)
 
 
+class PitchAxis(pg.AxisItem):
+    """Left axis of the roll: note names (C4, D4…) instead of MIDI numbers.
+
+    The pitch of a note is what a musician reads, and the keyboard below the
+    roll says the same thing — raw numbers only force a conversion the ear
+    has already made.
+    """
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
+        return [midi_to_name(int(round(v))) for v in values]
+
+
 class PianoRoll(pg.PlotWidget):
     """Piano roll: rectangles = notes, curve = fine pitch.
 
@@ -58,11 +70,10 @@ class PianoRoll(pg.PlotWidget):
     LIVE_Y_MIN = 14.0     # minimum visible pitch band, in semitones
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, axisItems={"left": PitchAxis(orientation="left")})
         self.setBackground("#12161c")
         self.getPlotItem().showGrid(x=True, y=True, alpha=0.2)
-        self.getPlotItem().setLabel("left", "Note MIDI")
-        self.getPlotItem().setLabel("bottom", "Temps", units="s")
+        self.set_axis_labels()   # titled by the window's retranslate()
         self._bar_items: list = []
         self._labels: list = []
         self._curve = None
@@ -84,6 +95,17 @@ class PianoRoll(pg.PlotWidget):
         self._play_marker.hide()
         self.addItem(self._play_marker)
         self.scene().sigMouseClicked.connect(self._on_click)
+
+    def set_axis_labels(self, note: str = "", time: str = "") -> None:
+        """Axis titles in the current language, and in seconds on the bottom.
+
+        The pitch axis prints note NAMES (`PitchAxis`); these two titles are
+        the only other text in the plot, so they follow the language like
+        every label — and `tr()` is only safe after `set_language`, hence a
+        `retranslate()` call rather than a default at construction.
+        """
+        self.getPlotItem().setLabel("left", note)
+        self.getPlotItem().setLabel("bottom", time, units="s")
 
     def _move_playhead(self, t: float) -> None:
         """Place the playhead line + marker on the timeline and show them."""
@@ -491,17 +513,28 @@ class ResultsPanel(pg.LayoutWidget):
 
 
 class PianoView(pg.QtWidgets.QWidget):
-    """Piano keyboard showing which detected notes are played.
+    """Piano keyboard showing which notes are played — or being sung.
 
     Black keys are drawn over the whites; a key lights up in the accent
-    color while its note sounds. `set_notes` indexes the detected notes
-    by pitch; `set_playhead` lights the keys sounding at time `t`.
+    color while its note sounds. `set_notes` indexes the detected notes by
+    pitch and `set_playhead` lights the keys sounding at time `t`; the note
+    finder calls `set_pressed` to light the keys it is hearing right now.
+
+    The range is a parameter, so the finder can show the 88 keys of a piano
+    instead of the three octaves the analysis view needs.
     """
 
     MIN_MIDI, MAX_MIDI = 48, 84  # 3 octaves around the middle register
+    WHITE_PCS = (0, 2, 4, 5, 7, 9, 11)
+    SHARP_AFTER = (0, 2, 5, 7, 9)  # C, D, F, G, A are followed by a black key
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, min_midi: int | None = None, max_midi: int | None = None):
         super().__init__(parent)
+        self.min_midi = self.MIN_MIDI if min_midi is None else min_midi
+        self.max_midi = self.MAX_MIDI if max_midi is None else max_midi
+        self._whites = [
+            m for m in range(self.min_midi, self.max_midi + 1) if m % 12 in self.WHITE_PCS
+        ]
         self._spans: dict[int, list[tuple[float, float]]] = {}
         self._active: set[int] = set()
         self.setMinimumHeight(78)
@@ -520,13 +553,20 @@ class PianoView(pg.QtWidgets.QWidget):
         }
         self.update()
 
+    def set_pressed(self, midis=None) -> None:
+        """Light exactly these keys (the note finder's live pitch)."""
+        self._active = set(midis or ())
+        self.update()
+
     def paintEvent(self, ev) -> None:  # noqa: N802 (Qt naming)
         from PyQt6.QtGui import QColor, QPainter, QPen
 
         p = QPainter(self)
         w, h = self.width(), self.height()
-        n_white = 21  # 3 octaves
+        n_white = len(self._whites)
         ww = w / n_white
+        # label a white key with its own name whenever it is wide enough
+        show_names = ww >= 16.0
         # white keys
         for i in range(n_white):
             midi = self._white_midi(i)
@@ -549,26 +589,24 @@ class PianoView(pg.QtWidgets.QWidget):
                     int(x), 0, int(bw), int(bh),
                     QColor("#2f81a8") if key_on else QColor("#151a20"),
                 )
-        # midi C3/C4/C5 marks
+        # note names on the white keys (all of them when they fit, else the Cs)
         p.setPen(QColor("#6a7480"))
         f = p.font()
         f.setPointSize(7)
         p.setFont(f)
         for i in range(n_white):
-            if self._white_midi(i) % 12 == 0:
-                p.drawText(int(i * ww) + 2, h - 4, f"C{self._white_midi(i) // 12 - 1}")
+            midi = self._white_midi(i)
+            if show_names or midi % 12 == 0:
+                p.drawText(int(i * ww) + 2, h - 4, midi_to_name(midi))
         p.end()
 
     # keyboard mapping helpers -----------------------------------------
     def _white_midi(self, idx: int) -> int:
-        """Midi note of the idx-th white key (C3 = 48 first)."""
-        whites = (0, 2, 4, 5, 7, 9, 11)
-        octv, deg = divmod(idx, 7)
-        return self.MIN_MIDI + octv * 12 + whites[deg]
+        """MIDI note of the idx-th white key of this keyboard."""
+        return self._whites[idx]
 
-    @staticmethod
-    def _has_black_after(midi: int) -> bool:
-        return midi % 12 in (0, 1, 3, 5, 8)  # C, D, F, G, A have a sharp
+    def _has_black_after(self, midi: int) -> bool:
+        return midi % 12 in self.SHARP_AFTER and midi + 1 <= self.max_midi
 
 
 class ErrorBanner(pg.QtWidgets.QLabel):
@@ -599,7 +637,9 @@ class LiveIndicator(pg.QtWidgets.QWidget):
         super().__init__(parent)
         lay = pg.QtWidgets.QVBoxLayout(self)
         self.label_note = pg.QtWidgets.QLabel("—")
-        self.label_note.setStyleSheet("font-size: 21pt; font-weight: bold; color: #6cf;")
+        self.label_note.setStyleSheet(
+            f"font-size: 21pt; font-weight: bold; color: {NOTE_TEXT_COLOR};"
+        )
         self.label_hz = pg.QtWidgets.QLabel("")
         self.label_rms = pg.QtWidgets.QLabel("niveau : —")
         lay.addWidget(self.label_note)
@@ -621,6 +661,15 @@ class LiveIndicator(pg.QtWidgets.QWidget):
 
 # Application-wide QSS: coherent dark palette, visible focus, calm motion.
 ACCENT = "#4da3d8"  # single accent color for primary actions & progress
+NOTE_TEXT_COLOR = "#6cf"  # the recognized note, wherever it is written large
+
+# Calm card for "here is what to do": the home steps and the note finder share
+# it, so guidance reads the same wherever it appears.
+HINT_CARD_STYLE = (
+    "color: #8a97a5; font-size: 9pt;"
+    "background: #20262e; border: 1px solid #2e3742; border-radius: 8px;"
+    "padding: 10px 18px;"
+)
 STYLESHEET = """
 # Font sizes in pt, never px: a px-sized font reports pointSize() == -1,
 # and rich-text labels then hit QFont::setPointSize(-1) (console warning).

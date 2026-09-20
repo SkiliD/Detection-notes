@@ -15,6 +15,25 @@ NOTE_NAMES_FR = ("Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "
 # kept as a backwards-compatible alias used by earlier revisions
 NOTE_NAMES_SHARP = NOTE_NAMES
 
+# The 88 keys of a classical piano: A0 (MIDI 21) to C8 (108). Nothing outside
+# them is a note a piano has, so no recognition path may produce one — the
+# staff, the keyboard view and the export all assume a piano key.
+PIANO_MIN_MIDI = 21
+PIANO_MAX_MIDI = 108
+
+
+def on_piano(midi) -> bool:
+    """True when a MIDI number (float allowed) is a classical piano key.
+
+    Undecidable input is not a key either — None, NaN, or a string that is
+    not even a number: the point is a guarantee, not a best effort.
+    """
+    try:
+        value = float(midi)
+    except (TypeError, ValueError):
+        return False
+    return PIANO_MIN_MIDI <= value <= PIANO_MAX_MIDI
+
 
 def sane_bpm(bpm, default: float = 120.0) -> float:
     """A tempo a grid can divide by: seconds <-> beats needs bpm > 0.

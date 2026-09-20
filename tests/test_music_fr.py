@@ -2,13 +2,27 @@
 
 import pytest
 
+
+def test_only_the_88_keys_of_a_classical_piano_are_notes():
+    """A0 (21) à C8 (108) : rien hors de ces touches n'est une note de piano."""
+    assert (PIANO_MIN_MIDI, PIANO_MAX_MIDI) == (21, 108)
+    assert len(range(PIANO_MIN_MIDI, PIANO_MAX_MIDI + 1)) == 88
+    assert on_piano(21) and on_piano(108)          # les deux touches extrêmes
+    assert on_piano(21.4) and on_piano(107.9)      # une hauteur entre deux touches
+    assert not on_piano(20.9) and not on_piano(108.1)   # juste dehors
+    # indécidable n'est pas une touche non plus : la garantie, pas l'à-peu-près
+    assert not on_piano(float("nan")) and not on_piano(None) and not on_piano("so")
+
 from v2m.core.audio_io import AudioLoadError, load_file
 from v2m.core.music import (
     NOTE_NAMES,
     NOTE_NAMES_FR,
+    PIANO_MAX_MIDI,
+    PIANO_MIN_MIDI,
     format_note_fr,
     midi_to_name,
     midi_to_name_fr,
+    on_piano,
 )
 
 

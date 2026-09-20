@@ -10,6 +10,11 @@ C'est un filet sur les SEPT consommateurs à la fois : la partition prouve les
 figures, les mesures, les silences, l'armure et les positions ; le rapport
 prouve les compteurs et les positions ; le MIDI prouve la quantification.
 
+Un second test interroge la partition pour elle-même, sans référence : chaque
+mesure doit totaliser la durée de sa signature et le `<type>` de chaque note
+vaut exactement sa `<duration>` — deux chiffres qui viennent de chemins
+différents (l'analyse, puis le catalogue des valeurs écrites).
+
 Deux précautions assumées :
 
 - la référence est liée aux fichiers audio, qui sont gitignorés : le test est
@@ -31,6 +36,7 @@ import os
 from pathlib import Path
 
 import pytest
+from scorexml import assert_measures_close, score_root
 
 from v2m.core import audio_io
 from v2m.core.pipeline import AnalyzeOptions, analyze_signal
@@ -73,6 +79,23 @@ def _moved(want: dict, got: dict) -> str:
         for key in ("n_notes", "n_rests", "tempo_bpm")
         if want[key] != got[key]
     )
+
+
+def test_the_reference_scores_fill_their_measures_and_agree_with_their_types(tmp_path):
+    """Une partition doit se refermer : chaque mesure totalise la durée annoncée
+    par sa signature, et le `<type>` de chaque note vaut exactement sa
+    `<duration>` — sur les vraies prises, où les deux chiffres viennent de
+    chemins différents (l'analyse pour la durée, le catalogue pour le type).
+    Le chemin arrimé est le seul concerné ; `snap=False` n'est qu'un crochet
+    de test dans `test_rests.py`."""
+    present = [(name, ROOT / name) for name in TAKES if (ROOT / name).exists()]
+    if not present:
+        pytest.skip(f"aucune prise de référence dans {ROOT}")
+
+    for name, take in present:
+        _analyse(take, tmp_path / name)
+        xml = (tmp_path / name / "score.musicxml").read_text(encoding="utf-8")
+        assert_measures_close(score_root(xml), name)
 
 
 def test_the_reference_takes_still_export_the_same_bytes(tmp_path):

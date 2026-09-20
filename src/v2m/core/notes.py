@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .music import hz_to_midi
+from .music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, hz_to_midi, on_piano
 from .onsets import Attacks
 
 DEFAULT_MIN_CONF = 0.6
@@ -97,7 +97,7 @@ def clean_pitch(track, min_conf: float = DEFAULT_MIN_CONF) -> None:
             med[i] = np.median(seg)
     # second pass: keep frames close to the median (< 1 semitone)
     ok = voiced & (np.abs(midi - med) < 1.0)
-    ok &= voiced & (med >= 21.0) & (med <= 108.0)  # A0..C8
+    ok &= voiced & (med >= PIANO_MIN_MIDI) & (med <= PIANO_MAX_MIDI)
     # vibrato smoothing: 9-frame median (~90 ms) — reduces vibrato while
     # PRESERVING sharp note transitions (a median does not blur hard edges,
     # unlike a moving average).
@@ -558,16 +558,14 @@ def track_to_notes(
     segments = _absorb_transitions(segments, times, attacks)
     segments = _fuse_close(segments, gap_s)
 
-    notes = [
-        Note(
-            start=s.start,
-            end=s.end,
-            midi=int(round(s.forced_pitch if s.forced_pitch is not None else s.pitch(semitones))),
-            confidence=s.confidence,
-        )
-        for s in segments
-        if s.duration >= min_note_s
-    ]
+    notes: list[Note] = []
+    for s in segments:
+        if s.duration < min_note_s:
+            continue
+        midi = int(round(s.forced_pitch if s.forced_pitch is not None else s.pitch(semitones)))
+        if not on_piano(midi):
+            continue  # outside A0..C8: not a note a piano has
+        notes.append(Note(start=s.start, end=s.end, midi=midi, confidence=s.confidence))
 
     notes = _merge_same_onset(notes)
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .music import hz_to_midi, midi_to_name
+from .music import hz_to_midi, midi_to_name, on_piano
 from .onsets import AttackTracker
 
 HOLD_ST = 0.6            # pitch spread (semitones) tolerated to call it held
@@ -267,7 +267,9 @@ class LiveNoteSegmenter:
             return
         start = self.note_start
         midi = int(round(float(np.median(self.note_midis))))
-        if end_t - start >= self.min_note_s:
+        # only piano keys make it into the take (A0..C8): a pitch outside is
+        # an octave error or a breath, not a note the singer produced
+        if end_t - start >= self.min_note_s and on_piano(midi):
             self.notes.append(
                 LiveNote(start=start, end=end_t, midi=midi, articulated=self.note_articulated)
             )
@@ -287,6 +289,8 @@ class LiveNoteSegmenter:
         if self.state != "ACTIVE" or self.note_start is None or not self.note_midis:
             return None
         midi = int(round(float(np.median(self.note_midis))))
+        if not on_piano(midi):
+            return None
         return LiveNote(
             start=self.note_start,
             end=max(t, self.note_start + 0.05),

@@ -134,3 +134,42 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         if win.live_thread is not None and win.live_thread.isRunning():
             win.live_thread.stop()
             win.live_thread.wait(3000)
+
+
+def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
+    """La section « trouver la note » n'a qu'un rôle : allumer la touche
+    chantée. Pas d'analyse finale, pas d'export, rien de conservé."""
+    import sounddevice as sd
+
+    from v2m.core.i18n import tr
+    from v2m.gui import main_window as mw
+
+    monkeypatch.setattr(sd, "InputStream", FakeMic)
+    exported: list[tuple] = []
+    monkeypatch.setattr(
+        mw, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
+    )
+
+    win = mw.MainWindow()
+    try:
+        win.on_open_finder()
+        assert win.stack.currentWidget() is win.page_finder
+        assert _pump_until(qapp, lambda: bool(win.finder_keys._active), timeout=60), (
+            "aucune touche allumée par le chercheur de note"
+        )
+        # la touche allumée est celle de la mélodie factice (La3 Do4 Ré4 Mi4),
+        # jamais un numéro : le clavier du piano est la seule réponse affichée
+        assert win.finder_keys._active <= {57, 60, 62, 64}
+        assert win.label_finder_note.text() not in ("", tr("ui finder idle"))
+
+        win.on_close_finder()
+        assert win.stack.currentWidget() is win.page_home
+        assert win.finder_thread is None
+        assert win.finder_keys._active == set()
+        assert win.label_finder_note.text() == tr("ui finder idle")
+        assert not exported, "le chercheur de note ne doit rien exporter"
+        assert win.result is None, "le chercheur de note ne doit rien analyser"
+    finally:
+        if win.finder_thread is not None and win.finder_thread.isRunning():
+            win.finder_thread.stop()
+            win.finder_thread.wait(3000)

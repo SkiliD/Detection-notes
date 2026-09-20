@@ -44,6 +44,26 @@ def test_short_blip_ignored():
     assert seg.notes[0].midi == 69
 
 
+def test_out_of_piano_notes_are_never_kept():
+    """Un piano n'a que 88 touches (A0..C8) : une hauteur en dehors n'entre ni
+    dans la prise ni dans le preview — l'erreur d'octave reste visible, la note
+    n'existe pas."""
+    from v2m.core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI
+
+    seg = LiveNoteSegmenter()
+    _feed(seg, midi_to_hz(PIANO_MIN_MIDI - 3), 0.0, 0.30)   # sous A0
+    _feed(seg, float("nan"), 0.30, 0.10)
+    _feed(seg, midi_to_hz(PIANO_MAX_MIDI + 5), 0.40, 0.30)  # au-dessus de C8
+    _feed(seg, float("nan"), 0.70, 0.10)
+    _feed(seg, midi_to_hz(PIANO_MIN_MIDI), 0.80, 0.30)      # A0, la touche extrême
+    seg.flush(1.15)
+    assert [n.midi for n in seg.notes] == [PIANO_MIN_MIDI]
+
+    seg2 = LiveNoteSegmenter()
+    _feed(seg2, midi_to_hz(PIANO_MAX_MIDI + 5), 0.0, 0.30)
+    assert seg2.active_note(0.25) is None
+
+
 def test_active_note_shows_the_note_being_sung():
     """Pendant qu'une note est tenue, le preview la décrit sans la stocker."""
     seg = LiveNoteSegmenter()

@@ -1,9 +1,10 @@
 """MusicXML export: readable score built from the analysis.
 
 Principles:
-- divisions = 12 (common multiple of 3 and 4): every plain, dotted AND
-  triplet figure has an integer duration in divisions.
-- 1 quarter beat = 12 divisions, a 4/4 measure = 48 divisions.
+- divisions = 24 (a multiple of 3, 4 and 8): every plain, dotted AND
+  triplet figure — and the 32nd — has an integer duration in divisions.
+- 1 quarter beat = 24 divisions, a 4/4 measure = 96 divisions, a 6/8 (three
+  quarter beats) 72.
 - Each beat is written note by note: a note's own duration, then a rest for
   what is left of the beat (no note is stretched to fill the beat).
 - A note spanning several beats is rendered beat by beat with ties
@@ -29,7 +30,11 @@ from .music import midi_to_name_fr
 
 STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
-DIVISIONS = 12  # steps per quarter beat — the export's own grid
+# Steps per quarter beat — the export's own grid. 24, not 12: every value of
+# the written-duration catalog is then a whole number of divisions (the dotted
+# 16th = 9, the dotted whole = 144) and the 32nd is expressible (3). At 12 the
+# grid could honour neither, so a file could not be typed truthfully.
+DIVISIONS = 24
 
 # Below this overlap a "note" on a beat is a segmentation artifact, not a
 # sound: the beat is written without it.
@@ -37,10 +42,9 @@ MIN_OVERLAP_S = 0.030
 
 # steps -> (MusicXML type, number of dots), taken from the grid's catalog
 # (`DRAWABLE`): what a duration is written as is decided in ONE place, and the
-# staff engraves the same value. A catalog value the 12-division grid cannot
-# express is skipped — the dotted 16th, 4.5 steps — because the integer
-# <duration> is what fills the measure, and rounding it down to 4 would collide
-# with the triplet eighth below and mislabel every 4-step span.
+# staff engraves the same value. A catalog value that is not a whole number of
+# divisions is skipped rather than truncated — `int()` would quietly mislabel
+# it (none is skipped at 24, the guard is for a value added later).
 _TYPE_BY_STEPS: dict[int, tuple[str, int]] = {
     int(steps): (type_, dots)
     for type_, beats, dots in DRAWABLE
@@ -49,11 +53,11 @@ _TYPE_BY_STEPS: dict[int, tuple[str, int]] = {
 # Triplet flavours and the 32nd: no catalog value exists for a triplet (it is
 # neither plain nor dotted) and the 32nd is below the catalog's 16th floor.
 _TYPE_BY_STEPS.update(
-    {32: ("whole", 0), 16: ("half", 0), 8: ("quarter", 0),
-     4: ("eighth", 0), 2: ("16th", 0), 1: ("32nd", 0)}
+    {64: ("whole", 0), 32: ("half", 0), 16: ("quarter", 0),
+     8: ("eighth", 0), 4: ("16th", 0), 3: ("32nd", 0), 2: ("32nd", 0)}
 )
 
-_TUPLET_STEPS = {32, 16, 8, 4, 2}  # steps that correspond to triplets
+_TUPLET_STEPS = {64, 32, 16, 8, 4, 2}  # steps that correspond to triplets
 
 # Canonical French rest figures (core/rests.py) -> (MusicXML type, dots).
 # Used to label the written silences with their real shape instead of the
@@ -316,6 +320,10 @@ def build_score_xml(
     grid_steps = grid.steps(grid_s, per_beat=DIVISIONS)   # per written beat
     measure_s = grid.measure_seconds
     meter = grid.meter
+    # the numerator counts the notated beat (six EIGHTHS in 6/8); the export
+    # writes DISPLAYED beats (two dotted quarters), so a measure is filled in
+    # `n_slots` steps — the same unit `measure_seconds` is built from.
+    slots_per_measure = meter.n_slots
 
     max_end = max((n.end for n in notes), default=0.0)
     total_measures = max(1, int(max_end / measure_s + 0.999))
@@ -385,7 +393,7 @@ def build_score_xml(
         m_end = m_start + measure_s
         skip_until = m_start
         b = 0
-        while b < meter.beats_per_measure:
+        while b < slots_per_measure:
             b_start = m_start + b * grid_s
             b_end = b_start + grid_s
             if b_start < skip_until - 1e-6:
@@ -464,7 +472,7 @@ def build_score_xml(
             # (an empty measure engraves one whole rest; a breath labeled by
             # rests.py shows its real shape — soupir, demi-pause...)
             run = 1
-            while b + run < meter.beats_per_measure:
+            while b + run < slots_per_measure:
                 nb_start = m_start + (b + run) * grid_s
                 nb_end = nb_start + grid_s
                 if any(

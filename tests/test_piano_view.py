@@ -8,8 +8,9 @@ import numpy as np
 import pytest
 
 from v2m.core.liveseg import LiveNote
+from v2m.core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI
 from v2m.core.notes import Note
-from v2m.gui.widgets import PianoRoll, PianoView, WaveformView, figure_color
+from v2m.gui.widgets import PianoRoll, PianoView, PitchAxis, WaveformView, figure_color
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +53,48 @@ def test_playhead_without_notes_is_safe(qapp):
     pv = PianoView()
     pv.set_playhead(1.0)  # no crash, nothing lit
     assert pv._active == set()
+
+
+def test_the_keyboard_range_is_a_parameter(qapp):
+    """Le chercheur de note affiche les 88 touches d'un piano classique."""
+    full = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
+    assert len(full._whites) == 52         # 88 touches dont 36 noires
+    assert full._white_midi(0) == 21 and full._white_midi(51) == 108
+    assert not full._has_black_after(108)  # rien après C8
+    # la vue d'analyse couvre 48..84 : 22 blanches, C6 comprise (la touche 84
+    # était invisible — une note au bord haut ne pouvait pas s'allumer)
+    assert len(PianoView()._whites) == 22
+
+
+def test_every_black_key_of_the_piano_is_drawn(qapp):
+    """Régression : le clavier ne dessinait qu'un Do# et un Fa# par octave
+    (la règle testait les mauvaises classes de hauteur), donc Ré#, Sol# et
+    La# n'existaient pas — aucune note noire ailleurs ne pouvait s'allumer."""
+    pv = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
+    drawn = {
+        pv._white_midi(i) + 1
+        for i in range(len(pv._whites))
+        if pv._has_black_after(pv._white_midi(i))
+    }
+    black_pcs = (1, 3, 6, 8, 10)
+    expected = {m for m in range(PIANO_MIN_MIDI, PIANO_MAX_MIDI + 1) if m % 12 in black_pcs}
+    assert drawn == expected and len(drawn) == 36
+
+
+def test_pressed_keys_are_lit_directly(qapp):
+    """`set_pressed` allume la touche entendue, noire comprise."""
+    pv = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
+    pv.set_pressed({63})  # Ré#4 : une touche noire qui n'était pas dessinée
+    assert pv._active == {63}
+    assert not pv.grab().isNull()
+    pv.set_pressed()
+    assert pv._active == set()
+
+
+def test_the_pitch_axis_names_notes_instead_of_numbers(qapp):
+    """L'axe du roll se lit comme un clavier, pas comme des numéros MIDI."""
+    axis = PitchAxis(orientation="left")
+    assert axis.tickStrings([21, 60, 61, 108], 1.0, 1.0) == ["A0", "C4", "C#4", "C8"]
 
 
 # ----------------------------------------------------------------- piano roll
