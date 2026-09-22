@@ -1,94 +1,77 @@
-"""Real-time session (CLI): microphone capture -> live display -> export."""
+"""Real-time CLI adapter for the shared live take lifecycle."""
 
 from __future__ import annotations
 
 import time
 
-import numpy as np
-
-from .core import audio_io
-from .core.audio_io import LiveCapture
-from .core.figures import label_notes
-from .core.grid import BeatGrid
 from .core.i18n import note_display_pair, tr, tr_figure
-from .core.liveseg import LivePitchStream
-from .core.pipeline import AnalyzeOptions, analyze_signal
-from .core.report import export_result
-from .core.tempo import estimate_bpm_live
+from .core.live_session import LiveEvent, LiveTake
+from .core.report import export_result, live_export_dir, live_take_name
 
 
 class LiveSession:
-    """Capture from the mic, display detected notes, export on stop."""
+    """CLI adapter: print a shared LiveTake and export its final result."""
 
     def __init__(self, min_conf: float = 0.5, transpose: int = 0, out_stem: str | None = None):
         self.min_conf = min_conf
         self.transpose = transpose
-        self.out_stem = out_stem or f"live_{time.strftime('%Y%m%d_%H%M%S')}"
-        self.stream: LivePitchStream | None = None
-        self.capture: LiveCapture | None = None
+        self.out_stem = out_stem or live_take_name()
+        self.take = LiveTake(min_conf=min_conf, on_event=self._on_event)
 
-    @property
-    def seg(self):
-        """The live segmenter (owned by the shared live chain)."""
-        return self.stream.seg if self.stream is not None else None
+    def _on_event(self, event: LiveEvent) -> None:
+        if event.kind == "note_closed" and event.note is not None:
+            note = event.note
+            # The figures are already labeled by LiveTake (the policy's
+            # single owner) BEFORE this event is emitted: the adapter only
+            # prints them.
+            fig = f"  [{tr_figure(note.figure)}]" if note.figure else ""
+            print(f"  ♪ {note_display_pair(note.midi)}  ({note.duration:.2f} s){fig}")
 
-    # ------------------------------------------------------------------
-    def _on_block(self, block: np.ndarray, t: float) -> None:
-        if self.stream is None:
-            self.stream = LivePitchStream(self.capture.samplerate, gate_rms=audio_io.GATE_RMS)
-        closed = self.stream.elapsed_notes()
-        self.stream.feed(block, t)
-        if self.stream.elapsed_notes() == closed:
-            return  # no note ended in this block
-        notes = self.stream.seg.notes
-        n = notes[-1]
-        # label at note END so the figure lands with the note itself
-        bpm = estimate_bpm_live(notes)
-        if bpm:
-            label_notes(notes, BeatGrid(bpm))
-        fig = f"  [{tr_figure(n.figure)}]" if n.figure else ""
-        print(f"  ♪ {note_display_pair(n.midi)}  ({n.duration:.2f} s){fig}")
-
-    # ------------------------------------------------------------------
     def run(self) -> None:
         print(tr("cli live banner"))
-        self.capture = LiveCapture(on_block=self._on_block)
-        self.capture.start()
-        print(f"  Périphérique : {self.capture.samplerate} Hz, blocs de {self.capture.blocksize}")
+        self.take.start()
         try:
             while True:
                 time.sleep(0.1)
-                if self.seg is None:
+                seg = self.take.segmenter
+                if seg is None:
                     continue
-                cur = self.seg.display_text()
-                total = len(self.seg.notes)
+                cur = seg.display_text()
+                total = len(seg.notes)
                 print(
-                    f"\r  {self.capture.elapsed():7.1f} s | {cur:>24} | {total} notes ",
+                    f"\r  {self.take.elapsed:7.1f} s | {cur:>24} | {total} notes ",
                     end="",
                     flush=True,
                 )
         except KeyboardInterrupt:
             pass
         finally:
-            self.capture.stop()
-            if self.seg is not None:
-                self.seg.flush(self.capture.elapsed())
+            self.take.stop()
         print(tr("cli stop capture"))
         self.export()
 
-    # ------------------------------------------------------------------
     def export(self) -> str | None:
-        y = self.capture.signal() if self.capture else np.zeros(0)
-        if len(y) < audio_io.SR // 2:
+        if self.take.state != "stopped":
+            self.take.stop()
+        if self.take.result is None and self.take.signal.size < self.take.sr // 2:
             print(tr("cli too short"))
             return None
         print(tr("key final analysis"))
-        res = analyze_signal(y, audio_io.SR, source="live", opts=AnalyzeOptions(min_conf=self.min_conf))
-        export_result(res, self.out_stem, transpose=self.transpose)
+        # The analysis has ONE path: LiveTake.finalize owns the drain, the
+        # length gate and the idempotency; the adapter only exports what it
+        # returns (a short take re-raises the take's own 'failed' error).
+        res, _ = self.take.finalize()
+        if res.tempo is None or res.key is None:
+            raise ValueError("analyse live incomplète")
+        take_dir = live_export_dir(self.out_stem)
+        export_result(res, take_dir / self.out_stem, transpose=self.transpose)
         print(f"{tr('key tempo')}    : {res.tempo.bpm} BPM")
         print(f"{tr('key key label')} : {res.key.best.label}")
         if res.chord:
             print(f"{tr('key chord label')} : {res.chord.best.label}")
         print(f"{tr('key notes label')} : {len(res.notes)}")
-        print(f"Export   : {self.out_stem}.mid, {self.out_stem}.musicxml, {self.out_stem}.json, {self.out_stem}.csv")
-        return f"{self.out_stem}.mid"
+        print(
+            f"Export   : {take_dir / self.out_stem}.mid, {take_dir / self.out_stem}.musicxml, "
+            f"{take_dir / self.out_stem}.json, {take_dir / self.out_stem}.csv"
+        )
+        return str(take_dir / f"{self.out_stem}.mid")

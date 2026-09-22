@@ -14,8 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .figures import CANDIDATES
-from .grid import BeatGrid
+from .grid import BeatGrid, CATALOGUE, Figure
 
 LETTERS = ("C", "D", "E", "F", "G", "A", "B")
 LETTER_PC = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -39,17 +38,6 @@ MIDDLE_LINE = 34  # B4
 
 
 @dataclass(frozen=True)
-class Written:
-    """How a note is written: notehead type + duration in quarter beats."""
-
-    type_: str                       # whole | half | quarter | eighth | 16th
-    beats: float                     # duration in quarter beats
-    dots: int = 0
-    tuplet: tuple[int, int] | None = None
-    figure: str | None = None        # canonical French figure name, if known
-
-
-@dataclass(frozen=True)
 class Pitch:
     """A spelled pitch: letter + octave + accidental + staff step."""
 
@@ -67,7 +55,7 @@ class StaffNote:
     step: int
     alter: int
     onset: float                     # quarter beats from the start
-    written: Written
+    written: Figure
     measure: int                     # 1-based
     beat: float                      # displayed beat inside the measure, 1-based
     accidental: bool = False         # engrave an explicit #/b
@@ -90,7 +78,7 @@ class StaffRest:
     """
 
     onset: float                     # quarter beats from the start
-    written: Written
+    written: Figure
     measure: int                     # 1-based
     beat: float                      # displayed beat inside the measure, 1-based
     shape: str | None = None
@@ -198,50 +186,28 @@ def accidental_needed(alter: int, letter: str, fifths: int) -> bool:
 # ----------------------------------------------------------------------
 # Durations
 # ----------------------------------------------------------------------
-FIGURE_BEATS = {c.name: c.beats for c in CANDIDATES}
-_FIGURE_WRITTEN = {
-    c.name: Written(c.type_, c.beats, c.dots, c.tuplet, c.name) for c in CANDIDATES
-}
+_FIGURES_BY_NAME = {f.name: f for f in CATALOGUE}
+_FIGURES_BY_NAME.update({f.rest: f for f in CATALOGUE if f.tuplet is None})
 
 
-def _written(figure, seconds: float, grid: BeatGrid, table: dict) -> Written:
-    """A figure's own written value, else the grid's nearest drawable one."""
-    known = table.get(figure)
-    if known is not None:
-        return known
-    type_, beats, dots = grid.written(seconds)
-    return Written(type_, beats, dots)
+def _written(figure, seconds: float, grid: BeatGrid) -> Figure:
+    """Return the classified value, or the Grid's nearest fallback."""
+    known = _FIGURES_BY_NAME.get(figure)
+    return known if known is not None else grid.written(seconds)
 
 
-def notated_duration(note, grid: BeatGrid) -> Written:
+def notated_duration(note, grid: BeatGrid) -> Figure:
     """Written duration of a note: its figure, else what the grid decides."""
-    return _written(getattr(note, "figure", None), note.duration, grid, _FIGURE_WRITTEN)
+    return _written(getattr(note, "figure", None), note.duration, grid)
 
 
 # ----------------------------------------------------------------------
 # Layout
 # ----------------------------------------------------------------------
-# Written values of the canonical French rest figures (staff + XML share them).
-_REST_WRITTEN = {
-    "pause": Written("whole", 4.0, 0),
-    "demi-pause": Written("half", 2.0, 0),
-    "soupir": Written("quarter", 1.0, 0),
-    "demi-soupir": Written("eighth", 0.5, 0),
-    "quart de soupir": Written("16th", 0.25, 0),
-    "pause pointée": Written("whole", 6.0, 1),
-    "demi-pause pointée": Written("half", 3.0, 1),
-    "soupir pointée": Written("quarter", 1.5, 1),
-    "demi-soupir pointée": Written("eighth", 0.75, 1),
-}
 
-
-def notated_rest_duration(rest, grid: BeatGrid) -> Written:
-    """Written duration of a silence, same grammar as the notes.
-
-    The rest's own figure ("soupir"...) is authoritative when present;
-    otherwise the grid's nearest drawable value for the real duration.
-    """
-    return _written(getattr(rest, "figure", None), rest.duration, grid, _REST_WRITTEN)
+def notated_rest_duration(rest, grid: BeatGrid) -> Figure:
+    """Written duration of a silence, using the same catalogue as notes."""
+    return _written(getattr(rest, "figure", None), rest.duration, grid)
 
 
 def layout_staff(
@@ -277,11 +243,12 @@ def layout_staff(
     ri = 0
     for i, note in enumerate(notes):
         written = notated_duration(note, grid)
-        on_grid = positions is not None and i < len(positions)
-        if on_grid:
+        if positions is not None and i < len(positions):
+            on_grid = True
             measure_no, beat_no = positions[i]
             onset = (measure_no - 1) * beats_per_measure + (beat_no - 1) * slot_quarters
         else:
+            on_grid = False
             onset = cursor
         while ri < len(rest_list) and rest_list[ri].end <= note.start + 0.02:
             r = rest_list[ri]
@@ -362,7 +329,6 @@ def _place(note, written, onset, beats_per_measure, slot_quarters, fifths, previ
 
 
 __all__ = [
-    "FIGURE_BEATS",
     "LETTERS",
     "MIDDLE_LINE",
     "REST_SHAPES",
@@ -371,7 +337,7 @@ __all__ = [
     "StaffLayout",
     "StaffNote",
     "StaffRest",
-    "Written",
+    "Figure",
     "accidental_needed",
     "key_fifths",
     "key_pitch_classes",

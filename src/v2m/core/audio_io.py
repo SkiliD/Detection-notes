@@ -6,7 +6,7 @@ import queue
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -69,7 +69,9 @@ class LiveCapture:
     sr: int = SR                      # analysis sample rate
     on_block: Optional[Callable[[np.ndarray, float], None]] = None
     chunks: list = field(default_factory=list, repr=False)
-    _stream: object = None
+    # `Any` because sounddevice may be absent (the module-level guard), and a
+    # closed stream is set back to None; both call sites re-guard.
+    _stream: Any = None
     _queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _worker: Optional[threading.Thread] = field(default=None, repr=False)
     _n_samples: int = field(default=0, repr=False)
@@ -85,13 +87,18 @@ class LiveCapture:
 
     def _drain(self) -> None:
         """Hand the queued blocks to `on_block` (its own thread)."""
+        # start() only launches this thread when on_block exists; the alias
+        # carries that fact where pyright cannot follow it.
+        on_block = self.on_block
+        if on_block is None:
+            return
         while True:
             item = self._queue.get()
             if item is None:  # sentinel: everything captured has been handled
                 return
             block, t = item
             try:
-                self.on_block(block, t)
+                on_block(block, t)
             except Exception as e:  # one bad block must not end the capture
                 print(f"[live] {e}")
 

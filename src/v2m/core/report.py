@@ -9,14 +9,31 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from pathlib import Path
+from typing import cast
 
 from .figures import figures_summary
-from .grid import BeatGrid
+from .grid import BeatGrid, Meter
 from .midi_export import build_midi
 from .music import midi_to_name, midi_to_name_fr
 from .musicxml import save_musicxml
 from .pdf_export import PdfToolMissing, export_pdf, find_notation_tool, install_hint
+
+
+# Where live takes land: one folder for every live export, one sub-folder
+# per take (timestamped, so no two takes can collide).
+LIVE_TAKES_DIR = Path("prises_live")
+
+
+def live_take_name() -> str:
+    """Unique stem for one live take: live_YYYYmmdd_HHMMSS."""
+    return f"live_{time.strftime('%Y%m%d_%H%M%S')}"
+
+
+def live_export_dir(stem: str | Path) -> Path:
+    """Folder holding one live take's artifacts: `prises_live/<stem>/`."""
+    return LIVE_TAKES_DIR / Path(stem).name
 
 
 def export_result(
@@ -38,11 +55,17 @@ def export_result(
     if res.tempo is None or res.key is None:
         raise ValueError("export_result requires a complete analysis (tempo + key)")
     stem = Path(stem)
-    meter = meter or res.meter
-    # rebuilt from the EFFECTIVE meter (`meter` may override res.meter, e.g. a
-    # caller forcing 3/4) — the carried grid is the pipeline's own, not this
-    grid = BeatGrid(res.tempo.bpm, meter)
-    positions = res.note_positions
+    stem.parent.mkdir(parents=True, exist_ok=True)  # a nested stem (live take) needs its folder
+    grid = getattr(res, "grid", None)
+    if grid is None or meter is not None:
+        # An explicit meter is an intentional export override; otherwise the
+        # pipeline's immutable grid remains the single metric decision.
+        selected_meter = meter or getattr(res, "meter", None)
+        if selected_meter is None:
+            raise ValueError("export_result requires a meter")
+        grid = BeatGrid(res.tempo.bpm, cast(Meter, selected_meter))
+    meter = grid.meter
+    positions = res.note_positions if meter == getattr(res, "meter", None) else None
     if positions is None:
         positions = grid.positions(res.notes)
     pos_by_idx = {i: p for i, p in enumerate(positions)} if positions else {}

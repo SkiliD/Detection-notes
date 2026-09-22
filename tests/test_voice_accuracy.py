@@ -83,6 +83,10 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         dict(glide_s=0.05, consonant_s=0.05),
     ),
     "répétition": ([SungNote(64, 0.2, 0.7), SungNote(64, 1.2, 0.7)], dict(consonant_s=0.05)),
+    "répétition aa-aa": (
+        sequence([69, 69, 69, 69], dur_s=0.30, gap_s=0.15, start_s=0.2),
+        dict(consonant_s=0, glide_s=0, noise=0.02),
+    ),
 }
 
 # le temps réel retrouve exactement ces phrases-là
@@ -99,6 +103,7 @@ LIVE_CASES = [
     "bruit et vibrato",
     "saut d'octave",
     "répétition",
+    "répétition aa-aa",
 ]
 LIVE_TOL_S = 0.20
 
@@ -175,7 +180,10 @@ def test_attack_evidence_never_makes_it_worse(name: str):
     assert with_attacks.intruders == 0
 
 
-@pytest.mark.parametrize("name", ["legato", "consonnes", "glissando long", "saut d'octave", "répétition"])
+@pytest.mark.parametrize(
+    "name",
+    ["legato", "consonnes", "glissando long", "saut d'octave", "répétition", "répétition aa-aa"],
+)
 def test_geometry_alone_is_still_strict(name: str):
     """Sans preuve d'attaque, la règle géométrique du glissando doit suffire
     partout où elle est sans ambiguïté (le pipeline fournit toujours des
@@ -274,3 +282,51 @@ def test_rearticulated_note_on_same_pitch_is_split():
     detected = detect_notes(y, SR)
     acc = measure(detected, truth)
     assert acc.exact, acc.line()
+
+
+# --------------------------------------------------------------------------- #
+# Erreurs humaines : souffle, voix douce, timing négligent
+# --------------------------------------------------------------------------- #
+
+
+def test_a_breathy_voice_does_not_sprout_extra_notes():
+    """Une voix SOUFFLÉE (beaucoup d'air) ne doit pas se couvrir de
+    micro-notes : mesuré, les ondulations du souffle produisaient jusqu'à 12
+    fragments à l'intérieur des notes chantées. Le plancher relatif de force
+    des attaques (MIN_STRENGTH) rejette le bruit (≤ 0,06) et garde les
+    consonnes (≥ 0,86)."""
+    truth = sequence(MIDIS, dur_s=0.6, start_s=0.2)
+    for noise in (0.05, 0.08, 0.10):
+        y = synthesize(truth, glide_s=0.09, consonant_s=0.05, noise=noise)
+        acc = measure(detect_notes(y, SR), truth)
+        assert acc.exact, f"noise={noise}: {acc.line()}"
+
+
+def test_a_quiet_voice_is_still_transcribed():
+    """Chanter DOUCEMENT (amp 0,05) ne doit ni perdre les notes ni tomber
+    sous les seuils de silence."""
+    truth = sequence(MIDIS, dur_s=0.6, start_s=0.2)
+    y = synthesize(truth, glide_s=0.09, consonant_s=0.05, amp=0.05)
+    assert measure(detect_notes(y, SR), truth).exact
+
+
+def test_careless_timing_is_still_transcribed():
+    """Durées et respirations IRRÉGULIÈRES (chanson Humaine) : 5/5 notes.
+    Aucun des deux chemins ne suppose un tempo régulier."""
+    truth = [
+        SungNote(60, 0.20, 0.35), SungNote(62, 0.70, 0.70),
+        SungNote(64, 1.55, 0.28), SungNote(65, 1.95, 0.55),
+        SungNote(67, 2.65, 0.90),
+    ]
+    y = synthesize(truth, glide_s=0.09, consonant_s=0.05)
+    assert measure(detect_notes(y, SR), truth).exact
+
+
+def test_live_confirmation_latency_stays_under_120ms():
+    """La confirmation live a été abaissée (140 -> 100 ms) pour l'affichage :
+    la robustesse doit tenir — vibrato, legato, croches, répétitions."""
+    stream = LivePitchStream(SR, gate_rms=GATE)
+    assert stream.seg.confirm_s == pytest.approx(0.10)
+    for name in ("vibrato", "legato", "croches", "répétition"):
+        acc = _live(name)
+        assert acc.exact, f"{name}: {acc.line()}"

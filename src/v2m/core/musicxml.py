@@ -24,56 +24,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
-from .grid import DRAWABLE, BeatGrid
+from .grid import BeatGrid, CATALOGUE
+from .grid import MUSICXML_DIVISIONS as DIVISIONS
 from .music import midi_to_name_fr
 
 
 STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
-# Steps per quarter beat — the export's own grid. 24, not 12: every value of
-# the written-duration catalog is then a whole number of divisions (the dotted
-# 16th = 9, the dotted whole = 144) and the 32nd is expressible (3). At 12 the
-# grid could honour neither, so a file could not be typed truthfully.
-DIVISIONS = 24
-
 # Below this overlap a "note" on a beat is a segmentation artifact, not a
 # sound: the beat is written without it.
 MIN_OVERLAP_S = 0.030
 
-# steps -> (MusicXML type, number of dots), taken from the grid's catalog
-# (`DRAWABLE`): what a duration is written as is decided in ONE place, and the
-# staff engraves the same value. A catalog value that is not a whole number of
-# divisions is skipped rather than truncated — `int()` would quietly mislabel
-# it (none is skipped at 24, the guard is for a value added later).
 _TYPE_BY_STEPS: dict[int, tuple[str, int]] = {
-    int(steps): (type_, dots)
-    for type_, beats, dots in DRAWABLE
-    if (steps := beats * DIVISIONS).is_integer()
+    round(f.beats * DIVISIONS): (f.type_, f.dots)
+    for f in CATALOGUE
 }
-# Triplet flavours and the 32nd: no catalog value exists for a triplet (it is
-# neither plain nor dotted) and the 32nd is below the catalog's 16th floor.
-_TYPE_BY_STEPS.update(
-    {64: ("whole", 0), 32: ("half", 0), 16: ("quarter", 0),
-     8: ("eighth", 0), 4: ("16th", 0), 3: ("32nd", 0), 2: ("32nd", 0)}
-)
-
-_TUPLET_STEPS = {64, 32, 16, 8, 4, 2}  # steps that correspond to triplets
-
-# Canonical French rest figures (core/rests.py) -> (MusicXML type, dots).
-# Used to label the written silences with their real shape instead of the
-# duration-table fallback (a 0.38 s breath reads as a soupir, not as a
-# quarter rest that "happens" to last that long).
-_REST_TYPE_BY_FIGURE = {
-    "pause": ("whole", 0),
-    "demi-pause": ("half", 0),
-    "soupir": ("quarter", 0),
-    "demi-soupir": ("eighth", 0),
-    "quart de soupir": ("16th", 0),
-    "pause pointée": ("whole", 1),
-    "demi-pause pointée": ("half", 1),
-    "soupir pointée": ("quarter", 1),
-    "demi-soupir pointée": ("eighth", 1),
+_TUPLET_STEPS = {
+    round(f.beats * DIVISIONS) for f in CATALOGUE if f.tuplet is not None
 }
+
+# The rest name is part of the same Figure entry as its MusicXML shape.
+_REST_BY_NAME = {f.rest: f for f in CATALOGUE if f.tuplet is None}
 
 # Rest decomposition order for unlabeled silent spans: plain values only
 # (no triplet flavours — a half TRIPLET rest is not a notation), largest
@@ -95,21 +66,17 @@ def _rest_run_xml(steps: int, figure: str | None) -> str:
     rest an engraver would write, not a sequence of generic quarters.
     """
     parts: list[str] = []
-    if figure in _REST_TYPE_BY_FIGURE:
-        want_type, want_dots = _REST_TYPE_BY_FIGURE[figure]
-        fig_steps = max(
-            (
-                s
-                for s, (ty, do) in _TYPE_BY_STEPS.items()
-                if (ty, do) == (want_type, want_dots)
-                and s <= steps
-                and s not in _TUPLET_STEPS
-            ),
-            default=0,
-        )
-        while fig_steps and steps >= fig_steps:
-            parts.append(_note_xml(None, fig_steps))
-            steps -= fig_steps
+    rest_figure = (
+        _REST_BY_NAME.get(figure) if figure is not None else None
+    )
+    fig_steps = (
+        round(rest_figure.beats * DIVISIONS)
+        if rest_figure is not None
+        else 0
+    )
+    while fig_steps and steps >= fig_steps:
+        parts.append(_note_xml(None, fig_steps))
+        steps -= fig_steps
     for s, _td in _REST_FILL_ORDER:
         while steps >= s:
             steps -= s

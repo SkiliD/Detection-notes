@@ -30,7 +30,7 @@ import io
 import numpy as np
 import pytest
 from v2m.core.figures import label_notes
-from v2m.core.grid import DRAWABLE, BeatGrid, Meter
+from v2m.core.grid import CATALOGUE, BeatGrid, Meter
 from v2m.core.midi_export import build_midi
 from v2m.core.notation import notated_duration
 from v2m.core.notes import Note
@@ -160,8 +160,9 @@ def test_a_duration_on_a_written_value_is_written_as_is(bpm):
     """Le plus proche voisin d'une durée déjà écrivable, c'est elle-même : la
     borne arrondit sans dériver, à tout tempo."""
     grid = BeatGrid(bpm)
-    for type_, beats, dots in DRAWABLE:
-        assert grid.written(grid.seconds(beats)) == (type_, beats, dots)
+    for figure in CATALOGUE:
+        if figure.tuplet is None and not figure.export_only:
+            assert grid.written(grid.seconds(figure.beats)) == figure
 
 
 def test_at_equal_distance_the_plain_figure_wins():
@@ -169,15 +170,15 @@ def test_at_equal_distance_the_plain_figure_wins():
     d'une noire comme d'une noire pointée, et 5 temps à 1 d'une ronde comme
     d'une ronde pointée ; les deux s'écrivent en figure simple."""
     grid = BeatGrid(120.0)
-    assert grid.written(grid.seconds(1.25)) == ("quarter", 1.0, 0)
-    assert grid.written(grid.seconds(5.0)) == ("whole", 4.0, 0)
+    assert grid.written(grid.seconds(1.25)).name == "noire"
+    assert grid.written(grid.seconds(5.0)).name == "ronde"
 
 
 def test_a_duration_exactly_on_a_dotted_value_gets_it():
     """La double-croche pointée (0,375 temps) est une valeur du catalogue : une
     durée qui tombe pile dessus n'est plus rabattue sur la croche voisine."""
     grid = BeatGrid(120.0)
-    assert grid.written(grid.seconds(0.375)) == ("16th", 0.375, 1)
+    assert grid.written(grid.seconds(0.375)).name == "double-croche pointée"
 
 
 @pytest.mark.parametrize("bpm", BPM)
@@ -186,15 +187,15 @@ def test_a_written_duration_stays_within_the_catalogue(bpm):
     pointée — durée nulle, négative, énorme ou non décidable comprises."""
     grid = BeatGrid(bpm)
     for seconds in (-3.0, 0.0, 1e-9, 0.2, 137.0, float("nan")):
-        _, beats, dots = grid.written(seconds)
-        assert 0.25 <= beats <= 6.0
-        assert dots in (0, 1)
+        figure = grid.written(seconds)
+        assert 0.25 <= figure.beats <= 6.0
+        assert figure.dots in (0, 1)
 
 
 def test_a_longer_duration_is_never_written_shorter():
     """La valeur écrite croît avec la durée chantée : balayé sur 300 durées."""
     grid = BeatGrid(171.02)
-    beats = [grid.written(grid.seconds(b))[1] for b in np.linspace(0.0, 6.5, 300)]
+    beats = [grid.written(grid.seconds(b)).beats for b in np.linspace(0.0, 6.5, 300)]
     assert beats == sorted(beats)
 
 
@@ -204,4 +205,4 @@ def test_the_staff_takes_its_fallback_duration_from_the_grid():
     grid = BeatGrid(171.02)
     for dur_s in (100.0, 1.1, 0.5, 0.35, 0.01):
         w = notated_duration(_note(60, 0.0, dur_s), grid)
-        assert (w.type_, w.beats, w.dots) == grid.written(dur_s)
+        assert w == grid.written(dur_s)

@@ -257,9 +257,9 @@ def test_the_export_types_a_duration_the_way_the_grid_writes_it(steps):
     catalogue n'en connaît aucun) et le trente-deuxième, plus court que son
     plancher au seizième, sont énoncés par l'export."""
     beats = steps / DIVISIONS
-    type_, written_beats, dots = GRID.written(GRID.seconds(beats))
-    if abs(written_beats - beats) < 1e-9:
-        assert _TYPE_BY_STEPS[steps] == (type_, dots)
+    written = GRID.written(GRID.seconds(beats))
+    if abs(written.beats - beats) < 1e-9:
+        assert _TYPE_BY_STEPS[steps] == (written.type_, written.dots)
     else:
         assert steps in _TUPLET_STEPS or steps == 3
 

@@ -21,8 +21,9 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
 
-from ..core.i18n import tr, tr_key_label
+from ..core.i18n import tr, tr_figure, tr_key_label
 from ..core.grid import BeatGrid
+from ..core.music import sane_bpm
 from ..core.notation import STAFF_LINES, StaffLayout, layout_staff
 
 # Dark-theme palette, shared with the plot views.
@@ -219,7 +220,7 @@ class StaffView(QWidget):
         font.setPointSizeF(max(6.5, S * 0.82))
         p.setFont(font)
         p.setPen(SOFT_INK)
-        parts = [f"{int(round(self._grid.bpm))} {tr('key bpm unit')}", layout.meter_label]
+        parts = [f"{int(round(sane_bpm(self._grid.bpm)))} {tr('key bpm unit')}", layout.meter_label]
         if layout.key_tonic:
             parts.append(tr_key_label(f"{layout.key_tonic} {layout.key_mode or 'major'}"))
         p.drawText(QPointF(LEFT_PAD + 2.0, 14.0), "   ·   ".join(parts))
@@ -480,6 +481,12 @@ def _paint_rest(p: QPainter, x: float, staff_top: float, rest) -> None:
             x - 0.28 * S, y + 0.80 * S,
         )
         p.drawPath(path)
+    if rest.shape:
+        font = QFont()
+        font.setPointSizeF(max(5.5, S * 0.65))
+        p.setFont(font)
+        p.setPen(REST_INK)
+        p.drawText(QPointF(x - 0.45 * S, staff_top + 6.2 * S), tr_figure(rest.shape))
     if dots:
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(REST_INK)

@@ -8,11 +8,11 @@ because the grid is built from their result.
 
 - the unit that crosses the seam is the **float quarter beat** (`beats`,
   `seconds`);
-- integer divisions (12 per beat for the MusicXML export, a sixteenth for MIDI
+- integer divisions (24 per beat for the MusicXML export, a sixteenth for MIDI
   quantization) go through `step_seconds` / `snap` / `snap_notes` / `steps`,
   whose convention is stated once, on `step_seconds`;
 - the last rounding of a duration — a note the detector left without a figure
-  is still written as some value — is `written`, whose catalogue (`DRAWABLE`)
+  is still written as some value — is `written`, whose catalogue (`CATALOGUE`)
   lives here too: same metric business, and it used to sit in the engraving
   grammar, which read like drawing but decided time;
 - the grid is **immutable**: the pipeline builds it from the tempo, labels the
@@ -31,23 +31,42 @@ from .music import sane_bpm
 
 # denominator -> unit duration in quarter beats
 UNIT_QUARTERS = {2: 2.0, 4: 1.0, 8: 0.5}
+MUSICXML_DIVISIONS = 24
 
-# Written values a score can engrave, as (type, quarter beats, dots). The
-# ORDER breaks ties: `min` keeps the first best, so a plain figure beats the
-# dotted one at equal distance (1.25 beats -> quarter, not dotted quarter;
-# 5 beats -> whole, not dotted whole) — every dotted value therefore sits
-# after its own plain one.
-DRAWABLE = (
-    ("whole", 4.0, 0),
-    ("half", 2.0, 0),
-    ("quarter", 1.0, 0),
-    ("eighth", 0.5, 0),
-    ("16th", 0.25, 0),
-    ("whole", 6.0, 1),
-    ("half", 3.0, 1),
-    ("quarter", 1.5, 1),
-    ("eighth", 0.75, 1),
-    ("16th", 0.375, 1),
+@dataclass(frozen=True)
+class Figure:
+    """One written value, shared by notes, rests and MusicXML."""
+
+    name: str
+    type_: str
+    beats: float
+    rest: str
+    dots: int = 0
+    tuplet: tuple[int, int] | None = None
+    weight: float = 1.0
+    export_only: bool = False
+
+
+# Plain values come before dotted values: this order resolves equal distances
+# in favour of the simpler engraving. Tuplets are in the same catalogue, but
+# remain a classifier choice rather than a fallback written value.
+CATALOGUE = (
+    Figure("ronde", "whole", 4.0, "pause"),
+    Figure("blanche", "half", 2.0, "demi-pause"),
+    Figure("noire", "quarter", 1.0, "soupir"),
+    Figure("croche", "eighth", 0.5, "demi-soupir"),
+    Figure("double-croche", "16th", 0.25, "quart de soupir"),
+    Figure("ronde pointée", "whole", 6.0, "pause pointée", dots=1, weight=1.06),
+    Figure("blanche pointée", "half", 3.0, "demi-pause pointée", dots=1, weight=1.06),
+    Figure("noire pointée", "quarter", 1.5, "soupir pointée", dots=1, weight=1.06),
+    Figure("croche pointée", "eighth", 0.75, "demi-soupir pointée", dots=1, weight=1.06),
+    Figure("double-croche pointée", "16th", 0.375, "quart de soupir pointée", dots=1, weight=1.06),
+    Figure("triolet de ronde", "whole", 4.0 * 2 / 3, "pause", tuplet=(3, 2), weight=1.10),
+    Figure("triolet de blanche", "half", 2.0 * 2 / 3, "demi-pause", tuplet=(3, 2), weight=1.10),
+    Figure("triolet de noire", "quarter", 1.0 * 2 / 3, "soupir", tuplet=(3, 2), weight=1.10),
+    Figure("triolet de croche", "eighth", 0.5 * 2 / 3, "demi-soupir", tuplet=(3, 2), weight=1.10),
+    Figure("triolet de double-croche", "16th", 0.25 * 2 / 3, "quart de soupir", tuplet=(3, 2), weight=1.10),
+    Figure("trente-deuxième", "32nd", 0.125, "seizième de soupir", export_only=True),
 )
 
 
@@ -100,7 +119,9 @@ class BeatGrid:
     ask.
     """
 
-    bpm: float
+    # None (no usable tempo) is normalized to 120 in __post_init__: the
+    # declared type is what every consumer may rely on
+    bpm: float | None
     meter: Meter = DEFAULT_METER
 
     def __post_init__(self) -> None:
@@ -116,11 +137,11 @@ class BeatGrid:
     # ------------------------------------------------------- seconds <-> beats
     def beats(self, seconds: float) -> float:
         """Duration in quarter beats."""
-        return seconds * self.bpm / 60.0
+        return seconds * sane_bpm(self.bpm) / 60.0
 
     def seconds(self, beats: float) -> float:
         """Duration in seconds."""
-        return beats * 60.0 / self.bpm
+        return beats * 60.0 / sane_bpm(self.bpm)
 
     # ------------------------------------------------------------- measures
     @property
@@ -170,7 +191,7 @@ class BeatGrid:
         """Seconds per grid step, `per_beat` steps to the quarter beat.
 
         The convention, stated once: 4 steps per beat is a sixteenth (what the
-        MIDI export calls division 16), 12 is the MusicXML export's division.
+        MIDI export calls division 16), 24 is the MusicXML export's division.
         """
         return self.seconds(1.0) / per_beat
 
@@ -195,20 +216,22 @@ class BeatGrid:
             out.append(replace(n, start=s, end=e if e - s >= step / 2 else s + step))
         return out
 
-    def steps(self, seconds: float, per_beat: float = 12.0) -> int:
+    def steps(self, seconds: float, per_beat: float = MUSICXML_DIVISIONS) -> int:
         """Position of an instant in whole steps (same `per_beat` convention)."""
         return int(round(seconds / self.step_seconds(per_beat)))
 
     # ------------------------------------------------- written durations
-    def written(self, seconds: float) -> tuple[str, float, int]:
-        """How a figure-less duration is written: (type, quarter beats, dots).
-
-        The value of `DRAWABLE` nearest to the real duration, floored at the
-        16th — the shortest figure a score writes. Undecidable entries (a
-        duration of NaN) fall on the floor rather than the last of the tuple.
-        """
+    def written(self, seconds: float) -> Figure:
+        """Choose the nearest non-triplet fallback value, floored at a 16th."""
         beats = max(0.25, self.beats(seconds))
-        return min(DRAWABLE, key=lambda c: abs(beats - c[1]))
+        values = _WRITTEN_VALUES
+        return min(values, key=lambda f: abs(beats - f.beats))
 
 
-__all__ = ["DEFAULT_METER", "DRAWABLE", "BeatGrid", "Meter", "UNIT_QUARTERS"]
+_WRITTEN_VALUES = tuple(f for f in CATALOGUE if f.tuplet is None and not f.export_only)
+
+
+__all__ = [
+    "CATALOGUE", "DEFAULT_METER", "BeatGrid", "Figure", "MUSICXML_DIVISIONS",
+    "Meter", "UNIT_QUARTERS",
+]

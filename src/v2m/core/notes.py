@@ -227,7 +227,7 @@ def _hysteresis_segments(midi, times, conf, idx, semitones: float) -> list[_Segm
             # out of band vs the note REFERENCE (not the previous frame)
             if pending is None:
                 pending = i
-            if i - pending + 1 >= confirm:
+            elif i - pending + 1 >= confirm:
                 close(pending - 1)
                 seg_start = pending
                 seg_frames = list(range(pending, i + 1))

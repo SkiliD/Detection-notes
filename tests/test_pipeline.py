@@ -1,6 +1,8 @@
 """Tests pipeline complet + rapports (bout en bout)."""
 
 import json
+import types
+from pathlib import Path
 
 import mido
 import numpy as np
@@ -8,7 +10,7 @@ import soundfile as sf
 
 from conftest import SR, silence, sine_note
 from v2m.core.pipeline import analyze_signal
-from v2m.core.report import export_result
+from v2m.core.report import export_result, live_export_dir, live_take_name
 
 
 def _melody() -> np.ndarray:
@@ -28,6 +30,19 @@ def test_analyze_signal_full():
     assert res.tempo is not None and res.tempo.bpm > 0
     assert res.key is not None
     assert res.duration_s > 2.0
+
+
+def test_export_uses_the_analysis_grid_without_changing_the_artifacts(tmp_path):
+    """The exporter must honor the metric frame produced by the pipeline."""
+    res = analyze_signal(_melody(), SR, source="synthetic")
+    assert res.grid is not None
+    carried = tmp_path / "carried"
+    rebuilt = tmp_path / "rebuilt"
+    export_result(res, carried)
+    res.grid = type(res.grid)(res.grid.bpm, res.grid.meter)
+    export_result(res, rebuilt)
+    for suffix in (".json", ".mid", ".musicxml"):
+        assert (carried.with_suffix(suffix)).read_bytes() == (rebuilt.with_suffix(suffix)).read_bytes()
 
 
 def test_export_result_one_interface(tmp_path):
@@ -54,6 +69,52 @@ def test_export_result_one_interface(tmp_path):
 
     xml = open(tmp_path / "out.musicxml", encoding="utf-8").read()
     assert xml.count("<measure ") >= 1
+
+
+def test_live_take_name_is_unique_and_recognisable():
+    n1, n2 = live_take_name(), live_take_name()
+    assert n1.startswith("live_")
+    assert n1 == n2  # same second = same take, distinct only across seconds
+
+
+def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch):
+    """Le chemin CLI `v2m live` finit dans le sous-dossier dédié, comme la GUI."""
+    import v2m.live as live_mod
+    from v2m.live import LiveSession
+
+    monkeypatch.chdir(tmp_path)  # the take lands under tmp, not the repo root
+    session = LiveSession()
+    # Pretend a capture happened: enough signal to pass the length gate.
+    # The fake capture lives ON the take (its single owner): the adapter
+    # no longer mirrors it — export() goes through LiveTake.finalize.
+    monkeypatch.setattr(
+        session.take, "capture",
+        types.SimpleNamespace(
+            signal=lambda: sine_note(220.0, 1.5),
+            elapsed=lambda: 1.5,
+            stop=lambda: None,
+        ),
+    )
+    returned = session.export()
+    assert returned is not None
+    take_dir = tmp_path / "prises_live" / session.out_stem
+    assert Path(returned).name == f"{session.out_stem}.mid"
+    assert Path(returned).exists()
+    for ext in (".mid", ".musicxml", ".json", ".csv"):
+        assert (take_dir / f"{session.out_stem}{ext}").exists(), f"{ext} manquant"
+
+
+def test_live_exports_are_isolated_per_take(tmp_path):
+    """Un live écrit dans `prises_live/<stem>/`, à l'abri des autres prises."""
+    res = analyze_signal(_melody(), SR, source="live")
+    stem = live_take_name()
+    export_result(res, live_export_dir(stem) / stem)
+    take_dir = live_export_dir(stem)
+    assert take_dir.is_dir()
+    assert take_dir.parent.name == "prises_live"
+    assert sorted(p.name for p in take_dir.glob(f"{stem}.*")) == [
+        f"{stem}.csv", f"{stem}.json", f"{stem}.mid", f"{stem}.musicxml",
+    ]
 
 
 def test_wav_file_roundtrip(tmp_path):

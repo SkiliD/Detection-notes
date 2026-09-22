@@ -149,6 +149,7 @@ def test_score_engraves_the_breaths_between_phrases(qapp):
     assert len(lay.rests) == 1
     assert lay.rests[0].shape == "pause"
     assert lay.notes[1].onset == 5.0     # 1 noire + 4 temps de pause
+    assert _ink(view, y0=HEADER_H + int(5.4 * S), y1=HEADER_H + int(7.0 * S)) > 0
     assert not view.grab().isNull()
 
 

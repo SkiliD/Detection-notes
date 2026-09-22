@@ -45,7 +45,8 @@ coverage.xml
 *.aac
 *.mid
 *.midi
-live_*
+/live_*
+prises_live/
 
 # --- Sorties d'analyse : partitions + rapports (export_result) ---
 # Tout ce que le pipeline écrit avec un préfixe arbitraire :

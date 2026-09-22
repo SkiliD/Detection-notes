@@ -16,9 +16,11 @@ from .chords import (
 )
 from .figures import label_notes
 from .grid import BeatGrid, Meter
+from .i18n import tr
 from .keys import KeyResult, detect_key
 from .meter import detect_meter
 from .notes import Note, compute_onset_strengths, track_to_notes
+from .observation import VoiceObservation
 from .onsets import detect_attacks
 from .pitch import PitchTrack, track_pitch_offline
 from .rests import Rest, detect_rests
@@ -42,6 +44,7 @@ class AnalysisResult:
     rests: Optional[list[Rest]] = None  # breaths/phrase gaps (lead-in included)
     grid: Optional[BeatGrid] = None  # the metric frame: seconds <-> beats
     sr: int = audio_io.SR
+    observation: VoiceObservation | None = None
 
     def quantize_step(self, division: int = 16) -> float:
         """Seconds per grid division (16 = sixteenth) at the detected tempo."""
@@ -73,16 +76,25 @@ def analyze_signal(
     opts = opts or AnalyzeOptions()
     report = progress or (lambda f, m: None)
 
-    report(0.05, "Détection du tempo…")  # GUI messages stay user-facing
+    report(0.05, tr("progress tempo"))  # GUI messages stay user-facing
     tempo = detect_tempo(y, sr, bpm_range=opts.bpm_range)
 
-    report(0.20, "Suivi de la hauteur (pYIN)…")
+    report(0.20, tr("progress pitch"))
     track = track_pitch_offline(y, sr)
 
-    report(0.75, "Segmentation en notes…")
+    report(0.75, tr("progress notes"))
     # attacks (consonants, glottal stops, vowel changes) are what separates a
     # real note start from a legato glide: the pitch curve alone cannot
     attacks = detect_attacks(y, sr) if opts.use_attacks else None
+    observation = VoiceObservation(
+        pitch=PitchTrack(
+            times=track.times.copy(),
+            hz=track.hz.copy(),
+            confidence=track.confidence.copy(),
+        ),
+        attacks=attacks,
+        duration_s=len(y) / sr,
+    )
     notes = track_to_notes(
         track,
         sr,
@@ -92,14 +104,14 @@ def analyze_signal(
         attacks=attacks,
     )
 
-    report(0.90, "Détection de la tonalité…")
+    report(0.90, tr("progress key"))
     key = detect_key(notes)
 
-    report(0.91, "Détection des accords…")
+    report(0.91, tr("progress chords"))
     chord = detect_chords(notes)
     chord_segments = detect_chord_segments(notes) if chord else []
 
-    report(0.92, "Raffinement du tempo…")
+    report(0.92, tr("progress refine"))
     if tempo and tempo.bpm > 0 and len(notes) >= 3:
         # beat_track returns a rounded BPM (e.g. 117.5 for a true 120):
         # refine it against note onsets to rebuild an exact grid, required
@@ -108,10 +120,10 @@ def analyze_signal(
             np.array([n.start for n in notes], dtype=float), tempo.bpm
         )
         t0 = float(tempo.beats[0]) if len(tempo.beats) else 0.0
-        grid = np.arange(t0, len(y) / sr, 60.0 / refined)
-        tempo = TempoResult(bpm=round(refined, 2), beats=grid)
+        beat_times = np.arange(t0, len(y) / sr, 60.0 / refined)
+        tempo = TempoResult(bpm=round(refined, 2), beats=beat_times)
 
-    report(0.95, "Étiquetage des figures de notes…")
+    report(0.95, tr("progress figures"))
     meter: Optional[Meter] = None
     positions: Optional[list] = None
     num_measures = 0
@@ -131,16 +143,16 @@ def analyze_signal(
         num_measures = grid.measures(notes)
         progression = detect_chord_progression(notes, grid, num_measures)
 
-    report(0.96, "Détection des respirations…")
+    report(0.96, tr("progress rests"))
     # breaths between phrases, written as rests on the score. An addition,
     # never a prerequisite: any failure here degrades to no rests at all
     # instead of costing the analysis the user already waited for.
     try:
         rests = detect_rests(notes, grid)
-    except Exception:  # noqa: BLE001 - see comment above
+    except (TypeError, ValueError, AttributeError):
         rests = []
 
-    report(1.0, "Terminé")
+    report(1.0, tr("progress done"))
     return AnalysisResult(
         source=source,
         duration_s=len(y) / sr,
@@ -157,6 +169,7 @@ def analyze_signal(
         rests=rests,
         grid=grid,
         sr=sr,
+        observation=observation,
     )
 
 

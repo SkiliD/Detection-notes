@@ -1,0 +1,223 @@
+"""Shared live take lifecycle for the GUI and CLI adapters."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+import numpy as np
+
+from . import audio_io
+from .audio_io import LiveCapture
+from .figures import label_notes
+from .grid import BeatGrid
+from .liveseg import LiveNote, LiveNoteSegmenter, LivePitchStream
+from .meter import detect_meter
+from .pipeline import AnalysisResult, AnalyzeOptions, analyze_signal
+from .tempo import estimate_bpm_live
+
+
+@dataclass(frozen=True)
+class LiveEvent:
+    """Typed observation emitted by a LiveTake.
+
+    `kind` is one of: "block" (capture telemetry), "pitch" (one YIN
+    frame), "note" (current note state), "note_closed" (a note just
+    ended; `grid` carries the live take's BeatGrid), "stopped"
+    (capture drained, signal final), "failed" (finalization error,
+    emitted once), "finalized" (AnalysisResult ready).
+    """
+
+    kind: str
+    time_s: float = 0.0
+    rms: float = 0.0
+    pitch: tuple[float, float] | None = None
+    note: "LiveNote | None" = None
+    grid: BeatGrid | None = None
+    signal: np.ndarray | None = None
+    result: AnalysisResult | None = None
+    error: str | None = None
+
+
+class LiveTake:
+    """Own one microphone capture from start through final analysis.
+
+    Qt and CLI are adapters: they subscribe to events and decide how to
+    render or print them. The capture queue, streaming segmenter, stop/drain
+    order, final signal and final AnalysisResult have one owner here — and
+    so has the LIVE GRID POLICY (the approximate BPM from the notes so far,
+    the meter detected from their accents, the figures labeled on its
+    BeatGrid): `note_closed` publishes it, and adapters consume ready-labeled
+    notes and a ready grid, never re-derive.
+    """
+
+    def __init__(
+        self,
+        min_conf: float = 0.5,
+        sr: int = audio_io.SR,
+        on_event: Callable[[LiveEvent], None] | None = None,
+    ) -> None:
+        self.min_conf = min_conf
+        self.sr = sr
+        self.on_event = on_event
+        self.capture: LiveCapture | None = None
+        self.stream: LivePitchStream | None = None
+        self._signal: np.ndarray | None = None
+        self._result: AnalysisResult | None = None
+        self._grid = BeatGrid(None)  # live grid: approximate BPM, no meter
+        self._prev_bpm: float | None = None  # tempo of the previous grid write
+        self._state = "idle"
+        self._error_emitted = False
+        self._failure: Exception | None = None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def segmenter(self) -> "LiveNoteSegmenter | None":
+        return self.stream.seg if self.stream is not None else None
+
+    @property
+    def elapsed(self) -> float:
+        return self.capture.elapsed() if self.capture is not None else 0.0
+
+    @property
+    def signal(self) -> np.ndarray:
+        if self._signal is not None:
+            return self._signal
+        return self.capture.signal() if self.capture is not None else np.zeros(0, dtype=np.float32)
+
+    @property
+    def result(self) -> AnalysisResult | None:
+        return self._result
+
+    @property
+    def grid(self) -> BeatGrid:
+        """The take's live BeatGrid: approximate BPM, meter when detected.
+
+        `meter` falls back on the default 4/4 (the grid's rule) until the
+        accents of at least `meter.MIN_NOTES` notes say otherwise; adapters
+        that need the displayed beat count read `grid.meter.n_slots`.
+        """
+        return self._grid
+
+    @property
+    def error_emitted(self) -> bool:
+        return self._error_emitted
+
+    def _emit(self, event: LiveEvent) -> None:
+        if self.on_event is not None:
+            self.on_event(event)
+
+    def start(self) -> None:
+        """Open the microphone; a stopped take cannot be revived."""
+        if self._state == "recording":
+            return
+        if self._state == "stopped":
+            raise RuntimeError("cette prise live est déjà arrêtée")
+        self.capture = LiveCapture(on_block=self._on_block, sr=self.sr)
+        self.capture.start()
+        self._state = "recording"
+
+    def _on_block(self, block: np.ndarray, t: float) -> None:
+        """One captured block: pitch-track it and publish what it revealed.
+
+        Figures are labeled at note END (approximate BPM from the onsets so
+        far) so the closed note lands on the roll already labeled; the meter
+        is detected the same moment, from the same notes' attack strengths.
+        """
+        if self.capture is None:
+            return
+        if self.stream is None:
+            self.stream = LivePitchStream(
+                self.capture.samplerate,
+                gate_rms=audio_io.GATE_RMS,
+            )
+        before = self.stream.elapsed_notes()
+        rms, frames = self.stream.feed(block, t)
+        self._emit(LiveEvent("block", time_s=t, rms=rms))
+        for frame_t, hz in frames:
+            self._emit(LiveEvent("pitch", time_s=frame_t, pitch=(frame_t, hz)))
+        self._emit(LiveEvent("note", time_s=t, pitch=self.stream.seg.current()))
+        if self.stream.elapsed_notes() > before:
+            self._apply_grid_policy(notes=self.stream.seg.notes, now_s=t)
+
+    def _apply_grid_policy(self, notes: list[LiveNote], now_s: float) -> None:
+        """Write the take's live grid once, then publish it on `note_closed`.
+
+        THE grid policy, in one place: approximate BPM from the notes so
+        far, the meter from their accents (tested against the previous
+        cycle's tempo — the strengths of note N and its period N+1 arrive
+        together), figures labeled on the grid — all BEFORE the event, so
+        every adapter consumes a ready note and a ready meter.
+        """
+        bpm = estimate_bpm_live(notes)
+        if bpm:
+            # with_meter accepts the detector's None (no conclusion yet):
+            # the grid falls back on the default 4/4 by itself
+            grid = BeatGrid(bpm).with_meter(detect_meter(notes, self._prev_bpm or bpm))
+            label_notes(notes, grid)
+            self._grid = grid
+            self._prev_bpm = bpm
+        self._emit(
+            LiveEvent("note_closed", time_s=now_s, note=notes[-1], grid=self._grid)
+        )
+
+    def stop(self) -> np.ndarray:
+        """Stop once, drain captured blocks, flush segmentation, keep signal."""
+        if self._state == "stopped":
+            return self.signal
+        if self.capture is None:
+            self._state = "stopped"
+            self._signal = np.zeros(0, dtype=np.float32)
+            self._emit(LiveEvent("stopped", signal=self._signal))
+            return self._signal
+        self.capture.stop()
+        if self.stream is not None:
+            self.stream.seg.flush(self.capture.elapsed())
+        self._signal = self.capture.signal()
+        self._state = "stopped"
+        self._emit(LiveEvent("stopped", time_s=self.elapsed, signal=self._signal))
+        return self._signal
+
+    def finalize(self) -> tuple[AnalysisResult, np.ndarray]:
+        """Analyze the captured signal once; repeated calls return the same result.
+
+        Idempotent in both directions: a successful analysis is reused, and
+        a failure re-raises its error WITHOUT re-emitting the event (the
+        adapter already showed it once).
+        """
+        if self._result is not None:
+            return self._result, self.signal
+        if self._failure is not None:
+            raise self._failure
+        signal = self.stop()
+        if len(signal) < self.sr // 2:
+            self._fail(ValueError(
+                "Enregistrement trop court (0,5 s minimum) pour être analysé."
+            ))
+        try:
+            result = analyze_signal(
+                signal,
+                self.sr,
+                source="live",
+                opts=AnalyzeOptions(min_conf=self.min_conf),
+            )
+        except Exception as exc:
+            self._fail(exc)
+        self._result = result
+        self._emit(LiveEvent("finalized", signal=signal, result=result))
+        return result, signal
+
+    def _fail(self, error: Exception) -> None:
+        """Report a finalization failure once, then remember it for retries."""
+        self._failure = error
+        self._error_emitted = True
+        self._emit(LiveEvent("failed", error=str(error)))
+        raise error
+
+    def close(self) -> None:
+        if self._state == "recording":
+            self.stop()
+        self.on_event = None

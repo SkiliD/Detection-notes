@@ -8,71 +8,20 @@ metronome).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from .grid import BeatGrid
-
-# (name, duration in beats, MusicXML type)
-BASES = [
-    ("ronde", 4.0, "whole"),
-    ("blanche", 2.0, "half"),
-    ("noire", 1.0, "quarter"),
-    ("croche", 0.5, "eighth"),
-    ("double-croche", 0.25, "16th"),
-]
-
-DOT_MULT = 1.5           # dotted: x1.5
-TUPLET_MULT = 2.0 / 3.0  # triplet: 3 against 2
+from .grid import BeatGrid, CATALOGUE, Figure
 
 DEFAULT_TOLERANCE = 0.18  # +/-18% around the ideal duration
-
-
-@dataclass(frozen=True)
-class FigureCandidate:
-    """One entry of the figure catalog."""
-
-    name: str                 # e.g. "noire pointée", "triolet de croche"
-    beats: float              # ideal duration in beats
-    type_: str                # base MusicXML type
-    dots: int                 # 0 or 1
-    tuplet: tuple[int, int] | None  # e.g. (3, 2)
-
-
-def build_candidates() -> list[FigureCandidate]:
-    """Catalog: plain, dotted, and triplet figures (no dot+triplet combos)."""
-    cands: list[FigureCandidate] = []
-    for base_name, base_beats, type_ in BASES:
-        # plain and dotted
-        for dots, mult in ((0, 1.0), (1, DOT_MULT)):
-            name = f"{base_name} pointée" if dots else base_name
-            cands.append(FigureCandidate(name, base_beats * mult, type_, dots, None))
-        # triolet (simple uniquement)
-        cands.append(
-            FigureCandidate(
-                f"triolet de {base_name}", base_beats * TUPLET_MULT, type_, 0, (3, 2)
-            )
-        )
-    return cands
-
-
-CANDIDATES = build_candidates()
-
-
-# Complexity penalty: at near-equal error, prefer a plain figure, then a
-# dotted one, then a triplet (a quarter at +15% is a late quarter, not a
-# half triplet). A triplet only wins when it is clearly the right answer.
-_COMPLEXITY_PENALTY = {0: 1.0, 1: 1.06, (3, 2): 1.10}
 
 
 def classify_duration(
     beats: float,
     tolerance: float = DEFAULT_TOLERANCE,
     allow_triplets: bool = True,
-) -> FigureCandidate | None:
+) -> Figure | None:
     """Find the figure closest to a duration in beats (None if out of tolerance).
 
-    The compared error is weighted by figure complexity (see
-    _COMPLEXITY_PENALTY); beyond the tolerance, no class is assigned.
+    The compared error is weighted by each catalogue entry's complexity;
+    beyond the tolerance, no class is assigned.
     `allow_triplets=False` excludes triplet figures: rests use it, since a
     written silence between phrases never lives inside a triplet bracket —
     and at some tempos a plain beat classifies as a triplet before the
@@ -81,12 +30,12 @@ def classify_duration(
     """
     if beats <= 0:
         return None
-    best: FigureCandidate | None = None
+    best: Figure | None = None
     best_err = float("inf")
-    for c in CANDIDATES:
-        if c.tuplet is not None and not allow_triplets:
+    for c in CATALOGUE:
+        if c.export_only or (c.tuplet is not None and not allow_triplets):
             continue
-        err = abs(beats - c.beats) / c.beats * _COMPLEXITY_PENALTY[c.tuplet if c.tuplet else c.dots]
+        err = abs(beats - c.beats) / c.beats * c.weight
         if err < best_err:
             best, best_err = c, err
     if best is not None and best_err <= tolerance:

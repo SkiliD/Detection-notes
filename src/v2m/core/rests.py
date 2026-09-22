@@ -37,17 +37,6 @@ from .grid import BeatGrid
 # stay under ~70 ms.
 MIN_REST_S = 0.070
 
-# MusicXML type -> canonical French rest name (user-visible labels are
-# French by project convention; `i18n.tr_figure` translates for display).
-_REST_BY_TYPE = {
-    "whole": "pause",
-    "half": "demi-pause",
-    "quarter": "soupir",
-    "eighth": "demi-soupir",
-    "16th": "quart de soupir",
-}
-
-
 @dataclass
 class Rest:
     """A written silence: a gap between two sung notes."""
@@ -74,8 +63,7 @@ def classify_rest(beats: float) -> str | None:
     c = classify_duration(beats, allow_triplets=False)
     if c is None:
         return None
-    base = _REST_BY_TYPE[c.type_]
-    return f"{base} pointée" if c.dots else base
+    return c.rest
 
 
 def detect_rests(

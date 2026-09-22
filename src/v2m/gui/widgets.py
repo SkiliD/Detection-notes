@@ -6,16 +6,43 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
+from PyQt6.QtCore import pyqtSignal
 
 from ..core.figures import figures_summary, short_label
+from ..core.accuracy import AccuracyHistory
 from ..core.i18n import note_display_pair, tr, tr_figure
 from ..core.music import midi_to_name
-from ..core.playback import NotePlayer
 
 # Confidence color ramp (red -> green)
 LOW_COLOR = (220, 80, 80)
 HIGH_COLOR = (80, 220, 120)
 SILENCE_COLOR = (120, 120, 130)
+MATCH_COLOR = (80, 210, 120)
+MISMATCH_COLOR = (220, 80, 80)
+AMBER_COLOR = (230, 180, 80)
+CENTER_CENTS = 10.0   # |cents| <= 10: in tune (green)
+NEAR_CENTS = 25.0     # <= 25 cents: close (amber); beyond = red
+
+
+def cents_deviation(midi_float: float) -> float:
+    """Deviation of a continuous pitch from its nearest piano note, in cents."""
+    return (midi_float - round(midi_float)) * 100.0
+
+
+def tuning_color(cents: float | None) -> tuple[int, int, int]:
+    """Green/amber/red for a cents deviation — the tuning meter's palette.
+
+    Shared by the TuningMeter needle and the live piano key, so both
+    feedbacks read the same scale.
+    """
+    if cents is None:
+        return MISMATCH_COLOR
+    a = abs(cents)
+    if a <= CENTER_CENTS:
+        return MATCH_COLOR
+    if a <= NEAR_CENTS:
+        return AMBER_COLOR
+    return MISMATCH_COLOR
 
 # Colors per note figure (keys match the figure names produced by figures.py)
 FIGURE_COLORS = {
@@ -375,11 +402,15 @@ class ResultsPanel(pg.LayoutWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._title = pg.QtWidgets.QLabel("")
+        self._title.setStyleSheet("font-size: 14pt; color: #e6ebf2; padding-bottom: 6px;")
         self.addWidget(self._title, row=0, col=0, colspan=2)
         # empty state: a centered invitation shown before any analysis
         self._waiting = pg.QtWidgets.QLabel("")
         self._waiting.setAlignment(pg.QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._waiting.setStyleSheet("color: #6a7480; font-size: 10pt; font-style: italic;")
+        self._waiting.setStyleSheet(
+            "color: #8a97a5; font-size: 10pt; font-style: italic;"
+            "background: #20262e; border: 1px solid #2e3742; border-radius: 8px; padding: 12px;"
+        )
         self._waiting.setVisible(False)
         self.addWidget(self._waiting, row=len(self.SLOT_KEYS) + 3, col=0, colspan=2)
         self._labels: dict[str, pg.QtWidgets.QLabel] = {}
@@ -537,6 +568,7 @@ class PianoView(pg.QtWidgets.QWidget):
         ]
         self._spans: dict[int, list[tuple[float, float]]] = {}
         self._active: set[int] = set()
+        self._active_colors: dict[int, tuple[int, int, int]] = {}
         self.setMinimumHeight(78)
 
     def set_notes(self, notes) -> None:
@@ -551,11 +583,13 @@ class PianoView(pg.QtWidgets.QWidget):
         self._active = {
             m for m, spans in self._spans.items() if any(s <= t < e for s, e in spans)
         }
+        self._active_colors = {}
         self.update()
 
-    def set_pressed(self, midis=None) -> None:
-        """Light exactly these keys (the note finder's live pitch)."""
+    def set_pressed(self, midis=None, colors=None) -> None:
+        """Light exactly these keys, optionally with per-key RGB colors."""
         self._active = set(midis or ())
+        self._active_colors = dict(colors or {})
         self.update()
 
     def paintEvent(self, ev) -> None:  # noqa: N802 (Qt naming)
@@ -574,7 +608,8 @@ class PianoView(pg.QtWidgets.QWidget):
             key_on = midi in self._active
             p.fillRect(
                 int(x), 0, int(ww) - 1, h,
-                QColor("#4da3d8") if key_on else QColor("#e9edf2"),
+                QColor(*self._active_colors[midi]) if midi in self._active_colors
+                else QColor("#4da3d8") if key_on else QColor("#e9edf2"),
             )
             p.setPen(QPen(QColor("#39424d"), 1))
             p.drawRect(int(x), 0, int(ww) - 1, h - 1)
@@ -587,7 +622,8 @@ class PianoView(pg.QtWidgets.QWidget):
                 key_on = midi + 1 in self._active
                 p.fillRect(
                     int(x), 0, int(bw), int(bh),
-                    QColor("#2f81a8") if key_on else QColor("#151a20"),
+                    QColor(*self._active_colors[midi + 1]) if midi + 1 in self._active_colors
+                else QColor("#2f81a8") if key_on else QColor("#151a20"),
                 )
         # note names on the white keys (all of them when they fit, else the Cs)
         p.setPen(QColor("#6a7480"))
@@ -630,8 +666,148 @@ class ErrorBanner(pg.QtWidgets.QLabel):
         self.hide()
 
 
+class AccuracyPlot(pg.QtWidgets.QWidget):
+    """Chronological cents deviation of the take, one point per note.
+
+    The history line above says WHICH note drifted and by how much; this
+    plot says WHEN in the take it drifted. It reuses the meter's ±50-cent
+    frame and the shared green/amber/red scale, so needle, key and plot read
+    as one instrument. A painter widget: a few dozen points, a full repaint
+    per refresh is cheap and stateless.
+
+    A point carries its note's onset time, and clicking it seeks the piano
+    roll there (`pointClicked`) — the plot is not just a summary, it is a
+    way back into the take: drift at 0:42, click, hear what happened.
+    """
+
+    pointClicked = pyqtSignal(float)  # onset time (s) of the clicked note
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(96)
+        self._points: list[tuple[int, float]] = []
+        self._times: list[float] = []  # onset of each point (same order)
+
+    def set_points(self, points, times=None) -> None:
+        """(midi, mean |cents|) in singing order; [] clears to the empty state.
+
+        `times` (onsets in seconds, same length) enables the click-to-seek;
+        without it the plot stays a plain summary.
+        """
+        self._points = list(points)
+        self._times = list(times) if times is not None else []
+        self.update()
+
+    def _index_at(self, x: float) -> int | None:
+        """Index of the point under x (same geometry as the paint), else None."""
+        n = len(self._points)
+        if not n or len(self._times) != n:
+            return None
+        pad = 16.0
+        ww = (self.width() - 2 * pad) / n
+        if ww <= 0:
+            return None
+        i = int((x - pad) // ww)
+        return i if 0 <= i < n else None
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802 (Qt naming)
+        pos = ev.position().x() if hasattr(ev, "position") else float(ev.x())
+        i = self._index_at(pos)
+        if i is not None:
+            self.pointClicked.emit(self._times[i])
+
+    def paintEvent(self, ev) -> None:  # noqa: N802 (Qt naming)
+        from PyQt6.QtCore import Qt, QPointF, QRectF
+        from PyQt6.QtGui import QColor, QPainter, QPen
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        # card background, consistent with the hint cards
+        p.setPen(QPen(QColor("#2c3540"), 1))
+        p.setBrush(QColor("#1e242c"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 10, 10)
+        pad, top, bottom = 16.0, 10.0, 22.0  # bottom leaves room for names
+        mid = (top + h - bottom) / 2
+        span = (h - bottom - top) / 2
+        # the meter's landmarks: ±25 guides and the ±10 in-tune zone
+        p.setPen(QPen(QColor(230, 180, 80, 70), 1, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(pad, mid - span * 0.5), QPointF(w - pad, mid - span * 0.5))
+        p.drawLine(QPointF(pad, mid + span * 0.5), QPointF(w - pad, mid + span * 0.5))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(80, 210, 120, 26))
+        p.drawRect(QRectF(pad, mid - span * 0.2, w - 2 * pad, span * 0.4))
+        p.setPen(QPen(QColor("#3a4655"), 1))
+        p.drawLine(QPointF(pad, mid), QPointF(w - pad, mid))
+        n = len(self._points)
+        if n:
+            ww = (w - 2 * pad) / n
+            f = p.font()
+            f.setPointSize(7)
+            for i, (midi, cents) in enumerate(self._points):
+                c = max(-50.0, min(50.0, cents))
+                x = pad + (i + 0.5) * ww
+                y = mid - (c / 50.0) * span
+                color = tuning_color(cents)
+                p.setPen(QPen(QColor(*color), 0))
+                p.setBrush(QColor(*color))
+                p.drawEllipse(QPointF(x, y), 4.0, 4.0)
+                if ww >= 34.0:  # room for a compact name under each point
+                    p.setPen(QColor("#6a7480"))
+                    p.setFont(f)
+                    p.drawText(QPointF(x - ww / 2, h - 8), midi_to_name(midi))
+        p.end()
+
+
+class TuningMeter(pg.QtWidgets.QWidget):
+    """Horizontal ±50-cent meter: how far the sung pitch is from the note.
+
+    A painter widget, not a gauge of bars: an intonation meter reads like the
+    one on a tuner — a centered needle, green inside ±10 cents (in tune by
+    every practical standard), fading to amber then red as the error grows.
+    Height is fixed; the parent layout stretches it in width.
+    """
+
+    CENTER_ST = CENTER_CENTS / 100.0
+    NEAR_ST = NEAR_CENTS / 100.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(26)
+        self._cents: float | None = None
+
+    def set_cents(self, cents: float | None) -> None:
+        self._cents = None if cents is None or cents != cents else max(-50.0, min(50.0, cents))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        from PyQt6.QtCore import QPointF, QRectF
+        from PyQt6.QtGui import QColor, QPainter, QPen
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        track = QRectF(6.0, h / 2 - 3.0, w - 12.0, 6.0)
+        p.setPen(QPen(QColor("#2e3742"), 1.0))
+        p.setBrush(QColor("#20262e"))
+        p.drawRoundedRect(track, 3.0, 3.0)
+        # center tick: the target (the nearest piano note)
+        p.setPen(QPen(QColor("#9fb3c8"), 1.6))
+        p.drawLine(QPointF(w / 2, h / 2 - 8), QPointF(w / 2, h / 2 + 8))
+        c = self._cents
+        if c is not None:
+            x = w / 2 + (c / 50.0) * (w / 2 - 10.0)
+            color = tuning_color(c)
+            p.setPen(QPen(QColor(*color), 0))
+            p.setBrush(QColor(*color))
+            p.drawEllipse(QPointF(x, h / 2), 5.0, 5.0)
+            p.end()
+            return
+        p.end()
+
+
 class LiveIndicator(pg.QtWidgets.QWidget):
-    """Real-time display: current note (UI-language format), frequency, level."""
+    """Real-time display: current note, frequency, level and tuning meter."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -641,20 +817,48 @@ class LiveIndicator(pg.QtWidgets.QWidget):
             f"font-size: 21pt; font-weight: bold; color: {NOTE_TEXT_COLOR};"
         )
         self.label_hz = pg.QtWidgets.QLabel("")
-        self.label_rms = pg.QtWidgets.QLabel("niveau : —")
+        self.label_rms = pg.QtWidgets.QLabel("")
+        self.tuning = TuningMeter()
+        self._rms = 0.0
         lay.addWidget(self.label_note)
         lay.addWidget(self.label_hz)
+        lay.addWidget(self.tuning)
         lay.addWidget(self.label_rms)
+        self.retranslate()
 
-    def update_note(self, midi_float: float | None, hz: float) -> None:
+    def retranslate(self) -> None:
+        """Refresh the idle level label without resetting live measurements."""
+        self.update_rms(self._rms)
+
+    def update_note(
+        self, midi_float: float | None, hz: float, cents: float | None = None
+    ) -> None:
+        """Show the note; `cents` overrides the derived deviation.
+
+        The name comes from the note's median (stable); the meter can take
+        the instantaneous deviation instead — while practicing, correcting
+        the pitch mid-note must move the needle NOW, not drown in the
+        note-long average.
+        """
         if midi_float is None or hz != hz:  # NaN check
             self.label_note.setText("—")
             self.label_hz.setText("")
+            self.tuning.set_cents(None)
             return
-        self.label_note.setText(note_display_pair(int(round(midi_float))))
+        nearest = int(round(midi_float))
+        self.label_note.setText(note_display_pair(nearest))
         self.label_hz.setText(f"{hz:.1f} Hz")
+        # the sung pitch vs its NEAREST piano note, in cents — the number a
+        # singer works with when practicing intonation
+        self.tuning.set_cents(
+            cents_deviation(midi_float) if cents is None else cents
+        )
 
     def update_rms(self, rms: float) -> None:
+        self._rms = rms
+        if rms <= 0:
+            self.label_rms.setText(tr("ui level idle"))
+            return
         bars = int(min(1.0, rms * 20) * 20)
         self.label_rms.setText(tr("key level") + " : " + "█" * bars + "░" * (20 - bars))
 
@@ -663,59 +867,85 @@ class LiveIndicator(pg.QtWidgets.QWidget):
 ACCENT = "#4da3d8"  # single accent color for primary actions & progress
 NOTE_TEXT_COLOR = "#6cf"  # the recognized note, wherever it is written large
 
-# Calm card for "here is what to do": the home steps and the note finder share
-# it, so guidance reads the same wherever it appears.
+# Calm card for "here is what to do": the home steps, the live hint and the
+# finder share it, so guidance reads the same wherever it appears.
 HINT_CARD_STYLE = (
     "color: #8a97a5; font-size: 9pt;"
-    "background: #20262e; border: 1px solid #2e3742; border-radius: 8px;"
+    "background: #1e242c; border: 1px solid #2c3540; border-radius: 10px;"
     "padding: 10px 18px;"
 )
 STYLESHEET = """
 # Font sizes in pt, never px: a px-sized font reports pointSize() == -1,
 # and rich-text labels then hit QFont::setPointSize(-1) (console warning).
 # pt also scales with the user's Windows DPI setting, px does not.
-QMainWindow, QWidget { background: #1b2027; color: #e6e6e6; font-size: 10pt; }
-QLabel { color: #cfd6dd; }
+QMainWindow, QWidget { background: #171c23; color: #e6e6e6; font-size: 10pt; }
+QLabel { color: #cfd6dd; background: transparent; }
 QPushButton {
-    background: #2a3340; color: #e6e6e6; border: 1px solid #3a4655;
-    border-radius: 6px; padding: 8px 14px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #2c3542, stop:1 #262e3a);
+    color: #e6e6e6; border: 1px solid #3a4655;
+    border-radius: 10px; padding: 8px 16px; font-weight: 500;
 }
-QPushButton:hover { background: #34404f; border-color: #4a5a6e; }
-QPushButton:pressed { background: #232b35; }
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #354154, stop:1 #2c3542);
+    border-color: @ACCENT@;
+}
+QPushButton:pressed { background: #20262e; }
 QPushButton:focus { border: 1px solid @ACCENT@; }
-QPushButton:disabled { color: #6a7480; background: #232a33; }
+QPushButton:disabled { color: #6a7480; background: #20262e; }
 QPushButton:flat { border: none; background: transparent; }
-QCheckBox, QSpinBox { color: #cfd6dd; }
+QCheckBox, QSpinBox { color: #cfd6dd; background: transparent; }
 QCheckBox:hover { color: #e6e6e6; }
-QSpinBox::up-button, QSpinBox::down-button { width: 16px; }
-QGroupBox {
-    border: 1px solid #3a4655; border-radius: 6px; margin-top: 10px;
-    padding: 8px 6px 6px 6px;
+QCheckBox::indicator {
+    width: 15px; height: 15px; border-radius: 4px;
+    border: 1px solid #3a4655; background: #20262e;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #9fb3c8; }
+QCheckBox::indicator:checked { background: @ACCENT@; border-color: @ACCENT@; }
+QSpinBox {
+    background: #20262e; border: 1px solid #3a4655; border-radius: 6px;
+    padding: 2px 6px;
+}
+QSpinBox:focus { border-color: @ACCENT@; }
+QSpinBox::up-button, QSpinBox::down-button { width: 16px; background: transparent; border: none; }
+QGroupBox {
+    background: #1e242c; border: 1px solid #2c3540; border-radius: 10px;
+    margin-top: 12px; padding: 10px 8px 8px 8px;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 12px; color: #9fb3c8; }
+QListWidget {
+    background: #1e242c; border: 1px solid #2c3540; border-radius: 8px;
+    padding: 4px;
+}
+QListWidget::item { border-radius: 4px; padding: 2px; }
+QListWidget::item:selected { background: #2c3542; color: #e6e6e6; }
 QTableWidget {
-    background: #20262e; alternate-background-color: #232a33;
-    gridline-color: #2e3742; border: 1px solid #3a4655; border-radius: 4px;
+    background: #1e242c; alternate-background-color: #212932;
+    gridline-color: #2c3540; border: 1px solid #2c3540; border-radius: 8px;
 }
 QHeaderView::section {
-    background: #27303b; color: #9fb3c8; border: none; padding: 3px;
+    background: #242d38; color: #9fb3c8; border: none; padding: 4px;
 }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
-QScrollBar::handle:vertical { background: #34404f; border-radius: 3px; min-height: 24px; }
+QScrollBar::handle:vertical { background: #34404f; border-radius: 4px; min-height: 24px; }
 QScrollBar::handle:vertical:hover { background: #4a5a6e; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #34404f; border-radius: 3px; min-width: 24px; }
+QScrollBar::handle:horizontal { background: #34404f; border-radius: 4px; min-width: 24px; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QProgressBar {
-    background: #20262e; border: 1px solid #3a4655; border-radius: 5px;
-    text-align: center; color: #cfd6dd;
+    background: #20262e; border: 1px solid #3a4655; border-radius: 8px;
+    text-align: center; color: #cfd6dd; height: 16px;
 }
-QProgressBar::chunk { background: @ACCENT@; border-radius: 4px; }
-QStatusBar { color: #9fb3c8; }
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 @ACCENT@, stop:1 #6cc3f0);
+    border-radius: 7px;
+}
+QStatusBar { color: #9fb3c8; background: #171c23; }
 QToolTip {
-    background: #27303b; color: #e6e6e6; border: 1px solid #3a4655;
-    padding: 4px; border-radius: 3px;
+    background: #242d38; color: #e6e6e6; border: 1px solid #3a4655;
+    padding: 5px; border-radius: 6px;
 }
 """.replace("@ACCENT@", ACCENT)  # single source for the accent color
 # NB: the token must not appear in real QSS — "#ACCENT" + a naive
@@ -724,15 +954,17 @@ QToolTip {
 
 
 def action_button_style(primary: bool = False) -> str:
-    """Shared style for the two big home actions (primary = accent-filled)."""
+    """Shared style for the big home actions (primary = accent-filled)."""
     if primary:
         return (
-            f"QPushButton {{ background: {ACCENT}; color: #10222f; font-size: 12pt;"
-            "  padding: 10px 22px; border: none; font-weight: bold; }"
-            f"QPushButton:hover {{ background: {ACCENT}; }}"
+            f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f"  stop:0 #5db2e2, stop:1 {ACCENT}); color: #10222f; font-size: 12pt;"
+            "  padding: 10px 22px; border: none; border-radius: 12px;"
+            "  font-weight: bold; }"
+            "QPushButton:hover { background: #5db2e2; }"
             "QPushButton:pressed { background: #3d7ea6; }"
         )
     return (
-        "QPushButton { font-size: 12pt; padding: 10px 22px; }"
-        "QPushButton:hover { border-color: #4da3d8; }"
+        "QPushButton { font-size: 12pt; padding: 10px 22px; border-radius: 12px; }"
+        f"QPushButton:hover {{ border-color: {ACCENT}; }}"
     )

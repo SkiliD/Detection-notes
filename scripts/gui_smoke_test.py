@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PyQt6.QtWidgets import QApplication
 
 from v2m.core.pipeline import analyze_file
@@ -112,6 +114,31 @@ def main() -> int:
     assert get_language() == "fr"
     assert win.btn_file.text() == fr_text
     print("language toggle ok", flush=True)
+
+    # tuning meter: the cents needle follows the sung pitch, clamped at ±50
+    win.live_indicator.update_note(60.2, 265.0)
+    assert win.live_indicator.tuning._cents == pytest.approx(20.0, abs=0.5)
+    win.live_indicator.update_note(None, float("nan"))
+    assert win.live_indicator.tuning._cents is None
+    assert not win.live_indicator.tuning.grab().isNull()
+    print("tuning meter ok", flush=True)
+
+    # metronome: opt-in, tempo editable, beat counter runs on the Qt loop
+    assert win.metronome is None  # off by default
+    win.chk_metronome.setChecked(True)
+    assert win.metronome is not None
+    assert win.spin_bpm.isEnabled()
+    win.on_metronome_bpm_changed(120)
+    assert win.metronome.bpm == 120
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 0.35:
+        app.processEvents()
+    beat_text = win.label_beat.text()
+    assert _tr("ui beat count").split("{")[0] in beat_text
+    win.chk_metronome.setChecked(False)
+    assert win.metronome is None
+    assert win.label_beat.text() == ""
+    print("metronome ok", flush=True)
 
     return 0
 

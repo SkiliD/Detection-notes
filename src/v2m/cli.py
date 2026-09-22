@@ -64,6 +64,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         return 1
 
     # --- human-readable summary ------------------------------------------
+    # analyze_signal always produces a tempo and a key (the detectors return
+    # an object even on silence), so the summary reads them unguarded.
+    assert res.tempo is not None and res.key is not None
     print(f"{tr('key tempo')}     : {res.tempo.bpm} BPM")
     print(f"{tr('key key label')} : {res.key.best.label} (conf. {res.key.best.score:.2f})")
     for a in res.key.alternatives:

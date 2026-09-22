@@ -15,7 +15,7 @@ Application desktop qui **détecte les notes d'une voix** (hauteur, figures, mes
 - **Noms de notes bilingues** : anglaise (`A4`) **et** française (`La4`) côte à côte dans la GUI, le JSON (`name` / `name_fr`) et le CSV
 - **Interface fr / en** : langue choisie dans la GUI (bouton 🌐) ou `v2m --lang en` — traduit tous les libellés **et** le format des notes (`Do Ré Mi` ↔ `A B C`), choix persisté dans `~/.v2m_lang`
 - **Figures de notes** : chaque note est étiquetée (ronde → double-croche, pointées, triolets) selon le tempo détecté, avec tolérance sur l'interprétation humaine — champ `figure` dans le JSON et le CSV, **aussi en temps réel** sur le piano roll du mode micro
-- **Portée (notation)** : les notes écrites sur une **vraie portée** — clé de sol, armure, chiffrage, figures (ronde → double-croche, pointées, triolets) avec hampes, crochets, points et altérations, lignes supplémentaires, barres de mesure et cartouche tempo · mesure · tonalité. Affichée **après l'analyse d'un fichier** et **en direct pendant la capture** (portée qui défile, la note en cours étant surlignée). Gravure vectorielle intégrée : aucun logiciel externe requis
+- **Portée (notation)** : les notes et silences écrits sur une **vraie portée** — clé de sol, armure, chiffrage, figures (ronde → double-croche, pointées, triolets), soupirs et pauses avec hampes, crochets, points et altérations, lignes supplémentaires, barres de mesure et cartouche tempo · mesure · tonalité. Affichée **après l'analyse d'un fichier** et **en direct pendant la capture** (portée qui défile, la note en cours étant surlignée). Gravure vectorielle intégrée : aucun logiciel externe requis
 - **Mesure** : détection automatique — 3/4 vs 4/4 par les **accents d'attaque** (forces relatives RMS des notes, contrast requis), 6/8 par la grille ternaire des contretemps ; sans accent clair, 4/4 par défaut assumé. La partition et le rapport utilisent la mesure détectée
 - **Export MusicXML** : partition lisible (mesure détectée, armure, tempo, figures, liaisons à travers les barres, triolets) ouvrable dans MuseScore, Finale, Sibelius…
 - **Toutes les détections sur la partition** : accords par mesure en **chiffrage harmonique** au-dessus de la portée, noms de notes en **sol-fège** (Do, Ré, Mi…) sous chaque note, **têtes de note colorées selon la confiance** (vert = sûre → rouge = douteuse), cartouche récapitulatif (tempo · tonalité · mesure · accords) dans le titre
@@ -23,7 +23,8 @@ Application desktop qui **détecte les notes d'une voix** (hauteur, figures, mes
 - **Export PDF** : gravure de la partition via MuseScore ou LilyPond (détection automatique, message d'installation sinon) — `--pdf` en CLI, case à cocher en GUI
 - **Rapport JSON** (tout, y compris la courbe de hauteur, la mesure, le nombre de mesures, la position mesure:temps de chaque note, l'accord global et les segments d'accords) + **CSV** (liste de notes avec figure et position)
 - **GUI PyQt6** : interface sombre soignée, piano roll, waveform, panneau de résultats avec tableaux par note (position, figure) et par segment d'accord, drag & drop, **mode notation** (couleur par figure), **bannière d'erreur rouge intégrée** (pas de popups bloquants)
-- **Mode temps réel** : indicateur note/Hz/niveau, **piano roll qui suit la capture** (fenêtre glissante de 10 s, curseur de temps, horloge `mm:ss` et compteur de notes), la note tenue s'affiche **pendant** qu'on la chante, figures étiquetées en direct, export à l'arrêt — le suivi de hauteur tourne **hors du callback audio** (thread dédié), donc le pilote ne perd pas de blocs
+- **Mode temps réel** : indicateur note/Hz/niveau, **piano roll qui suit la capture** (fenêtre glissante de 10 s, curseur de temps, horloge `mm:ss`, compteur de notes et **mesure détectée** — 3/4, 4/4, 6/8 — affichée en direct), comparaison avec une partition déjà analysée (touche verte/rouge), la note tenue s'affiche **pendant** qu'on la chante, figures étiquetées en direct, export à l'arrêt — le suivi de hauteur tourne **hors du callback audio** (thread dédié), donc le pilote ne perd pas de blocs
+- **Trouveur de note** : reconnaissance isolée au micro, clavier de 88 touches et historique local des six dernières notes ; aucune analyse ni export
 - **Écoute de contrôle** : bouton ▶ (synthé local intégré, aucun logiciel externe) avec **curseur de lecture synchronisé** sur le piano roll et la waveform ; **double-clic** sur le piano roll pour démarrer la lecture à cet endroit
 
 ## Installation
@@ -109,9 +110,9 @@ src/v2m/
 │   ├── onsets.py        # attaques : flux spectral hors ligne, niveau en temps réel
 │   ├── tempo.py         # BPM + beats (librosa.beat, repli ×2/÷2)
 │   ├── keys.py          # Krumhansl-Schmuckler, 24 candidatures
-│   ├── chords.py        # accords (triades + septièmes, global, segments et progression par mesure)
-│   ├── figures.py       # étiquetage des figures (ronde → double-croche, triolets)
-│   ├── meter.py         # détection de mesure (accents 3/4 vs 4/4, ternaire 6/8) + positions
+│   ├── chords.py        # accords (triades + septièmes, global, segments et progression par mesure)│   ├── figures.py         # classification des figures ; catalogue dans grid.py│   ├── meter.py           # détection de mesure (accents 3/4 vs 4/4, ternaire 6/8)
+│   ├── grid.py            # BeatGrid, Meter, Figure/CATALOGUE et divisions MusicXML
+
 │   ├── playback.py      # rendu audio des notes + lecteur pour l'écoute de contrôle
 │   ├── liveseg.py       # temps réel : chaîne blocs → hauteur → attaques → notes (LivePitchStream)
 │   ├── notation.py      # portée : orthographe des hauteurs, armures, durées écrites, mise en page
@@ -120,10 +121,12 @@ src/v2m/
 │   │                    #   accords <harmony>, paroles sol-fège, couleur de confiance)
 │   ├── pdf_export.py    # PDF via MuseScore/LilyPond (détection auto)
 │   ├── report.py        # export_result : les artefacts + le rapport JSON unifié
+│   ├── live_session.py  # LiveTake : une prise micro de bout en bout (capture → analyse)
 │   └── pipeline.py      # orchestration analyse_signal / analyze_file
 └── gui/
-    ├── main_window.py   # fenêtre, threads, drag & drop, exports
-    ├── staff.py         # portée dessinée au QPainter (clé, armure, notes, barres)
+    ├── main_window.py   # état, navigation, callbacks, threads et exports
+    ├── pages.py         # assemblage des pages et branchement des actions
+    ├── staff.py         # portée dessinée au QPainter (clé, armure, notes, silences, barres)
     └── widgets.py       # piano roll, waveform, panneau, indicateur live
 
 scripts/
@@ -168,14 +171,14 @@ Sur une prise réelle il n'y a pas de vérité terrain : le script imprime donc 
 
 - **`CONTEXT.md`** — glossaire du domaine (Analyse, Note, Tempo, Tonalité, Accord, Figure, Mesure, Export, Rapport) et conventions (langues, erreurs) : la référence pour toute évolution du code.
 - **`core/i18n.py`** — catalogue des chaînes utilisateur (fr/en) : toute nouvelle chaîne visible y passe par `tr()` ; les noms de notes suivent la langue (`note_display`), les figures stockées restent canoniques (`tr_figure` traduit à l'affichage).
-- **`AGENTS.md`** — apprentissages techniques pour les agents outillés (commandes, pièges Qt, contraintes algorithmiques) ; lu automatiquement si l'option est activée dans le client.
+- **`AGENTS.md`** — apprentissages techniques et **règles de session** (non-régression, mise à jour des docs, lisibilité) pour les agents outillés ; lu automatiquement si l'option est activée dans le client.
 
 ## Qualité & limites
 
 - **Voix monodique** (une note à la fois) — la transcription polyphonique est hors périmètre
 - **Accords sur voix seule** : potentiellement ambigus (une mélodie suggère plusieurs harmonisations) — le rapport fournit des alternatives ; moins de deux hauteurs distinctes → pas d'accord
 - pYIN ≈ 0,3× la durée réelle du fichier
-- **Portée intégrée** : gravure maison (pas MuseScore) — monodique, clé de sol, notes sans ligatures (crochets pour les croches) et sans silences ; le PDF exporté reste la version gravée « professionnelle »
+- **Portée intégrée** : gravure maison (pas MuseScore) — monodique, clé de sol, notes sans ligatures (crochets pour les croches) et avec silences ; le PDF exporté reste la version gravée « professionnelle »
 - Le tempo détecté est celui de la performance chantée (humaine) ; la quantification reste optionnelle
 - **Transcription validée sur voix de synthèse** (`tests/voicetruth.py`, 19 cas : legato, détaché, consonnes, vibrato, bruit, voix graves/aiguës, croches/doubles-croches, portamentos) : hors ligne la segmentation est **exacte** — toutes les notes chantées retrouvées, aucune inventée. Le harnais est synthétique : une vraie prise bruitée reste à mesurer (`scripts/score_accuracy.py`)
 - En temps réel, la segmentation est volontairement plus grossière que l'analyse finale (pas de regard en arrière) : les doubles-croches (≈120 ms) peuvent être fusionnées et un portamento très long (>250 ms) décale l'attaque. Les hauteurs restent justes, et l'analyse finale — celle qui est exportée — reprend tout depuis l'audio enregistré
@@ -186,7 +189,7 @@ Sur une prise réelle il n'y a pas de vérité terrain : le script imprime donc 
 pytest tests/ -v
 ```
 
-245 tests : pitch (YIN/pYIN sur sinus connus, **flux YIN par blocs** : temps absolus monotones et mémoire bornée), segmentation, tempo (clics + raffinement sur attaques), tonalité, **accords** (triades, septièmes, basse, segments), **progression par mesure**, figures, **mesure par accents (3/4 vs 4/4) et 6/8**, MusicXML (+ **accords/paroles/couleurs**), noms de notes FR/EN, **rendu audio de contrôle**, **clavier PianoView**, **notation** (orthographe en armure, armures, durées écrites, mise en page mesure/système), **portée** (rendu offscreen, systèmes, défilement live), erreurs de chargement audio, export MIDI (meta-events relus), segmenteur live (+ **note en cours** pour le suivi temps réel), **suivi live du piano roll** (fenêtre glissante, preview, bande de hauteur stable, recoloration après étiquetage), **mode live de bout en bout** (micro factice → capture → analyse finale → export), **capture live hors callback** (file + thread, blocs jamais perdus, erreur d'appelant non fatale), **CLI `--pdf`** (outil absent → PDF ignoré, exit 0 ; conversion ratée → exit 2, artefacts et résumé toujours conservés), **enveloppe min/max de la waveform**, **i18n de la boîte de sélection de fichier** (et parité des clés fr/en), **script de diagnostic** (tableau des étapes aligné sur le pipeline réel, moyennes, cProfile, JSON, erreurs d'entrée), pipeline E2E WAV → artefacts, **justesse de transcription sur voix de synthèse** (19 cas, hors ligne exacts, preuve d'attaque jamais pire que la géométrie, aucune note inventée dans une note chantée, temps réel exact sur les phrases articulées), **attaques** (couverture des onsets chantés, une tenue avec vibrato ne produit plus 19 attaques, flux temps réel conservateur), **règles de transition** (glissando absorbé, vraie note courte préservée, hauteur d'arrivée), **mesure fantôme** (une ligne 4/4 n'est pas transcrite en 6/8).
+360 tests : pitch (YIN/pYIN sur sinus connus, **flux YIN par blocs** : temps absolus monotones et mémoire bornée), segmentation, tempo (clics + raffinement sur attaques), tonalité, **accords** (triades, septièmes, basse, segments), **progression par mesure**, figures, **mesure par accents (3/4 vs 4/4) et 6/8**, MusicXML (+ **accords/paroles/couleurs**), noms de notes FR/EN, **rendu audio de contrôle**, **clavier PianoView**, **notation** (orthographe en armure, armures, durées écrites, mise en page mesure/système), **portée** (rendu offscreen, systèmes, défilement live), erreurs de chargement audio, export MIDI (meta-events relus), segmenteur live (+ **note en cours** pour le suivi temps réel), **suivi live du piano roll** (fenêtre glissante, preview, bande de hauteur stable, recoloration après étiquetage), **mode live de bout en bout** (micro factice → capture → analyse finale → export), **capture live hors callback** (file + thread, blocs jamais perdus, erreur d'appelant non fatale), **CLI `--pdf`** (outil absent → PDF ignoré, exit 0 ; conversion ratée → exit 2, artefacts et résumé toujours conservés), **enveloppe min/max de la waveform**, **i18n de la boîte de sélection de fichier** (et parité des clés fr/en), **script de diagnostic** (tableau des étapes aligné sur le pipeline réel, moyennes, cProfile, JSON, erreurs d'entrée), pipeline E2E WAV → artefacts, **justesse de transcription sur voix de synthèse** (19 cas, hors ligne exacts, preuve d'attaque jamais pire que la géométrie, aucune note inventée dans une note chantée, temps réel exact sur les phrases articulées), **attaques** (couverture des onsets chantés, une tenue avec vibrato ne produit plus 19 attaques, flux temps réel conservateur), **règles de transition** (glissando absorbé, vraie note courte préservée, hauteur d'arrivée), **mesure fantôme** (une ligne 4/4 n'est pas transcrite en 6/8).
 
 Smoke test GUI headless :
 
