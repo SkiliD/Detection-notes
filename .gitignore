@@ -97,3 +97,7 @@ docker-compose.override.yml
 /shot_*.png
 /_*.txt
 /_dbg.log
+/out_dir
+adr/
+docs/
+docs/adr/
