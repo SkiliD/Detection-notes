@@ -11,8 +11,14 @@ Two detectors, because the two situations are not the same:
 - `detect_attacks(y, sr)`: offline, one STFT (spectral flux in the character
   band plus the RMS rise), then peak picking. It sees the whole take, so it
   can normalize against it — this is what the analysis pipeline uses.
-- `AttackTracker`: streaming, one level per captured block. Deliberately
-  conservative (see its docstring): a false attack splits a held note live.
+- `AttackTracker`: streaming, one block = one O(1) test against two voices:
+  the LEVEL rise (slow baseline floor) and the broadband BURST (a real
+  >3 kHz high-pass plus a level dip). Deliberately conservative (see its
+  docstring): a false attack splits a held note live.
+
+`compute_onset_strengths` lives here too: the per-note accent (0..1) read
+off the audio envelope — the same evidence, quantized per note, that the
+meter and the notation consume.
 """
 
 from __future__ import annotations
@@ -38,6 +44,34 @@ STREAM_FLOOR = 0.006   # live: RMS floor
 STREAM_ALPHA = 0.15    # live: baseline tracking speed when rising (~7 blocks)
 STREAM_ALPHA_DOWN = 0.35  # live: baseline follows a level DROP faster (~3 blocks)
 MAX_RECENT = 256       # live: recent attacks kept for the display/tests
+# Live re-articulation trigger, second voice: the consonant burst of a
+# re-attacked note leaves the LEVEL nearly flat (measured 1.28x, under
+# STREAM_LEVEL — a level-only tracker reads ta-ta-ta-ta on one pitch as two
+# notes) but it is NOISE, and noise is spectrally FLAT while a sung vowel is
+# made of peaks. Measured on the voice harness (spectral flatness per block):
+# held vowel ~0.000, vibrato ~0.000, legato portamento blur ~0.000 (its
+# harmonics are still harmonic), breath on silence 1.0 (gated by pitch in
+# the segmenter), breathy voice at 3x the noise contract 0.078-0.0995,
+# consonant burst 0.40-0.60. Pitch- and amplitude-independent — a quiet
+# take's bursts read the same. Anything above 0.20 is not a vowel.
+FLATNESS_TRIGGER = 0.20
+# But a burst is not just flat: it REPLACES the vowel's energy for its
+# block (0.47-0.74x of the recent peak) while the glide blur holds the
+# level (0.87-0.96x). The reference is the recent PEAK, not the baseline:
+# the baseline follows a dip (alpha_down), so at the burst block it has
+# already decayed to the burst's own level and no threshold separates
+# anything from it anymore. Measured margins: bursts <= 0.74, glides >= 0.87.
+DIP_RATIO = 0.80
+# ...and the dip must be INTERNAL to the block: a consonant burst DIPS the
+# vowel inside its own block (the burst rides silence — sub-window rms
+# measured 0.004-0.007 vs the note's 0.054-0.058), while a RELEASE block
+# (vowel cut, then the envelope falls into the gap before the next note's
+# consonant) holds its vowel until the edge (sub_min 0.048-0.055). Without
+# this second check, every note-end release fired a spurious attack where
+# the pitch stream was still flat — and every hand-over got a duplicate
+# fragment (measured: the voice-accuracy grave/haute lines, +1 fragment).
+SUBWINDOWS = 8
+SUBWINDOW_DIP = 0.20
 
 
 @dataclass
@@ -131,6 +165,42 @@ def detect_attacks(y: np.ndarray, sr: int, frame_ms: float = FRAME_MS) -> Attack
     return Attacks(np.asarray(times, dtype=float), strengths)
 
 
+def compute_onset_strengths(notes, y: np.ndarray, sr: int) -> None:
+    """Fill `note.strength` (0..1) from the audio envelope at each onset.
+
+    The signal is cut into small RMS frames; a note's strength is the peak
+    envelope around its start, normalized against the recording's own
+    quiet/floor percentiles — so accents are RELATIVE within one take,
+    which is what meter phase discrimination needs (no absolute loudness).
+
+    The window is deliberately ASYMMETRIC (2 frames back, 7 forward):
+    the segmenter dates a note at its first stable-pitch frame, which can
+    LEAD the audio onset by tens of ms (measured 37 ms on a dotted-pulse
+    take — the 25 ms tone attack sits entirely after the dated start), so
+    a symmetric window read the envelope floor and every accent after the
+    first note came out 0.0. The tone follows the date; the peak is
+    searched where it can be.
+    """
+    if not notes:
+        return
+    hop = 256
+    n_frames = len(y) // hop
+    if n_frames < 4:
+        for n in notes:
+            n.strength = 0.5
+        return
+    frames = np.asarray(y[: n_frames * hop], dtype=np.float64).reshape(n_frames, hop)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    env = np.convolve(rms, np.ones(3) / 3, mode="same")  # ~3-frame smoothing
+    floor = float(np.percentile(env, 20))
+    span = max(float(np.percentile(env, 98)) - floor, 1e-9)
+    for n in notes:
+        i = min(n_frames - 1, max(0, int(n.start * sr / hop)))
+        lo, hi = max(0, i - 2), min(n_frames, i + 7)
+        local = float(np.max(env[lo:hi]))
+        n.strength = round(min(1.0, max(0.0, (local - floor) / span)), 3)
+
+
 def _odd(value: float) -> int:
     n = max(3, int(round(value)))
     return n if n % 2 else n + 1
@@ -174,8 +244,11 @@ class AttackTracker:
     recent: deque = field(default_factory=lambda: deque(maxlen=MAX_RECENT))
     baseline_rms: float = 0.0
     floor_rms_seen: float = 0.0   # lowest baseline in the recent past
+    hf_ratio: float = FLATNESS_TRIGGER  # flatness the burst must clear
     _last_t: float = -1e9
     _primed: bool = False
+    _hf_floor: float = 0.0        # recent LOW of the spectral flatness
+    _peak_rms: float = 0.0        # recent HIGH of the level (dip reference)
 
     @staticmethod
     def level(block: np.ndarray) -> float:
@@ -183,27 +256,79 @@ class AttackTracker:
         x = np.asarray(block, dtype=np.float64)
         return float(np.sqrt(np.mean(x ** 2))) if x.size else 0.0
 
+    @staticmethod
+    def flatness(block: np.ndarray) -> float:
+        """Spectral flatness of one block (1 = white noise, ~0 = tonal).
+
+        A consonant burst IS noise; a sung vowel, a vibrato and even a
+        legato portamento's blur are still harmonic peaks. Geometric/arithmetic
+        mean of the power spectrum of the windowed block — the one
+        discriminator measured to separate bursts from glide blurs without
+        depending on pitch (a fixed high-pass catches a high note's own
+        harmonics) or level (a quiet take reads the same).
+        """
+        x = np.asarray(block, dtype=np.float64)
+        if x.size < 8:
+            return 0.0
+        ps = np.abs(np.fft.rfft(x * np.hanning(x.size))) ** 2 + 1e-12
+        return float(np.exp(np.mean(np.log(ps))) / np.mean(ps))
+
     def push(self, t: float, block: np.ndarray) -> bool:
         """Feed one captured block; True when it carries an attack."""
         rms = self.level(block)
         if not self._primed:
             self.baseline_rms = rms
             self.floor_rms_seen = rms
+            self._peak_rms = rms
+            # unvoiced-first start: no burst seen yet — the reference starts
+            # at the trigger so the first voiced vowel sets the real floor
+            self._hf_floor = self.hf_ratio
             self._primed = True
             return False
+        hf = self.flatness(block)
+        # recent LOW of the flatness (the vowel's own colour): a burst must
+        # be far ABOVE it; a breath (~1.0, gated by pitch downstream) and a
+        # vibrato (~0.0) never are.
+        if hf < self._hf_floor:
+            self._hf_floor = hf
+        else:
+            self._hf_floor += 0.35 * (hf - self._hf_floor)
+        # recent HIGH of the level, rise instant / decay slow (~1 s): the
+        # reference of the dip test (see DIP_RATIO — the decaying BASELINE
+        # swallows the very dip it should measure).
+        if rms > self._peak_rms:
+            self._peak_rms = rms
+        else:
+            self._peak_rms += 0.02 * (rms - self._peak_rms)
         attack = False
-        if rms >= self.floor_rms:
-            # the reference is the LOW the baseline reached recently: a gap
-            # dips the baseline, the next note rises from that dip. The floor
-            # recovers onto the baseline when the level stays up (no dip =
-            # no attack possible twice on the same note)
-            if rms <= self.baseline_rms:
+        # a burst rides a live note: the block must carry real energy vs the
+        # recent peak (a RATIO, not STREAM_FLOOR — a quiet take's bursts sit
+        # an order of magnitude under the floor and every one would be lost)
+        burst_like = hf > FLATNESS_TRIGGER and rms > 0.3 * self._peak_rms
+        if rms >= self.floor_rms or burst_like:
+            # the level reference is the LOW the baseline reached recently:
+            # a gap dips the baseline, the next note rises from that dip. A
+            # BURST block must not lower it (its dip is the attack itself,
+            # not a silence — letting it through made the vowel's recovery,
+            # 1.7x the dipped floor, a second rise on the same consonant).
+            if rms <= self.baseline_rms and not burst_like:
                 self.floor_rms_seen = min(self.floor_rms_seen, rms)
-            else:
+            elif not burst_like:
                 self.floor_rms_seen += 0.5 * (self.baseline_rms - self.floor_rms_seen)
             loud = rms > self.level_ratio * self.floor_rms_seen
+            # second voice: the consonant of a re-attacked note leaves the
+            # level flat (1.28x) while the block turns NOISE-flat — level
+            # rise OR (a flat burst with an INTERNAL dip vs the recent peak,
+            # which is what keeps a legato portamento's blur — level holds —
+            # and a note-end release block — the silence is at the block's
+            # edge, not inside — out; see SUBWINDOW_DIP).
+            dips = rms < DIP_RATIO * self._peak_rms
+            if burst_like and dips:
+                x = np.asarray(block, dtype=np.float64)[: len(block) // SUBWINDOWS * SUBWINDOWS]
+                sub = np.sqrt((x.reshape(-1, SUBWINDOWS) ** 2).mean(axis=1))
+                dips = float(sub.min()) < SUBWINDOW_DIP * self._peak_rms
             spaced = (t - self._last_t) >= self.min_gap_s
-            attack = bool(loud and spaced)
+            attack = bool((loud or (burst_like and dips)) and spaced)
         if attack:
             self._last_t = t
             self.recent.append(t)
@@ -216,11 +341,21 @@ class AttackTracker:
             ratio = rms / max(self.floor_rms_seen, 1e-9)
             self.peak_ratio = max(self.peak_ratio, ratio)
             self.strength = min(1.0, ratio / max(self.peak_ratio, 1e-9))
-            # the level has moved: re-arm from there, otherwise the baseline
-            # would keep climbing towards a sustained note and fire again on
-            # every block until it got there
-            self.baseline_rms = rms
-            self.floor_rms_seen = rms
+            # re-arm the flatness reference at the burst's own value: the
+            # SAME consonant cannot fire twice while its flatness decays back
+            # to the vowel's (~2 blocks, alpha above)
+            self._hf_floor = hf
+            if loud:
+                # the level has moved: re-arm from there, otherwise the
+                # baseline would keep climbing towards a sustained note and
+                # fire again on every block until it got there. An HF-driven
+                # attack must NOT re-arm the level: the burst REPLACES the
+                # vowel's energy for one block (a dip), and re-arming the
+                # references there makes the vowel's recovery a second
+                # "rise" — measured, the same ta-ta fired twice (0.51 s and
+                # 0.60 s) with the second block at 1.7x the dipped floor.
+                self.baseline_rms = rms
+                self.floor_rms_seen = rms
         elif rms < self.baseline_rms:
             # the level fell (a gap, a breath between two phrases): follow it
             # DOWN faster than it climbs, so the next note — even at the same
@@ -236,6 +371,8 @@ class AttackTracker:
         self.floor_rms_seen = 0.0
         self.peak_ratio = 0.0
         self.strength = 0.0
+        self._hf_floor = self.hf_ratio
+        self._peak_rms = 0.0
         self.recent.clear()
         self._last_t = -1e9
         self._primed = False

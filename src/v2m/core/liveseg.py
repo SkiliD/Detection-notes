@@ -25,6 +25,36 @@ MEMORY_S = 1.0           # seconds of frames kept in the pending window
 MAX_ATTACKS = 64         # recent attack times kept for the display/tests
 CLEAN_FRAMES = 5         # live pitch median (~115 ms): see LiveNoteSegmenter
 MIN_GAP_HOLD_S = 0.045   # a mute run this long ENDS the note (re-take/gap)
+# A re-articulation on ONE pitch shows in the PITCH STREAM itself: the
+# consonant burst is noise, so the frames it covers come out NaN or as
+# harmonics of the burst (measured, ta-ta on one tone: 1-3 frames of NaN
+# or midi 36/66/83 at each re-attack, where a held vowel's frame line is
+# unbroken at +-0.1 st). A voiced break inside an ACTIVE note, shorter
+# than the release and coming back to the same pitch, is a re-attack:
+# cut the note there. Level cannot see these (the burst block's rise is
+# 1.28x, under STREAM_LEVEL); the pitch stream is the one witness that
+# never misses them. Measured frame economics: 1-3 frames lost + the
+# hysteresis + the 5-frame median = >= 170 ms of silence, so a gap under
+# 0.06 s of CLEAN frames (6 frames) is a burst, not a gap.
+SPLIT_FRAMES = 6         # voiced-gap ceiling for a same-pitch cut (frames)
+HOLD_RAW_FRAMES = 5      # raw frames the hold test also inspects (see _hold_window)
+SPLIT_FRAME_S = 0.0115   # nominal live frame period (256 / 22 050), for the
+                         # SPLIT_FRAMES ceiling in seconds
+# How close the voiced pitch must be to the plateau to count as the SAME
+# note re-attacked. Measured on the harness: a re-attacked vowel comes back
+# within 0.1 st of the plateau; the first voiced frame after a hand-over
+# burst is already 0.5 st up the glide to the next note. A burst that fails
+# this test belongs to the NEXT note — the pitch change closes the note when
+# the glide leaves the band, and closing on the consonant would cut the
+# glide's tail into a duplicate fragment (measured: grave-voice line, one
+# extra fragment per hand-over).
+REARTIC_ST = 0.3
+# A burst's garbage frames sit FAR from the plateau (measured 19-28 st),
+# while a real melodic move inside a note stays under ~2-3 st. Marking a
+# break there is only a MARK: the split still refuses unless the voice
+# RETURNS to the confirmed pitch (a real octave jump refuses the split and
+# closes the note by the normal pitch-change path).
+BREAKOUT_ST = 3.0
 
 
 @dataclass
@@ -36,6 +66,10 @@ class LiveNote:
     figure: str | None = None
     articulated: bool = False  # the singer re-attacked: a note of its own
     strength: float = 0.0      # attack strength 0..1, take-relative: accents
+    # signed residual pitch deviation (st) of the confirmed plateau to its
+    # semitone: the live twin of Note.deviation, for the same key-aware
+    # pull when a whole take is displayed/explained through the live path
+    dev: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -109,8 +143,10 @@ class LiveNoteSegmenter:
     """State machine: IDLE -> PENDING -> ACTIVE.
 
     - A note is only confirmed ("on") when its pitch has HELD for
-      `confirm_s`; the onset is then the attack that started it, or the
-      moment it settled. This is what keeps a glide from becoming a note.
+      `confirm_s` (0.09 s: swept 0.14 -> 0.10 -> 0.09 over the truth cases
+      — zero behavior change, ~35 ms of display latency saved per step);
+      the onset is then the attack that started it, or the moment it
+      settled. This is what keeps a glide from becoming a note.
     - It ends ("off") on a new attack, on a pitch change of more than
       `semitones`, or after `MIN_GAP_HOLD_S` without voicing — so a blip or
       a spurious frame does not split or invent a note.
@@ -118,7 +154,7 @@ class LiveNoteSegmenter:
 
     def __init__(
         self,
-        confirm_s: float = 0.10,
+        confirm_s: float = 0.09,
         release_s: float = 0.12,
         min_note_s: float = 0.10,
         semitones: float = 0.6,
@@ -135,6 +171,7 @@ class LiveNoteSegmenter:
         self.pending_attack: float | None = None
         self.note_start: float | None = None
         self.note_midis: list[float] = []
+        self.note_pitch: float | None = None  # the CONFIRMED plateau: re-attack reference
         self.last_voiced_t: float | None = None
         self.last_hz: float = float("nan")
         self.notes: list[LiveNote] = []
@@ -143,6 +180,9 @@ class LiveNoteSegmenter:
         self.note_strength = 0.0
         self.pending_strength = 0.0
         self.recent_midis: list[float] = []
+        self.recent_raw: list[float] = []   # pre-cleaning frames, for the hold test
+        self._voiced_break = False  # mute frames seen INSIDE the current note
+        self._break_cut_t: float | None = None  # last REAL frame before the break
         self._staged_attack: float | None = None  # attack seen on a mute frame
         self._staged_strength = 0.0               # its strength, same sidecar
 
@@ -171,6 +211,29 @@ class LiveNoteSegmenter:
             if attack and self.state == "ACTIVE":
                 self._staged_attack = t
                 self._staged_strength = strength
+            # remember the break: when voicing returns on the SAME pitch
+            # after a SHORT mute run, it is a re-articulation, not a hold
+            # (see SPLIT_FRAMES)
+            if self.state == "ACTIVE":
+                if not self._voiced_break:
+                    self._break_cut_t = self.last_voiced_t
+                self._voiced_break = True
+            # the mute run cuts a PENDING window: whatever was in it stopped
+            # sounding. A hand-over's pending that keeps its pre-burst frames
+            # confirms a fragment dated at the OLD pitch (the cleaned median
+            # lags the burst), duplicating the previous note (measured: one
+            # fragment per hand-over of the voice-accuracy grave/haute
+            # lines). After the burst the window refills from the return. An
+            # attack the window was opened WITH — a same-pitch split's cut,
+            # or the consonant that fired while pending — must survive the
+            # cut: it is staged here and dates the refilled window (dropping
+            # it un-dated the re-attacked note and the flush merge glued it
+            # back into the held note: ta-ta-ta-ta read as three).
+            elif self.state == "PENDING":
+                if self.pending_attack is not None:
+                    self._staged_attack = self.pending_attack
+                    self._staged_strength = self.pending_strength
+                self._reset_pending()
             if self.state == "ACTIVE" and self.last_voiced_t is not None:
                 if t - self.last_voiced_t >= MIN_GAP_HOLD_S:
                     # a mute run this long is a re-take (or a phrase gap),
@@ -180,13 +243,11 @@ class LiveNoteSegmenter:
                     # absorbed into one endless note (aa-aa-aa case).
                     self._close_note(self.last_voiced_t)
                     ev = "off"
-            elif self.state == "PENDING" and self.last_voiced_t is not None:
-                if t - self.last_voiced_t >= self.release_s:
-                    self._reset_pending()
             return ev
 
         self.last_hz = hz
-        m = self._clean(float(hz_to_midi(hz)))
+        raw_midi = float(hz_to_midi(hz))
+        m = self._clean(raw_midi)
 
         if (
             attack
@@ -194,9 +255,22 @@ class LiveNoteSegmenter:
             and self.note_start is not None
             and t - self.note_start >= self.min_note_s
         ):
-            # the singer articulated again: a new note begins here
-            self._close_note(t)
-            ev = "off"
+            # The singer articulated again: a new note begins here. A voiced
+            # consonant carries NO mute frames, so `_voiced_break` is False
+            # and the cut is direct (the classic ta-aa case, test
+            # `test_re_attack_splits_a_held_note`); a burst consonant breaks
+            # the pitch stream first, and the cut is the split path below
+            # (with its guards: the return must be the note's own pitch —
+            # see REARTIC_ST — so a hand-over's glide to the next note is
+            # refused there and the pitch change closes the note instead).
+            # The RAW pitch, not the cleaned median: the 5-frame median still
+            # shows the plateau while the glide has already left it.
+            if self._voiced_break:
+                if self._split_same_pitch(t, raw_midi):
+                    ev = "off"
+            else:
+                self._close_note(t)
+                ev = "off"
         elif self._staged_attack is not None and self.state == "ACTIVE":
             # the attack staged on the mute frame(s) before this one is
             # fulfilled: the previous note ends there and the re-attacked
@@ -209,11 +283,56 @@ class LiveNoteSegmenter:
             self._close_note(staged)
             self._start_pending(staged, m, staged, staged_strength)
             ev = "off"
-        if self._staged_attack is not None and self.state != "ACTIVE":
+        if self._staged_attack is not None and self.state == "IDLE":
+            # a same-pitch split's repetition, refilled after the burst cut
+            # its pending window: the staged attack still dates the note the
+            # singer is opening. PENDING keeps its own attack; a state other
+            # than IDLE/ACTIVE never sees a staged attack survive.
+            staged = self._staged_attack
+            staged_strength = self._staged_strength
+            self._staged_attack = None
+            self._staged_strength = 0.0
+            self._start_pending(t, m, staged, staged_strength)
+        elif self._staged_attack is not None and self.state != "ACTIVE":
             self._staged_attack = None
             self._staged_strength = 0.0
 
-        if self.state == "IDLE":
+        if self.state == "ACTIVE":
+            ref = float(np.median(self.note_midis))
+            confirmed = self.note_pitch if self.note_pitch is not None else ref
+            # a burst's garbage frames (the burst's own harmonics, measured
+            # midi 83/36 against a 64 plateau) must mark a break BEFORE the
+            # 5-frame median absorbs them into the plateau — that absorption
+            # is exactly what made the no-gap ta-ta read as one hold (the
+            # glide_s=0 bursts never come out NaN, unlike the glide_s=0.03
+            # ones). Marking only: the split's guards decide.
+            if abs(raw_midi - confirmed) > BREAKOUT_ST and not self._voiced_break:
+                self._break_cut_t = self.last_voiced_t
+                self._voiced_break = True
+            if abs(m - ref) <= self.semitones:
+                # a short mute run mid-note that comes back to the SAME
+                # pitch is the re-articulation the level cannot see (the
+                # burst is noise: 1-3 NaN/garbage frames, then the same
+                # plateau — see SPLIT_FRAMES)
+                if self._voiced_break and self._split_same_pitch(t, raw_midi):
+                    ev = "off"
+                else:
+                    self.note_midis.append(m)
+                    # a GARBAGE frame must not clear the break it marked:
+                    # the else branch ran right after the marking above and
+                    # disarmed it in the same frame (measured: the no-gap
+                    # ta-ta burst 2 kept merging). Only a plausible frame —
+                    # its pitch near the plateau — ends the break.
+                    if abs(raw_midi - confirmed) <= BREAKOUT_ST:
+                        self._voiced_break = False
+                        self._break_cut_t = None
+            else:
+                self._close_note(t)
+                ev = "off"
+                self._start_pending(t, m)
+                self._voiced_break = False
+                self._break_cut_t = None
+        elif self.state == "IDLE":
             self._start_pending(t, m, t if attack else None, strength)
         elif self.state == "PENDING":
             # a glide is FOLLOWED, never restarted: the pending window
@@ -223,25 +342,75 @@ class LiveNoteSegmenter:
             window = self._hold_window(t)
             if window is not None:
                 self.state = "ACTIVE"
-                # onset: the consonant when there was one, else the
-                # moment the pitch settled
-                self.note_start = self.pending_attack if self.pending_attack is not None else window[0][0]
+                # onset: the consonant when there was one, else the moment
+                # the pitch settled. The attack may PREDATE the window: a
+                # glide's consonant fires at its start and the hold is only
+                # confirmed at the arrival (measured: onset dated 0.42 s
+                # late when clamped to window[0][0]), and a same-pitch split
+                # dates the repetition at the break — the honest start of
+                # the re-attacked note.
+                self.note_start = (
+                    self.pending_attack
+                    if self.pending_attack is not None
+                    else window[0][0]
+                )
                 self.note_articulated = self.pending_attack is not None
                 self.note_strength = self.pending_strength
                 self.note_midis = [mm for _, mm in window]
+                # the CONFIRMED pitch: the plateau the note was accepted at.
+                # The running median below keeps absorbing glide frames
+                # (hysteresis), so re-attack references read THIS value: a
+                # re-articulation returns to the pitch the note started on,
+                # a hand-over's return is the NEXT note's pitch.
+                self.note_pitch = float(np.median([mm for _, mm in window]))
                 ev = "on"
-        elif self.state == "ACTIVE":
-            ref = float(np.median(self.note_midis))
-            if abs(m - ref) <= self.semitones:
-                self.note_midis.append(m)
-            else:
-                self._close_note(t)
-                ev = "off"
-                self._start_pending(t, m)
         self.last_voiced_t = t
         return ev
 
     # ------------------------------------------------------------------
+    def _split_same_pitch(self, t: float, raw: float) -> bool:
+        """Cut an ACTIVE same-pitch note across a short mute run.
+
+        The consonant of a re-attacked note is noise: YIN comes back NaN or
+        with the burst's own harmonics (midi 36/66/83 measured) for 1-3
+        frames before the vowel settles back on the SAME pitch. Cutting
+        there is the live twin of `_split_rearticulated` (offline, attack
+        evidence): the pitch stream is the one witness that never misses a
+        same-pitch re-attack, because the level rise sits under STREAM_LEVEL
+        (measured 1.28x).
+
+        The guards, all measured: the voiced pitch must RETURN to the pitch
+        the note was CONFIRMED at (REARTIC_ST against `note_pitch` — the
+        running median keeps absorbing glide frames, so a hand-over's return
+        read 0.2 st off a polluted reference and duplicated a fragment; the
+        confirmed pitch of the previous note is 1 st away and refuses); the
+        break must be SHORT (under SPLIT_FRAMES of frames — a real re-take
+        is caught by MIN_GAP_HOLD_S in the mute branch instead); and the held
+        half must be a real note (>= min_note_s). Otherwise the frames simply
+        continue the note.
+        """
+        if self.note_start is None or not self.note_midis:
+            return False
+        cut = self._break_cut_t if self._break_cut_t is not None else self.last_voiced_t
+        ref = self.note_pitch if self.note_pitch is not None else float(np.median(self.note_midis))
+        if cut is None or abs(raw - ref) > REARTIC_ST:
+            return False
+        if t - cut >= SPLIT_FRAMES * SPLIT_FRAME_S or cut - self.note_start < self.min_note_s:
+            return False
+        # close the held note at the break and open the repetition; the
+        # pending window needs `confirm_s` again, which is the honest cost of
+        # a display confirmed AFTER the split (the note was already sounding).
+        # The repetition is dated as an ATTACK at the break (attack_t=cut):
+        # `_voiced_break` is the articulation evidence here, and without the
+        # mark the flush merge glued the halves back together (their 0.03 s
+        # seam sits under MIN_GAP_HOLD_S, the "sub-perceptual stutter" rule —
+        # a rule for noise gaps, not for a cut the segmenter itself decided).
+        self._close_note(cut)
+        self._start_pending(t, raw, attack_t=cut)
+        self._voiced_break = False
+        self._break_cut_t = None
+        return True
+
     def _clean(self, m: float) -> float:
         """Median of the last few live frames (the live pitch is not cleaned).
 
@@ -250,8 +419,12 @@ class LiveNoteSegmenter:
         and `HOLD_ST` has to be wide enough to accept it — which a slow slide
         can then slip through. A 5-frame median (~115 ms) removes most of the
         oscillation while preserving the note transitions (a median does not
-        blur a hard edge, unlike a moving average).
+        blur a hard edge, unlike a moving average). The RAW frames are kept
+        beside the median: `_hold_window` needs them (a median rides a ramp).
         """
+        self.recent_raw.append(m)
+        if len(self.recent_raw) > HOLD_RAW_FRAMES:
+            del self.recent_raw[0]
         self.recent_midis.append(m)
         if len(self.recent_midis) > CLEAN_FRAMES:
             del self.recent_midis[0]
@@ -266,12 +439,28 @@ class LiveNoteSegmenter:
         self.pending_strength = strength if attack_t is not None else 0.0
 
     def _extend_pending(self, t: float, m: float, attack_t: float | None = None, strength: float = 0.0) -> None:
+        # Only frames inside the CURRENT confirm window are kept (the trim in
+        # the body also drops frames older than confirm_s): a pending that
+        # started on a late-dated onset is still full of the PREVIOUS note's
+        # plateau frames (measured: the hand-over attack closed the note 20 ms
+        # before its pitch left the band, so 3 frames of the old plateau
+        # entered the window) and the spread test read the whole window as
+        # held from t0 — confirming a start BEFORE the new pitch even began.
+        # This trim makes `_hold_window`'s span test honest: the window must
+        # fill with frames sung since the onset.
+        keep = [
+            i
+            for i, tt in enumerate(self.pending_times)
+            if t - tt <= MEMORY_S and tt >= t - self.confirm_s
+        ]
+        self.pending_midis = [self.pending_midis[i] for i in keep]
+        self.pending_times = [self.pending_times[i] for i in keep]
         self.pending_midis.append(m)
         self.pending_times.append(t)
         if attack_t is not None and self.pending_attack is None:
             self.pending_attack = attack_t
             self.pending_strength = strength
-        keep = [i for i, tt in enumerate(self.pending_times) if t - tt <= MEMORY_S]
+        keep = [i for i, tt in enumerate(self.pending_times) if t - tt <= MEMORY_S and tt >= t - self.confirm_s]
         if len(keep) < len(self.pending_times):
             self.pending_midis = [self.pending_midis[i] for i in keep]
             self.pending_times = [self.pending_times[i] for i in keep]
@@ -300,6 +489,15 @@ class LiveNoteSegmenter:
         pitches = [mm for _, mm in window]
         if max(pitches) - min(pitches) > HOLD_ST:
             return None
+        # a STEADY MEDIAN is not a held pitch: the 5-frame median rides a
+        # slow glide's ramp (measured on the hand-over 47->48: the median
+        # window held 47.0..47.9 while every raw frame moved up one step),
+        # so the spread test needs the RAW frames too. Without this the
+        # ramp confirmed a note dated back at the previous pitch — a
+        # duplicate fragment of the note that just ended.
+        raw_spread = max(self.recent_raw[-HOLD_RAW_FRAMES:]) - min(self.recent_raw[-HOLD_RAW_FRAMES:])
+        if len(self.recent_raw) >= HOLD_RAW_FRAMES and raw_spread > HOLD_ST:
+            return None
         return window
 
     def _reset_pending(self) -> None:
@@ -314,20 +512,25 @@ class LiveNoteSegmenter:
             self._reset_pending()
             return
         start = self.note_start
-        midi = int(round(float(np.median(self.note_midis))))
+        midi = int(round(self.note_pitch if self.note_pitch is not None else float(np.median(self.note_midis))))
         # only piano keys make it into the take (A0..C8): a pitch outside is
         # an octave error or a breath, not a note the singer produced
         if end_t - start >= self.min_note_s and on_piano(midi):
+            plateau = self.note_pitch if self.note_pitch is not None else float(np.median(self.note_midis))
             self.notes.append(
                 LiveNote(
                     start=start, end=end_t, midi=midi,
                     articulated=self.note_articulated, strength=self.note_strength,
+                    dev=max(-0.5, min(0.5, plateau - round(plateau))),
                 )
             )
         self.note_start = None
         self.note_midis = []
+        self.note_pitch = None
         self.note_articulated = False
         self.note_strength = 0.0
+        self._voiced_break = False
+        self._break_cut_t = None
         self._reset_pending()
 
     # ------------------------------------------------------------------

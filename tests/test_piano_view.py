@@ -158,13 +158,15 @@ def test_live_cursor_scrolls_a_constant_width_window(qapp):
 def test_live_preview_follows_the_held_note(qapp):
     roll = PianoRoll()
     roll.set_live_preview(LiveNote(start=1.0, end=1.2, midi=64))
-    assert roll._live_preview.opts["x1"] == [1.2]
+    preview = roll._live_preview
+    assert preview is not None
+    assert preview.opts["x1"] == [1.2]
     roll.set_live_preview(LiveNote(start=1.0, end=1.9, midi=64))  # tenue
-    assert roll._live_preview.opts["x1"] == [1.9]
+    assert preview.opts["x1"] == [1.9]
     roll.set_live_preview(LiveNote(start=1.0, end=1.9, midi=67))  # changement de note
-    assert roll._live_preview.opts["y0"] == pytest.approx([66.6])
+    assert preview.opts["y0"] == pytest.approx([66.6])
     roll.set_live_preview(None)
-    assert not roll._live_preview.isVisible()
+    assert not preview.isVisible()
 
 
 def test_notation_toggle_recolors_existing_bars(qapp):

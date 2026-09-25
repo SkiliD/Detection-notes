@@ -283,6 +283,31 @@ def test_repeated_same_pitch_through_the_full_chain():
     assert all(n.duration < 0.45 for n in notes)  # ni tenue unique ni fusion
 
 
+def test_split_attack_survives_a_pending_mute_run():
+    """L'attaque d'une répétition splitée survit au reset PENDING-sur-mute.
+
+    Une split même hauteur (consonne en rafale) ouvre la répétition PENDING
+    avec `pending_attack` = la coupure ; si le burst s'étend sur les frames
+    suivantes, elles sont MUETTES et le reset PENDING-sur-mute effaçait
+    l'attaque sans la mettre en attente — la répétition repartait datée à
+    sa confirmation (60 ms de trou mesuré entre les deux moitiés) et sans
+    preuve d'articulation, donc recollable par le merge du flush.
+    """
+    seg = LiveNoteSegmenter()
+    _feed(seg, _hz(64), 0.0, 0.40)              # note tenue (confirmée ~0.10)
+    seg.push(0.41, float("nan"), attack=True)   # burst : la tenue est en rupture
+    seg.push(0.42, float("nan"))                # (silence < MIN_GAP_HOLD_S)
+    seg.push(0.43, _hz(64), attack=True)        # frame voisée : la split coupe ici
+    seg.push(0.44, float("nan"))                # la queue du burst : PENDING muet
+    seg.push(0.45, float("nan"))
+    _feed(seg, _hz(64), 0.46, 0.40)             # la voyelle de la répétition
+    seg.flush(0.90)
+    assert [n.midi for n in seg.notes] == [64, 64]
+    assert seg.notes[1].articulated
+    assert seg.notes[1].start == pytest.approx(0.40, abs=0.02)
+    assert seg.notes[1].start >= seg.notes[0].end - 0.02  # pas de trou
+
+
 def test_staged_attack_dates_the_new_note():
     """Une attaque vue sur une frame muette (consonne sans voix) doit dater
     la note suivante : sinon `flush` fusionne la répétition comme un blip."""

@@ -3,7 +3,7 @@
 import xml.etree.ElementTree as ET
 
 import pytest
-from scorexml import assert_measures_close, score_root
+from scorexml import assert_measures_close, score_root, text_of
 
 from v2m.core.grid import BeatGrid, Meter
 from v2m.core.keys import KeyCandidate, KeyResult
@@ -36,12 +36,13 @@ def test_valid_xml_and_structure():
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
     assert root.tag == "score-partwise"
-    assert root.find("part-list/score-part/part-name").text == "Voix"
+    assert text_of(root.find("part-list/score-part/part-name")) == "Voix"
     attrs = root.find("part/measure/attributes")
-    assert attrs.find("divisions").text == "24"
-    assert attrs.find("key/fifths").text == "0"
-    assert attrs.find("time/beats").text == "4"
-    assert attrs.find("clef/sign").text == "G"
+    assert attrs is not None
+    assert text_of(attrs.find("divisions")) == "24"
+    assert text_of(attrs.find("key/fifths")) == "0"
+    assert text_of(attrs.find("time/beats")) == "4"
+    assert text_of(attrs.find("clef/sign")) == "G"
 
 
 def test_measures_fill_total_duration():
@@ -71,9 +72,9 @@ def test_long_note_tied_across_beats():
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
     notes_xml = root.findall("part/measure/note")
-    tied = [n for n in notes_xml if n.find("notations/tied") is not None]
+    tied = [t for n in notes_xml if (t := n.find("notations/tied")) is not None]
     assert len(tied) == 2
-    types = sorted(n.find("notations/tied").get("type") for n in tied)
+    types = sorted(t.get("type") or "" for t in tied)
     assert types == ["start", "stop"]
 
 
@@ -87,14 +88,14 @@ def test_triplet_group_rendered():
     root = _parse(xml)
     tm = root.findall("part/measure/note/time-modification")
     assert len(tm) == 3
-    assert tm[0].find("actual-notes").text == "3"
-    assert tm[0].find("normal-notes").text == "2"
+    assert text_of(tm[0].find("actual-notes")) == "3"
+    assert text_of(tm[0].find("normal-notes")) == "2"
     tuplets = root.findall("part/measure/note/notations/tuplet")
     sides = [t.get("type") for t in tuplets]
     assert sides == ["start", "stop"]  # le milieu n'a pas de bracket
     # le bloc total = 2 temps = 48 divisions -> 16 par note, puis les deux
     # temps libres ferment la mesure
-    durations = [int(n.find("duration").text) for n in root.findall("part/measure/note")]
+    durations = [int(text_of(n.find("duration"))) for n in root.findall("part/measure/note")]
     assert durations[:3] == [16, 16, 16]
     assert sum(durations) == 96  # une mesure 4/4 à 24 divisions par temps
 
@@ -109,9 +110,9 @@ def test_rests_fill_silences():
     # mesure 1 entière silencieuse -> UNE pause entière (pas 4 soupirs) ;
     # mesure 2 : la note au beat 0, puis 3 temps silencieux -> une blanche pointée
     m1_rests = [n for n in measures[0].findall("note") if n.find("rest") is not None]
-    assert [(n.find("type").text, len(n.findall("dot"))) for n in m1_rests] == [("whole", 0)]
+    assert [(text_of(n.find("type")), len(n.findall("dot"))) for n in m1_rests] == [("whole", 0)]
     m2_rests = [n for n in measures[1].findall("note") if n.find("rest") is not None]
-    assert [(n.find("type").text, len(n.findall("dot"))) for n in m2_rests] == [("half", 1)]
+    assert [(text_of(n.find("type")), len(n.findall("dot"))) for n in m2_rests] == [("half", 1)]
 
 
 # ----------------------------------------------------------------- silences
@@ -123,7 +124,7 @@ def test_leading_rest_uses_a_whole_rest_per_empty_measure():
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
     m1 = root.findall("part/measure")[0]
-    types = [n.find("type").text for n in m1.findall("note") if n.find("rest") is not None]
+    types = [text_of(n.find("type")) for n in m1.findall("note") if n.find("rest") is not None]
     assert types == ["whole"]
 
 
@@ -140,7 +141,7 @@ def test_breath_rest_between_phrases_is_a_quarter_rest():
     xml = build_score_xml(notes, GRID, KEY_C, rests=rests)
     root = _parse(xml)
     m1 = root.findall("part/measure")[0]
-    types = [n.find("type").text for n in m1.findall("note") if n.find("rest") is not None]
+    types = [text_of(n.find("type")) for n in m1.findall("note") if n.find("rest") is not None]
     assert types == ["quarter", "quarter"]
 
 
@@ -157,8 +158,8 @@ def test_unlabeled_rest_still_engraves_its_duration():
     root = _parse(xml)
     rest_notes = [n for n in root.findall("part/measure/note") if n.find("rest") is not None]
     assert len(rest_notes) == 1                           # fusionnée, pas fragmentée
-    assert rest_notes[0].find("duration").text == "48"    # 2 temps = 48 divisions
-    assert rest_notes[0].find("type").text == "half"      # vraie valeur, pas générique
+    assert text_of(rest_notes[0].find("duration")) == "48"    # 2 temps = 48 divisions
+    assert text_of(rest_notes[0].find("type")) == "half"      # vraie valeur, pas générique
 
 
 # ------------------------------------------- ce que les prises n'exercent pas
@@ -211,8 +212,8 @@ def test_the_snapped_score_writes_no_duration_below_a_sixteenth():
         grid, notes = make()
         root = score_root(build_score_xml(notes, grid, KEY_C))
         for n in root.findall("part/measure/note"):
-            assert int(n.find("duration").text) >= 6, label
-            assert n.find("type").text != "32nd", label
+            assert int(text_of(n.find("duration"))) >= 6, label
+            assert text_of(n.find("type")) != "32nd", label
 
 
 def test_the_closure_property_refuses_a_type_that_lies_about_its_duration():
@@ -246,7 +247,7 @@ def test_metronome_mark():
     xml = build_score_xml(notes, BeatGrid(117.5), KEY_C)
     root = _parse(xml)
     per_minute = root.find("part/measure/direction/direction-type/metronome/per-minute")
-    assert per_minute.text == "117.5"
+    assert per_minute is not None and per_minute.text == "117.5"
 
 
 # ------------------------------------- la table des durées EST le catalogue
@@ -278,8 +279,8 @@ def test_a_dotted_sixteenth_is_written_on_the_staff_but_snapped_in_the_file():
 
     xml = build_score_xml(notes, GRID, KEY_C)
     sounding = [n for n in _parse(xml).findall("part/measure/note") if n.find("rest") is None]
-    assert [n.find("type").text for n in sounding] == ["eighth", "eighth"]
-    assert [int(n.find("duration").text) for n in sounding] == [12, 12]
+    assert [text_of(n.find("type")) for n in sounding] == ["eighth", "eighth"]
+    assert [int(text_of(n.find("duration"))) for n in sounding] == [12, 12]
     assert "<time-modification>" not in xml       # donc aucun triolet
     assert 0.375 * DIVISIONS in _TYPE_BY_STEPS    # 9 : la valeur est exprimable
 
@@ -289,7 +290,7 @@ def test_an_isolated_short_note_keeps_its_duration_and_rests_the_beat():
     devient un silence, au lieu d'être absorbé par un temps entier inventé."""
     notes = [Note(start=0.0, end=GRID.seconds(0.5), midi=60, confidence=0.9)]
     written = [
-        (n.find("type").text, int(n.find("duration").text),
+        (text_of(n.find("type")), int(text_of(n.find("duration"))),
          "silence" if n.find("rest") is not None else "note")
         for n in _parse(build_score_xml(notes, GRID, KEY_C)).findall("part/measure/note")
     ]
@@ -303,7 +304,7 @@ def test_a_silent_compound_measure_closes_on_a_dotted_half_rest():
     silence de blanche pointée la remplit."""
     xml = build_score_xml([], BeatGrid(BPM, Meter(6, 8)), KEY_C)
     rests = [
-        (n.find("type").text, len(n.findall("dot")), int(n.find("duration").text))
+        (text_of(n.find("type")), len(n.findall("dot")), int(text_of(n.find("duration"))))
         for n in _parse(xml).findall("part/measure/note")
     ]
     assert rests == [("half", 1, 72)]

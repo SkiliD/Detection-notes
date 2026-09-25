@@ -49,7 +49,22 @@ class Figure:
 
 # Plain values come before dotted values: this order resolves equal distances
 # in favour of the simpler engraving. Tuplets are in the same catalogue, but
-# remain a classifier choice rather than a fallback written value.
+# remain a classifier choice rather than a fallback written value. The
+# double-dotted values sit last among the writable ones, and they are VERY
+# heavy (weight 10.0): the ±18% relative tolerance is a HUMAN-timing budget
+# and a plain or dotted neighbour always sits inside a double dot's reach,
+# so a light double dot captures the singer's noise around the plain values
+# (measured: a 0.86-beat note read "croche double-pointée" at weight 1.12
+# AND at 1.30 — its 1.7% error only beats the noire's 14% above weight ~8).
+# Weight 10 narrows the double dot to a measured ±1% band: a singer does not
+# land a double dot by accident, an engraver writes one deliberately. Only
+# values that convert EXACTLY at 24 divisions may enter
+# the catalogue (the MusicXML types are DERIVED from it): the double-dotted
+# 16th (5.25) and the dotted 32nd (4.5) cannot be expressed at 24 — a forge
+# of them would write a <type> contradicting its <duration>. The plain 32nd
+# stays export_only: a snap path bottoms at a 16th (6 divisions), so a 32nd
+# engraved on screen comes only from the classifier, never from the fallback
+# `written`.
 CATALOGUE = (
     Figure("ronde", "whole", 4.0, "pause"),
     Figure("blanche", "half", 2.0, "demi-pause"),
@@ -61,6 +76,8 @@ CATALOGUE = (
     Figure("noire pointée", "quarter", 1.5, "soupir pointée", dots=1, weight=1.06),
     Figure("croche pointée", "eighth", 0.75, "demi-soupir pointée", dots=1, weight=1.06),
     Figure("double-croche pointée", "16th", 0.375, "quart de soupir pointée", dots=1, weight=1.06),
+    Figure("noire double-pointée", "quarter", 1.75, "soupir double-pointée", dots=2, weight=10.0),
+    Figure("croche double-pointée", "eighth", 0.875, "demi-soupir double-pointée", dots=2, weight=10.0),
     Figure("triolet de ronde", "whole", 4.0 * 2 / 3, "pause", tuplet=(3, 2), weight=1.10),
     Figure("triolet de blanche", "half", 2.0 * 2 / 3, "demi-pause", tuplet=(3, 2), weight=1.10),
     Figure("triolet de noire", "quarter", 1.0 * 2 / 3, "soupir", tuplet=(3, 2), weight=1.10),

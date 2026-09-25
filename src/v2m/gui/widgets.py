@@ -10,7 +10,7 @@ from PyQt6.QtCore import pyqtSignal
 
 from ..core.figures import figures_summary, short_label
 from ..core.accuracy import AccuracyHistory
-from ..core.i18n import note_display_pair, tr, tr_figure
+from ..core.i18n import note_display_pair, tr, tr_chord_label, tr_figure, tr_key_label
 from ..core.music import midi_to_name
 
 # Confidence color ramp (red -> green)
@@ -371,7 +371,10 @@ class ResultsPanel(pg.LayoutWidget):
     All labels come from i18n.tr() and refresh via retranslate().
     """
 
-    KEYS = [
+    # The value rows, top to bottom — the i18n keys themselves. Slots
+    # (_values/_labels indexes) share the key names, so one literal serves
+    # both, and the tr() key guard sees every key here statically.
+    SLOT_KEYS = (
         "key source",
         "key duration",
         "key tempo",
@@ -383,21 +386,7 @@ class ResultsPanel(pg.LayoutWidget):
         "key notes count",
         "key measures count",
         "key figures",
-    ]
-    # map the fixed value-slot name -> i18n key
-    SLOT_KEYS = {
-        "source": "key source",
-        "duree": "key duration",
-        "tempo": "key tempo",
-        "meter": "key meter",
-        "key": "key key",
-        "score": "key key score",
-        "alts": "key alternatives",
-        "chord": "key chord",
-        "nn": "key notes count",
-        "nmeas": "key measures count",
-        "figs": "key figures",
-    }
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -452,12 +441,27 @@ class ResultsPanel(pg.LayoutWidget):
         return table
 
     def retranslate(self) -> None:
-        """Refresh every label in the current language (labels only)."""
+        """Refresh every label in the current language (labels only).
+
+        One literal line per row ON PURPOSE: the tr() key guard
+        (tests/test_docs_guard.py) only sees literal arguments, so a typo'd
+        key fails THERE instead of reaching the user as a raw label — a
+        loop over SLOT_KEYS would be an invisible dynamic call.
+        """
         self._title.setText(f"<b>{tr('key results title')}</b>")
         self._waiting.setText(tr("ui panel waiting"))
         self._waiting.setVisible(self._has_results is False)
-        for slot, key in self.SLOT_KEYS.items():
-            self._labels[slot].setText(f"<b>{tr(key)}</b>")
+        self._labels["key source"].setText(f"<b>{tr('key source')}</b>")
+        self._labels["key duration"].setText(f"<b>{tr('key duration')}</b>")
+        self._labels["key tempo"].setText(f"<b>{tr('key tempo')}</b>")
+        self._labels["key meter"].setText(f"<b>{tr('key meter')}</b>")
+        self._labels["key key"].setText(f"<b>{tr('key key')}</b>")
+        self._labels["key key score"].setText(f"<b>{tr('key key score')}</b>")
+        self._labels["key alternatives"].setText(f"<b>{tr('key alternatives')}</b>")
+        self._labels["key chord"].setText(f"<b>{tr('key chord')}</b>")
+        self._labels["key notes count"].setText(f"<b>{tr('key notes count')}</b>")
+        self._labels["key measures count"].setText(f"<b>{tr('key measures count')}</b>")
+        self._labels["key figures"].setText(f"<b>{tr('key figures')}</b>")
         self._lbl_notes.setText(f"<b>{tr('key notes table')}</b>")
         self._lbl_segs.setText(f"<b>{tr('key chord segments')}</b>")
         self._notes_table.setHorizontalHeaderLabels(
@@ -474,41 +478,45 @@ class ResultsPanel(pg.LayoutWidget):
             for vl in self._values.values():
                 vl.setText("—")
             return
-        self._values["source"].setText(Path(res.source).name)
-        self._values["duree"].setText(f"{res.duration_s:.2f} s")
-        self._values["tempo"].setText(f"{res.tempo.bpm:.1f} BPM" if res.tempo else "—")
-        self._values["meter"].setText(
+        self._values["key source"].setText(Path(res.source).name)
+        self._values["key duration"].setText(f"{res.duration_s:.2f} s")
+        self._values["key tempo"].setText(f"{res.tempo.bpm:.1f} BPM" if res.tempo else "—")
+        self._values["key meter"].setText(
             res.meter.label if getattr(res, "meter", None) else tr("key default meter")
         )
         if getattr(res, "note_positions", None) and res.tempo:
-            self._values["nmeas"].setText(
+            self._values["key measures count"].setText(
                 str(getattr(res, "num_measures", 0) or len(res.note_positions))
             )
         else:
-            self._values["nmeas"].setText("—")
-        self._values["key"].setText(res.key.best.label if res.key else "—")
-        self._values["score"].setText(f"{res.key.best.score:.2f}" if res.key else "—")
+            self._values["key measures count"].setText("—")
+        # display translates the stored canonical labels ('C major' ->
+        # 'C majeur'), like the staff header already does
+        self._values["key key"].setText(
+            tr_key_label(res.key.best.label) if res.key else "—"
+        )
+        self._values["key key score"].setText(f"{res.key.best.score:.2f}" if res.key else "—")
         alts = (
-            ", ".join(a.label for a in res.key.alternatives)
+            ", ".join(tr_key_label(a.label) for a in res.key.alternatives)
             if res.key and res.key.alternatives
             else "—"
         )
-        self._values["alts"].setText(alts)
+        self._values["key alternatives"].setText(alts)
 
-        # Global chord + runner-ups
+        # Global chord + runner-ups (labels translated at display, like keys)
         chord = getattr(res, "chord", None)
         if chord is not None:
-            txt = chord.best.label
+            txt = tr_chord_label(chord.best.label)
             if chord.alternatives:
-                txt += "  (" + ", ".join(c.label for c in chord.alternatives) + ")"
-            self._values["chord"].setText(txt)
+                txt += "  (" + ", ".join(tr_chord_label(c.label) for c in chord.alternatives) + ")"
+            self._values["key chord"].setText(txt)
         else:
-            self._values["chord"].setText("—")
+            self._values["key chord"].setText("—")
 
-        self._values["nn"].setText(str(len(res.notes)))
+        self._values["key notes count"].setText(str(len(res.notes)))
         figs = figures_summary(res.notes)
-        self._values["figs"].setText(
-            ", ".join(f"{k} ×{v}" for k, v in figs.items()) if figs else "—"
+        self._values["key figures"].setText(
+            ", ".join(f"{tr_figure(k)} ×{v}" for k, v in figs.items()) if figs else "—"
         )
 
         # Per-note table (note names follow the UI language)
@@ -533,13 +541,13 @@ class ResultsPanel(pg.LayoutWidget):
             for r, (m0, m1, c) in enumerate(prog):
                 span_txt = f"m. {m0}" if m1 == m0 + 1 else f"m. {m0}–{m1 - 1}"
                 self._seg_table.setItem(r, 0, pg.QtWidgets.QTableWidgetItem(span_txt))
-                self._seg_table.setItem(r, 1, pg.QtWidgets.QTableWidgetItem(c.label))
+                self._seg_table.setItem(r, 1, pg.QtWidgets.QTableWidgetItem(tr_chord_label(c.label)))
         else:
             segs = getattr(res, "chord_segments", None) or []
             self._seg_table.setRowCount(len(segs))
             for r, (t0, t1, c) in enumerate(segs):
                 self._seg_table.setItem(r, 0, pg.QtWidgets.QTableWidgetItem(f"{t0:.1f} – {t1:.1f} s"))
-                self._seg_table.setItem(r, 1, pg.QtWidgets.QTableWidgetItem(c.label))
+                self._seg_table.setItem(r, 1, pg.QtWidgets.QTableWidgetItem(tr_chord_label(c.label)))
         self._seg_table.resizeColumnsToContents()
 
 

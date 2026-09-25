@@ -11,6 +11,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .i18n import tr
+
 TOOLS = [
     ("MuseScore", "musescore", ["musescore4", "musescore3", "musescore", "MuseScore4.exe", "MuseScore3.exe"]),
     ("LilyPond", "lilypond", ["lilypond"]),
@@ -40,22 +42,19 @@ def find_notation_tool() -> tuple[str, str] | None:
 
 
 def install_hint() -> str:
-    return (
-        "Installez MuseScore (https://musescore.org) ou LilyPond "
-        "(https://lilypond.org) puis vérifiez qu'il est dans le PATH."
-    )
+    return tr("err pdf install hint")
 
 
 def export_pdf(musicxml_path: str | Path, pdf_path: str | Path) -> str:
     """Convert a .musicxml to PDF. Raise PdfExportError when impossible."""
     tool = find_notation_tool()
     if tool is None:
-        raise PdfExportError(f"No engraving tool found (MuseScore, LilyPond). {install_hint()}")
+        raise PdfExportError(tr("err pdf no tool").format(hint=install_hint()))
     name, cmd = tool
     musicxml_path = Path(musicxml_path)
     pdf_path = Path(pdf_path)
     if not musicxml_path.exists():
-        raise PdfExportError(f"Fichier introuvable : {musicxml_path}")
+        raise PdfExportError(tr("err file not found").format(path=musicxml_path))
 
     if name == "LilyPond":
         cmd_args = [cmd, "-o", str(pdf_path.with_suffix("")), str(musicxml_path)]
@@ -68,12 +67,14 @@ def export_pdf(musicxml_path: str | Path, pdf_path: str | Path) -> str:
             check=False,
         )
     except FileNotFoundError:
-        raise PdfExportError(f"{cmd} introuvable à l'exécution. {install_hint()}") from None
+        raise PdfExportError(tr("err pdf not runnable").format(cmd=cmd, hint=install_hint())) from None
     except subprocess.TimeoutExpired:
-        raise PdfExportError(f"{name} did not respond (timeout 120 s).") from None
+        raise PdfExportError(tr("err pdf timeout").format(name=name)) from None
 
     if proc.returncode != 0 or not pdf_path.exists():
+        # the tool's own stderr is in the tool's language; only OUR fallback
+        # line and the message frame must follow the UI language
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        msg = detail[-1] if detail else f"exit code {proc.returncode}"
-        raise PdfExportError(f"Conversion via {name} failed: {msg}")
+        msg = detail[-1] if detail else tr("err pdf exit code").format(code=proc.returncode)
+        raise PdfExportError(tr("err pdf conversion").format(name=name, msg=msg))
     return str(pdf_path)

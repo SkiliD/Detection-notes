@@ -32,9 +32,16 @@ def score_root(xml: str) -> ET.Element:
     return ET.fromstring(xml.split("?>", 1)[1])
 
 
+def text_of(el: ET.Element | None) -> str:
+    """Le texte d'un élément requis : absent ou vide, le fichier est invalide."""
+    if el is None or el.text is None:
+        raise AssertionError("élément requis absent du score exporté")
+    return el.text
+
+
 def written_divisions(note: ET.Element) -> float:
     """Durée qu'annonce le `<type>` écrit, points et triolet compris."""
-    divisions = BASE_DIVISIONS[note.find("type").text] * (
+    divisions = BASE_DIVISIONS[text_of(note.find("type"))] * (
         2.0 - 2.0 ** -len(note.findall("dot"))
     )
     if note.find("time-modification") is not None:
@@ -50,20 +57,18 @@ def assert_measures_close(root: ET.Element, label: str) -> None:
     importateur le lirait — le contrôle ne connaît pas la Grille.
     """
     attrs = root.find("part/measure/attributes")
-    divisions = int(attrs.find("divisions").text)
-    measure = (
-        int(attrs.find("time/beats").text)
-        * 4
-        * divisions
-        // int(attrs.find("time/beat-type").text)
-    )
+    assert attrs is not None, "attributs de mesure absents"
+    divisions = int(text_of(attrs.find("divisions")))
+    beats = int(text_of(attrs.find("time/beats")))
+    beat_type = int(text_of(attrs.find("time/beat-type")))
+    measure = beats * 4 * divisions // beat_type
     for m in root.findall("part/measure"):
         where = f"{label} mesure {m.get('number')}"
         notes = m.findall("note")
-        total = sum(int(n.find("duration").text) for n in notes)
+        total = sum(int(text_of(n.find("duration"))) for n in notes)
         assert total == measure, f"{where} : la mesure totalise {total} / {measure}"
         for n in notes:
-            duration = int(n.find("duration").text)
+            duration = int(text_of(n.find("duration")))
             assert abs(written_divisions(n) - duration) < 1e-9, (
-                f"{where} : <type> {n.find('type').text} pour {duration} divisions"
+                f"{where} : <type> {text_of(n.find('type'))} pour {duration} divisions"
             )

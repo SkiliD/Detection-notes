@@ -8,7 +8,14 @@ import librosa
 import numpy as np
 
 FMIN = 65.0    # ~ C2
-FMAX = 1050.0  # ~ C6
+# C7, not C6: the old 1050 Hz ceiling sat EXACTLY on the sung C6 boundary —
+# pYIN had no room above to lock a soprano's top notes and folded them an
+# octave down (measured: a sung 84 read 72, a 79-88 line read 67-76 — the
+# classic octave error, 2 corpus cases). One octave of headroom reads them
+# and moves NOTHING below (chant.wav/demo.wav byte-identical, corpus 15/15
+# unchanged). pYIN's octave-halving is still cleaned by clean_pitch's
+# median filter; the piano guard (A0..C8) rejects anything stray.
+FMAX = 2100.0  # ~ C7
 
 
 @dataclass
@@ -18,12 +25,24 @@ class PitchTrack:
     times: np.ndarray   # (n,) times in seconds (frame center)
     hz: np.ndarray      # (n,) frequency (NaN when unvoiced)
     confidence: np.ndarray  # (n,) voicing probability
+    # True where |df0/dt| exceeds the transition threshold (vibrato peaks
+    # aside, these are portamento ramps and note hand-overs). None until
+    # clean_pitch computes it: pitch estimation must read STABLE plateaus
+    # only, never the ramp that leads into them.
+    transition: np.ndarray | None = None
 
 
 def track_pitch_offline(y: np.ndarray, sr: int, frame_ms: float = 20.0) -> PitchTrack:
-    """pYIN on a complete signal. Accurate, ~0.3x real duration."""
+    """pYIN on a complete signal. Accurate, ~0.3x real duration.
+
+    `confidence` carries pYIN's voicing PROBABILITY (the third return, once
+    discarded), not the binary voiced flag: a breath's noise reads 0.01-0.1
+    while a sung frame reads 0.95+ (measured on the voice harness), so
+    `clean_pitch`'s `min_conf` mask actually has something to mask — with
+    the flag (1.0 wherever f0 exists) nothing was ever filtered.
+    """
     hop = max(64, int(sr * frame_ms / 1000))
-    f0, voiced, _ = librosa.pyin(
+    f0, _voiced_flag, vprob = librosa.pyin(
         y,
         fmin=FMIN,
         fmax=FMAX,
@@ -33,7 +52,7 @@ def track_pitch_offline(y: np.ndarray, sr: int, frame_ms: float = 20.0) -> Pitch
         fill_na=np.nan,
     )
     times = librosa.times_like(f0, sr=sr, hop_length=hop)
-    confidence = np.where(np.isnan(f0), 0.0, voiced.astype(float))
+    confidence = np.where(np.isnan(f0), 0.0, vprob)
     return PitchTrack(
         times=np.asarray(times, dtype=float),
         hz=np.asarray(f0, dtype=float),

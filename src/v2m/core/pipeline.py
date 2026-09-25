@@ -17,14 +17,14 @@ from .chords import (
 from .figures import label_notes
 from .grid import BeatGrid, Meter
 from .i18n import tr
-from .keys import KeyResult, detect_key
-from .meter import detect_meter
-from .notes import Note, compute_onset_strengths, track_to_notes
+from .keys import KeyResult, detect_key, snap_to_key
+from .meter import detect_meter, dotted_pulse_tempo
+from .notes import DEFAULT_MIN_NOTE_S, DEFAULT_SEMITONES, Note, track_to_notes
 from .observation import VoiceObservation
-from .onsets import detect_attacks
+from .onsets import compute_onset_strengths, detect_attacks
 from .pitch import PitchTrack, track_pitch_offline
 from .rests import Rest, detect_rests
-from .tempo import TempoResult, detect_tempo, refine_bpm_with_onsets
+from .tempo import BPM_RANGE, TempoResult, detect_tempo, refine_bpm_with_onsets
 
 
 @dataclass
@@ -45,6 +45,7 @@ class AnalysisResult:
     grid: Optional[BeatGrid] = None  # the metric frame: seconds <-> beats
     sr: int = audio_io.SR
     observation: VoiceObservation | None = None
+    tuning_offset_st: float = 0.0  # the take's systematic offset, absorbed before rounding
 
     def quantize_step(self, division: int = 16) -> float:
         """Seconds per grid division (16 = sixteenth) at the detected tempo."""
@@ -53,12 +54,25 @@ class AnalysisResult:
         return 0.0
 
 
+# One policy for the analysis thresholds: the dataclass, the CLI parsers,
+# the GUI and LiveTake all read these — a default written twice had already
+# started to drift (the GUI hard-coded its own 0.6).
+FILE_CONF = 0.6  # offline analysis: the whole file refines the pitch
+LIVE_CONF = 0.5  # live capture: keep faint notes while tracking
+
+
 @dataclass
 class AnalyzeOptions:
-    min_conf: float = 0.6
-    min_note_s: float = 0.060
-    semitones: float = 0.6
-    bpm_range: tuple[float, float] = (60.0, 180.0)
+    min_conf: float = FILE_CONF
+    min_note_s: float = DEFAULT_MIN_NOTE_S  # notes.py owns the floor
+    # notes.py owns this threshold too: the hysteresis band is calibrated on
+    # the truth corpus at 0.5 (every test and the chant.wav golden
+    # fingerprint read it) — a 0.6 written here once detached the offline
+    # defaults from the tested ones and lost one note of chant.wav (28 @
+    # 155.1 BPM, the documented regression signature, vs 29 @ ~171).
+    semitones: float = DEFAULT_SEMITONES
+    # the fallback range is tempo's own constant: pipeline only aggregates it
+    bpm_range: tuple[float, float] = BPM_RANGE
     use_attacks: bool = True  # attack evidence: tells a note from a glide
 
 
@@ -95,6 +109,10 @@ def analyze_signal(
         attacks=attacks,
         duration_s=len(y) / sr,
     )
+    # the take's own tuning reference is measured inside track_to_notes
+    # (on the plateau pitches, before rounding) and travels back in the
+    # side channel: one number, reported in the JSON as cents
+    _tuning: dict = {}
     notes = track_to_notes(
         track,
         sr,
@@ -102,16 +120,29 @@ def analyze_signal(
         min_note_s=opts.min_note_s,
         semitones=opts.semitones,
         attacks=attacks,
+        tuning_out=_tuning,
     )
+    tuning_offset = _tuning.get("tuning_offset_st", 0.0)
 
     report(0.90, tr("progress key"))
     key = detect_key(notes)
+    # context-aware pitch snap (AGENTS.md b): a note that sits almost
+    # exactly between two semitones resolves toward whichever neighbour IS
+    # a degree of the detected key — the global tuning offset (notes.py)
+    # cannot see a mistuned degree, the scale can. No-op without a key.
+    if key is not None:
+        snap_to_key(notes, key.best)
 
     report(0.91, tr("progress chords"))
     chord = detect_chords(notes)
     chord_segments = detect_chord_segments(notes) if chord else []
 
     report(0.92, tr("progress refine"))
+    # the onset strengths feed BOTH the dotted-pulse tempo correction below
+    # and the meter detection: compute them once, before the tempo is
+    # finalized (they used to be filled after the refine — the correction
+    # then read all-zero strengths and never fired on a real take)
+    compute_onset_strengths(notes, y, sr)
     if tempo and tempo.bpm > 0 and len(notes) >= 3:
         # beat_track returns a rounded BPM (e.g. 117.5 for a true 120):
         # refine it against note onsets to rebuild an exact grid, required
@@ -119,6 +150,12 @@ def analyze_signal(
         refined = refine_bpm_with_onsets(
             np.array([n.start for n in notes], dtype=float), tempo.bpm
         )
+        # AFTER the refine, not before: beat_track lands on an INTEGER
+        # multiple of the dotted pulse (the onsets live on its grid), so the
+        # refine stays exact on that grid. The correction is the one the
+        # live estimate applies (meter.dotted_pulse_tempo) — a compound take
+        # publishes the same tempo live and in the final analysis.
+        refined = dotted_pulse_tempo(notes, refined)
         t0 = float(tempo.beats[0]) if len(tempo.beats) else 0.0
         beat_times = np.arange(t0, len(y) / sr, 60.0 / refined)
         tempo = TempoResult(bpm=round(refined, 2), beats=beat_times)
@@ -135,8 +172,8 @@ def analyze_signal(
         # accent evidence has decided the meter
         grid = BeatGrid(tempo.bpm)
         label_notes(notes, grid)
-        # accents (relative onset strengths) feed the 3/4 vs 4/4 decision
-        compute_onset_strengths(notes, y, sr)
+        # accents (relative onset strengths) feed the 2/4 vs 3/4 vs 4/4
+        # decision — already computed above, before the tempo correction
         meter = detect_meter(notes, tempo.bpm)
         grid = grid.with_meter(meter)
         positions = grid.positions(notes)
@@ -154,6 +191,7 @@ def analyze_signal(
 
     report(1.0, tr("progress done"))
     return AnalysisResult(
+        tuning_offset_st=tuning_offset,
         source=source,
         duration_s=len(y) / sr,
         notes=notes,

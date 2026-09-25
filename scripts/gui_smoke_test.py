@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20,6 +22,15 @@ from PyQt6.QtWidgets import QApplication
 from v2m.core.pipeline import analyze_file
 from v2m.gui.main_window import MainWindow
 
+# Deterministic language: sandbox LANG_FILE (as tests/conftest.py does for the
+# suite) and force fr BEFORE the window is built — the assertions are written
+# against fr. Without this, a persisted "en" (GUI toggle, or a CLI --lang en
+# run) breaks every fr-expecting assertion before the toggle section runs.
+import v2m.core.i18n as i18n
+
+i18n.LANG_FILE = Path(tempfile.gettempdir()) / ".v2m_lang_smoke_test"
+i18n.set_language("fr")
+
 
 def main() -> int:
     print("[smoke] startup", flush=True)
@@ -28,6 +39,7 @@ def main() -> int:
 
     audio = sys.argv[1] if len(sys.argv) > 1 else "demo.wav"
     res = analyze_file(audio)
+    assert res.tempo is not None, "file analysis must produce a tempo"
     print(f"analyse ok : {len(res.notes)} notes, {res.tempo.bpm} bpm", flush=True)
 
     win = MainWindow()

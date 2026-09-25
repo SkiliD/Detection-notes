@@ -3,10 +3,18 @@
 from v2m.core.chords import (
     CHORD_TEMPLATES,
     ChordCandidate,
+    ChordResult,
     detect_chord_segments,
     detect_chords,
 )
 from v2m.core.notes import Note
+
+
+def _chord(midi_weights: dict[int, float]) -> ChordResult:
+    """A detection the test itself asserts: fails with a clear message on None."""
+    result = detect_chords(_chord_notes(midi_weights))
+    assert result is not None, "accordeur indécis sur un accord clair"
+    return result
 
 
 def _chord_notes(midi_weights: dict[int, float]) -> list[Note]:
@@ -20,23 +28,20 @@ def _chord_notes(midi_weights: dict[int, float]) -> list[Note]:
 
 def test_major_triad_recognized():
     notes = _chord_notes({60: 1.0, 64: 1.0, 67: 1.0})  # C4 E4 G4
-    res = detect_chords(notes)
-    assert res is not None
+    res = _chord({60: 1.0, 64: 1.0, 67: 1.0})
     assert res.best.label == "C"
     assert res.best.score > 0.9
 
 
 def test_minor_triad_recognized_with_bass_a():
     # A2 in the bass: root-position Am, not Fmaj7 (whose bass would be F)
-    notes = _chord_notes({45: 1.2, 60: 1.0, 64: 1.0})  # A2 C4 E4
-    res = detect_chords(notes)
+    res = _chord({45: 1.2, 60: 1.0, 64: 1.0})  # A2 C4 E4
     assert res.best.label == "Am"
 
 
 def test_dominant_seventh_beats_plain_triad():
     # G B D F: the 7th disqualifies a plain G triad (weight outside template)
-    notes = _chord_notes({55: 1.0, 59: 1.0, 62: 1.0, 65: 1.0})
-    res = detect_chords(notes)
+    res = _chord({55: 1.0, 59: 1.0, 62: 1.0, 65: 1.0})
     assert res.best.label == "G7"
 
 
@@ -45,7 +50,8 @@ def test_bass_note_prefers_root_position():
     # ambiguous (Em or C/E): the detector may stay undecided, but when it
     # does answer with the E bass, Em must win over C/E.
     notes_with_c = _chord_notes({60: 1.0, 64: 0.2, 67: 1.0})
-    assert detect_chords(notes_with_c).best.label == "C"
+    decided = detect_chords(notes_with_c)
+    assert decided is not None and decided.best.label == "C"
     notes_bass_e = _chord_notes({52: 1.0, 55: 1.0, 64: 1.0, 67: 1.0})
     res = detect_chords(notes_bass_e)
     if res is not None:
@@ -64,8 +70,7 @@ def test_single_pitch_class_returns_none():
 
 
 def test_alternatives_have_distinct_roots():
-    notes = _chord_notes({60: 1.0, 64: 1.0, 67: 1.0, 69: 0.4})  # C major + a bit of A
-    res = detect_chords(notes)
+    res = _chord({60: 1.0, 64: 1.0, 67: 1.0, 69: 0.4})  # C major + a bit of A
     roots = [c.root for c in res.alternatives]
     assert res.best.root not in roots
     assert len(roots) == len(set(roots))

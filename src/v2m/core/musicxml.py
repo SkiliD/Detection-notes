@@ -27,6 +27,7 @@ from xml.sax.saxutils import escape
 from .grid import BeatGrid, CATALOGUE
 from .grid import MUSICXML_DIVISIONS as DIVISIONS
 from .music import midi_to_name_fr
+from .i18n import tr_chord_label
 
 
 STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -182,6 +183,26 @@ def _harmony_xml(root: str, kind: str) -> str:
     )
 
 
+def _harmony_words_xml(root: str, kind: str) -> str:
+    """The chord's READABLE name above the staff, next to its symbol.
+
+    MusicXML carries symbols (<harmony>: 'Am'); a musician reads 'La
+    mineur' (the i18n display table's whole-label translation, the same one
+    the GUI and the CLI use). It travels as a `<direction><words>` — the
+    standard, importable way to print text above the staff. Canonical
+    'Am' stays in the JSON/CSV and in every harmonic structure; this is a
+    DISPLAY-only addition (like the note lyrics).
+    """
+    label = tr_chord_label(f"{root}{kind}")
+    return (
+        "<direction placement='above'>"
+        "<direction-type>"
+        f"<words font-style='italic'>{escape(label)}</words>"
+        "</direction-type>"
+        "</direction>"
+    )
+
+
 @dataclass
 class _TripletBlock:
     """A block of consecutive triplet notes (rendered as a group)."""
@@ -300,11 +321,15 @@ def build_score_xml(
 
     # measure-aligned chords -> quick lookup by starting measure (1-based)
     harmony_by_measure: dict[int, str] = {}
+    harmony_words_by_measure: dict[int, str] = {}
     if chord_progression:
         for m0, m1, c in chord_progression:
             if m0 < 1:
                 continue
             harmony_by_measure.setdefault(m0, _harmony_xml(c.root, c.quality))
+            harmony_words_by_measure.setdefault(
+                m0, _harmony_words_xml(c.root, c.quality)
+            )
 
     # subtitle credit line: every top-level detection on one line
     credits = " · ".join(
@@ -356,6 +381,9 @@ def build_score_xml(
         harmony = harmony_by_measure.get(m + 1)
         if harmony:
             out.append(f"      {harmony}\n")
+            words = harmony_words_by_measure.get(m + 1)
+            if words:
+                out.append(f"      {words}\n")
         m_start = m * measure_s
         m_end = m_start + measure_s
         skip_until = m_start

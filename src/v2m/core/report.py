@@ -18,6 +18,7 @@ from .grid import BeatGrid, Meter
 from .midi_export import build_midi
 from .music import midi_to_name, midi_to_name_fr
 from .musicxml import save_musicxml
+from .i18n import tr
 from .pdf_export import PdfToolMissing, export_pdf, find_notation_tool, install_hint
 
 
@@ -53,7 +54,9 @@ def export_result(
     and must never cost the data artifacts, nor the report returned here.
     """
     if res.tempo is None or res.key is None:
-        raise ValueError("export_result requires a complete analysis (tempo + key)")
+        # a French user reads this through `err analyze failed`/`err ui export
+        # failed`: the message itself must follow the UI language too
+        raise ValueError(tr("err export incomplete"))
     stem = Path(stem)
     stem.parent.mkdir(parents=True, exist_ok=True)  # a nested stem (live take) needs its folder
     grid = getattr(res, "grid", None)
@@ -62,7 +65,7 @@ def export_result(
         # pipeline's immutable grid remains the single metric decision.
         selected_meter = meter or getattr(res, "meter", None)
         if selected_meter is None:
-            raise ValueError("export_result requires a meter")
+            raise ValueError(tr("err export needs meter"))
         grid = BeatGrid(res.tempo.bpm, cast(Meter, selected_meter))
     meter = grid.meter
     positions = res.note_positions if meter == getattr(res, "meter", None) else None
@@ -101,6 +104,9 @@ def export_result(
             ],
         },
         "n_notes": len(res.notes),
+        "tuning_offset_cents": round(
+            100.0 * getattr(res, "tuning_offset_st", 0.0), 1
+        ),
         "rests": [
             {
                 "start_s": round(r.start, 4),
@@ -173,5 +179,5 @@ def engrave_pdf(stem: str | Path) -> str:
     """
     stem = Path(stem)
     if find_notation_tool() is None:
-        raise PdfToolMissing(f"PDF ignored: {install_hint()}")
+        raise PdfToolMissing(tr("err pdf skipped").format(hint=install_hint()))
     return export_pdf(str(stem) + ".musicxml", str(stem) + ".pdf")

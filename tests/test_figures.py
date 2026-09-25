@@ -6,8 +6,15 @@ from v2m.core.figures import (
     label_notes,
     short_label,
 )
-from v2m.core.grid import BeatGrid
+from v2m.core.grid import CATALOGUE, BeatGrid
 from v2m.core.notes import Note
+
+
+def _fig(beats: float) -> str:
+    """Le nom d'une durée classée — le test échoue fort si rien ne colle."""
+    figure = classify_duration(beats)
+    assert figure is not None, f"durée {beats} non classée"
+    return figure.name
 
 BPM = 120.0
 GRID = BeatGrid(BPM)  # l'étiquetage passe par la Grille, pas par un bpm nu
@@ -20,23 +27,59 @@ def _beats(n: float) -> float:
 
 def test_simple_figures():
     # classify_duration prend des TEMPS (beats), pas des secondes
-    assert classify_duration(4.0).name == "ronde"
-    assert classify_duration(2.0).name == "blanche"
-    assert classify_duration(1.0).name == "noire"
-    assert classify_duration(0.5).name == "croche"
-    assert classify_duration(0.25).name == "double-croche"
+    assert _fig(4.0) == "ronde"
+    assert _fig(2.0) == "blanche"
+    assert _fig(1.0) == "noire"
+    assert _fig(0.5) == "croche"
+    assert _fig(0.25) == "double-croche"
 
 
 def test_dotted_figures():
-    assert classify_duration(3.0).name == "blanche pointée"
-    assert classify_duration(1.5).name == "noire pointée"
-    assert classify_duration(0.75).name == "croche pointée"
+    assert _fig(3.0) == "blanche pointée"
+    assert _fig(1.5) == "noire pointée"
+    assert _fig(0.75) == "croche pointée"
+
+
+def test_double_dotted_figures_win_only_on_a_deliberate_length():
+    """Les double-pointées existent et capturent une bande ETROITE (~±1 %).
+
+    Mesuré : à poids léger (1.12, puis 1.30), la croche double-pointée
+    (0.875 temps) capturait le bruit humain autour de la noire — une note
+    chantée à 0.86 temps se gravait "croche double-pointée" au lieu de
+    noire, cassant l'épingle « ±15 % garde son étiquette simple ». Le poids
+    10.0 réduit la double-pointée à une bande ±1 % : un chanteur n'atterrit
+    PAS sur une double-pointée par accident, un graveur l'écrit à dessein.
+    """
+    assert _fig(0.875) == "croche double-pointée"
+    assert _fig(0.88) == "croche double-pointée"
+    assert _fig(0.86) == "noire"        # bruit humain : la simple gagne
+    assert _fig(0.8) == "croche pointée"
+    assert _fig(1.75) == "noire double-pointée"
+    assert _fig(1.74) == "noire double-pointée"
+    assert _fig(1.15) == "noire"
+
+
+def test_every_catalogue_value_converts_exactly_at_24_divisions():
+    """Toute valeur du catalogue s'écrit en divisions entières à 24/temps.
+
+    AGENTS.md (invariant épinglé) : la table `<type>` de l'export MusicXML
+    est DÉRIVÉE du catalogue — une valeur qui ne convertit pas exactement
+    (double-croche double-pointée = 5.25 divisions, 32ᵉ pointée = 4.5)
+    graverait un `<type>` contredisant sa `<duration>`. Refusé à l'entrée :
+    deux valeurs candidates avaient été retirées pour ça.
+    """
+    from v2m.core.grid import MUSICXML_DIVISIONS
+
+    for f in CATALOGUE:
+        assert (f.beats * MUSICXML_DIVISIONS) % 1 == 0, (
+            f"{f.name} = {f.beats * MUSICXML_DIVISIONS} divisions"
+        )
 
 
 def test_triplet_figures():
-    assert classify_duration(2 / 3).name == "triolet de noire"
-    assert classify_duration(1 / 3).name == "triolet de croche"
-    assert classify_duration(4 / 3).name == "triolet de blanche"
+    assert _fig(2 / 3) == "triolet de noire"
+    assert _fig(1 / 3) == "triolet de croche"
+    assert _fig(4 / 3) == "triolet de blanche"
 
 
 def test_tolerance_rejects_offgrid():
@@ -49,16 +92,16 @@ def test_tolerance_rejects_offgrid():
 
 def test_imperfect_human_timing_classified():
     """Une note humaine à ±15 % reste bien étiquetée (pas déclassée en triolet)."""
-    assert classify_duration(0.86).name == "noire"
-    assert classify_duration(1.15).name == "noire"   # pénalité triolet : noire gagne
-    assert classify_duration(0.53).name == "croche"  # idem croche vs triolet de noire
+    assert _fig(0.86) == "noire"
+    assert _fig(1.15) == "noire"   # pénalité triolet : noire gagne
+    assert _fig(0.53) == "croche"  # idem croche vs triolet de noire
 
 
 def test_triplet_wins_when_clearly_triplet():
     """Aux durées exactes de triolet, c'est bien le triolet qui gagne."""
-    assert classify_duration(2 / 3).name == "triolet de noire"
-    assert classify_duration(4 / 3).name == "triolet de blanche"
-    assert classify_duration(1.3).name == "triolet de blanche"  # à 2,5 % du triolet
+    assert _fig(2 / 3) == "triolet de noire"
+    assert _fig(4 / 3) == "triolet de blanche"
+    assert _fig(1.3) == "triolet de blanche"  # à 2,5 % du triolet
 
 
 def test_label_notes_on_analysis_like_notes():

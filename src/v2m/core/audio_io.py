@@ -106,8 +106,8 @@ class LiveCapture:
         return self._n_samples / self.samplerate
 
     def start(self) -> None:
-        if sd is None:
-            raise RuntimeError("sounddevice indisponible (pas de périphérique audio ?)")
+        if sd is None:  # pragma: no cover - needs a real audio device
+            raise RuntimeError(tr("err sounddevice missing"))
         self._stream = sd.InputStream(
             samplerate=self.samplerate,
             channels=1,

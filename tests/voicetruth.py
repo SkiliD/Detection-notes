@@ -27,15 +27,25 @@ SR = 22_050
 
 @dataclass(frozen=True)
 class SungNote:
-    """Une note effectivement chantée (la référence)."""
+    """Une note effectivement chantée (la référence).
+
+    `amp` : amplitude RELATIVE de la note dans la prise (1.0 par défaut) —
+    c'est ce qui fabrique les accents que la force d'attaque doit lire.
+    """
 
     midi: int
     start_s: float
     dur_s: float
+    amp: float = 1.0
 
     @property
     def hz(self) -> float:
         return 440.0 * 2.0 ** ((self.midi - 69) / 12.0)
+
+
+# --------------------------------------------------------------------------- #
+# Synthèse
+# --------------------------------------------------------------------------- #
 
 
 def sequence(
@@ -114,7 +124,7 @@ def synthesize(
             cn = min(int(consonant_s * sr), ln)
             burst = rng.standard_normal(cn) * _consonant_envelope(cn, sr)
             body[:cn] += consonant_amp * burst
-        y[i0 : i0 + ln] += body
+        y[i0 : i0 + ln] += body * note.amp
         prev_hz = hz
         prev_end = note.start_s + note.dur_s
 
@@ -141,6 +151,21 @@ def _consonant_envelope(n: int, sr: int) -> np.ndarray:
     """Burst percussif : très court, décroissance rapide."""
     t = np.arange(n) / sr
     return np.exp(-t / max(0.012, 1e-9))
+
+
+def add_breath(y: np.ndarray, at: float, dur_s: float = 0.09, amp: float = 0.25,
+               seed: int = 7) -> None:
+    """Ajoute une reprise d'air (burst de bruit fenêtré) dans `y`, en place.
+
+    Le chanteur respire : dans le gap d'une ligne liée (juste avant la
+    réattaque), en silence entre deux phrases, ou le souffle continu d'une
+    voix soufflée (paramètre `noise` de synthesize). La segmentation ne doit
+    JAMAIS en faire une note.
+    """
+    i0 = int(at * SR)
+    n = int(dur_s * SR)
+    breath = np.random.default_rng(seed).standard_normal(n) * amp * np.hanning(n)
+    y[i0 : i0 + n] += breath.astype(np.float32)
 
 
 # --------------------------------------------------------------------------- #

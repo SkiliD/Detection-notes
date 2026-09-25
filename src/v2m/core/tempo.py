@@ -7,7 +7,9 @@ from dataclasses import dataclass
 import librosa
 import numpy as np
 
-BPM_RANGE = (60.0, 180.0)
+from .meter import dotted_pulse_tempo
+
+BPM_RANGE = (60.0, 180.0)  # beat-track fallback range (a lone voice halves/doubles)
 
 
 @dataclass
@@ -51,6 +53,12 @@ def estimate_bpm_live(notes, min_notes: int = 4) -> float | None:
     Median of onset intervals, folded into 60-180 by powers of 2. Good
     enough to label figures on screen; the final analysis refines it with
     refine_bpm_with_onsets.
+
+    One reading is fixed BEFORE the fold: when the strengths alternate
+    strong/weak with period 2 (reads_dotted_pulse), the median gap is a
+    DOTTED beat and the true quarter sits at 2/3 of it — see
+    meter.dotted_pulse_tempo, the one correction the live estimate and the
+    final analysis share.
     """
     if len(notes) < min_notes:
         return None
@@ -59,6 +67,7 @@ def estimate_bpm_live(notes, min_notes: int = 4) -> float | None:
     if not gaps:
         return None
     bpm = 60.0 / float(np.median(gaps))
+    bpm = dotted_pulse_tempo(notes, bpm)
     while bpm < 60.0:
         bpm *= 2.0
     while bpm > 180.0:

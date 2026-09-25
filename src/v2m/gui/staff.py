@@ -366,7 +366,14 @@ def _clef_path() -> QPainterPath:
 
 
 def _paint_accidental(p: QPainter, alter: int, x: float, y: float) -> None:
-    """Sharp (+) or flat (-) drawn with strokes; no music font involved."""
+    """Sharp (+), natural (0) or flat (-) drawn with strokes; no music font.
+
+    The natural must be its OWN glyph: alter==0 used to fall into the flat
+    branch (the only else), so a key-signature letter sung natural was
+    engraved with a FLAT — a wrong pitch on paper (F natural in G major
+    printed as Fe). The two verticals + two slanted strokes of the natural
+    borrow the sharp's geometry, narrowed to the same height as the flat.
+    """
     p.save()
     p.setPen(QPen(INK, max(1.0, S * 0.13)))
     p.setBrush(Qt.BrushStyle.NoBrush)
@@ -378,6 +385,19 @@ def _paint_accidental(p: QPainter, alter: int, x: float, y: float) -> None:
                 QPointF(x - 0.46 * S, y + dy - 0.14 * S),
                 QPointF(x + 0.50 * S, y + dy + 0.14 * S),
             )
+    elif alter == 0:
+        # natural: two verticals joined by two slanted crossbars — the
+        # sharp's strokes, height-reduced so it fits where the flat sat
+        for dx in (-0.17 * S, 0.19 * S):
+            p.drawLine(QPointF(x + dx, y - 0.80 * S), QPointF(x + dx, y + 0.80 * S))
+        p.drawLine(
+            QPointF(x - 0.17 * S, y - 0.55 * S),
+            QPointF(x + 0.19 * S, y - 0.30 * S),
+        )
+        p.drawLine(
+            QPointF(x - 0.17 * S, y + 0.30 * S),
+            QPointF(x + 0.19 * S, y + 0.55 * S),
+        )
     else:
         p.drawLine(QPointF(x - 0.06 * S, y - 1.25 * S), QPointF(x - 0.06 * S, y + 0.50 * S))
         path = QPainterPath()
@@ -415,7 +435,7 @@ def _paint_note(p: QPainter, x: float, y: float, staff_top: float, note) -> None
         tip = y - 3.4 * S if up else y + 3.4 * S
         p.setPen(QPen(color, max(1.2, S * 0.15)))
         p.drawLine(QPointF(x + dx, y), QPointF(x + dx, tip))
-        flags = {"eighth": 1, "16th": 2}.get(written.type_, 0)
+        flags = {"eighth": 1, "16th": 2, "32nd": 3}.get(written.type_, 0)
         for i in range(flags):
             path = _flag_path(x + dx, tip, up, i)
             p.setBrush(Qt.BrushStyle.NoBrush)

@@ -11,9 +11,10 @@ from . import audio_io
 from .audio_io import LiveCapture
 from .figures import label_notes
 from .grid import BeatGrid
+from .i18n import tr
 from .liveseg import LiveNote, LiveNoteSegmenter, LivePitchStream
 from .meter import detect_meter
-from .pipeline import AnalysisResult, AnalyzeOptions, analyze_signal
+from .pipeline import LIVE_CONF, AnalysisResult, AnalyzeOptions, analyze_signal
 from .tempo import estimate_bpm_live
 
 
@@ -53,7 +54,7 @@ class LiveTake:
 
     def __init__(
         self,
-        min_conf: float = 0.5,
+        min_conf: float = LIVE_CONF,
         sr: int = audio_io.SR,
         on_event: Callable[[LiveEvent], None] | None = None,
     ) -> None:
@@ -65,7 +66,6 @@ class LiveTake:
         self._signal: np.ndarray | None = None
         self._result: AnalysisResult | None = None
         self._grid = BeatGrid(None)  # live grid: approximate BPM, no meter
-        self._prev_bpm: float | None = None  # tempo of the previous grid write
         self._state = "idle"
         self._error_emitted = False
         self._failure: Exception | None = None
@@ -115,7 +115,7 @@ class LiveTake:
         if self._state == "recording":
             return
         if self._state == "stopped":
-            raise RuntimeError("cette prise live est déjà arrêtée")
+            raise RuntimeError(tr("err take stopped"))
         self.capture = LiveCapture(on_block=self._on_block, sr=self.sr)
         self.capture.start()
         self._state = "recording"
@@ -147,19 +147,19 @@ class LiveTake:
         """Write the take's live grid once, then publish it on `note_closed`.
 
         THE grid policy, in one place: approximate BPM from the notes so
-        far, the meter from their accents (tested against the previous
-        cycle's tempo — the strengths of note N and its period N+1 arrive
-        together), figures labeled on the grid — all BEFORE the event, so
-        every adapter consumes a ready note and a ready meter.
+        far (the dotted-pulse reading, if any, is already corrected inside
+        the estimate — the meter must be tested at the tempo the grid
+        uses), the meter from their accents, figures labeled on the grid —
+        all BEFORE the event, so every adapter consumes a ready note and a
+        ready meter.
         """
         bpm = estimate_bpm_live(notes)
         if bpm:
             # with_meter accepts the detector's None (no conclusion yet):
             # the grid falls back on the default 4/4 by itself
-            grid = BeatGrid(bpm).with_meter(detect_meter(notes, self._prev_bpm or bpm))
+            grid = BeatGrid(bpm).with_meter(detect_meter(notes, bpm))
             label_notes(notes, grid)
             self._grid = grid
-            self._prev_bpm = bpm
         self._emit(
             LiveEvent("note_closed", time_s=now_s, note=notes[-1], grid=self._grid)
         )
@@ -194,9 +194,7 @@ class LiveTake:
             raise self._failure
         signal = self.stop()
         if len(signal) < self.sr // 2:
-            self._fail(ValueError(
-                "Enregistrement trop court (0,5 s minimum) pour être analysé."
-            ))
+            self._fail(ValueError(tr("err ui too short")))
         try:
             result = analyze_signal(
                 signal,

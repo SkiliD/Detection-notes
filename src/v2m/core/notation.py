@@ -162,14 +162,21 @@ def spell(midi: int, fifths: int = 0) -> Pitch:
         # Chromatic note: take the neighbouring letter one accidental away.
         # delta=-1 raises the letter below (a sharp spelling: F# in C),
         # delta=+1 lowers the letter above (a flat spelling: Gb in F).
-        # Sharpen in sharp keys and in C, flatten in flat keys.
+        # A NATURAL spelling always wins when reachable: F natural in G
+        # major is not E# — the singer sang the key's F# UNDONE, and the
+        # score must show a natural sign (measured report). Ties keep the
+        # key's side (sharpen in sharp keys and C, flatten in flat keys).
         directions = ((1, -1), (-1, 1)) if fifths < 0 else ((-1, 1), (1, -1))
-        letter, alter = "C", 0
-        for delta, shift in directions:
+        candidates = []
+        for priority, (delta, shift) in enumerate(directions):
             neighbor = scale.get((pc + delta) % 12)
             if neighbor is not None:
-                letter, alter = neighbor[0], neighbor[1] + shift
-                break
+                alter = neighbor[1] + shift
+                candidates.append((abs(alter), priority, neighbor[0], alter))
+        if candidates:
+            _, _, letter, alter = min(candidates)
+        else:
+            letter, alter = "C", 0
     octave = (int(midi) - LETTER_PC[letter] - alter) // 12 - 1
     step = octave * 7 + LETTERS.index(letter)
     return Pitch(letter=letter, octave=octave, alter=alter, step=step, midi=int(midi))
@@ -323,7 +330,10 @@ def _place(note, written, onset, beats_per_measure, slot_quarters, fifths, previ
         measure=measure,
         beat=round(beat, 2),
         # a note outside the key needs its own accidental engraved in front
-        accidental=bool(pitch.alter) and accidental_needed(pitch.alter, pitch.letter, fifths),
+        # (a NATURAL included: the key-signature letter sung natural shows a
+        # natural sign — bool(alter) hid it, F natural in G major printed bare
+        # and read as the key's F#)
+        accidental=accidental_needed(pitch.alter, pitch.letter, fifths),
         preview=preview,
     )
 

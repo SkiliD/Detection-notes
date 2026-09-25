@@ -37,6 +37,14 @@ class FakeCapture:
         return self._signal
 
 
+def _capture(take: live_session.LiveTake) -> FakeCapture:
+    """Le faux capture avec son vrai type — LiveTake ne garantit que sa propre
+    surface canard (start/stop/elapsed/signal)."""
+    capture = take.capture
+    assert isinstance(capture, FakeCapture)
+    return capture
+
+
 def test_live_take_stop_is_idempotent(monkeypatch):
     events = []
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
@@ -48,7 +56,7 @@ def test_live_take_stop_is_idempotent(monkeypatch):
 
     assert take.state == "stopped"
     assert first is second
-    assert take.capture.stop_calls == 1
+    assert _capture(take).stop_calls == 1
     assert [event.kind for event in events] == ["stopped"]
 
 
@@ -69,7 +77,7 @@ def test_live_take_reuses_final_result(monkeypatch):
     assert first_result is result
     assert second_result is result
     assert first_signal is second_signal
-    assert take.capture.stop_calls == 1
+    assert _capture(take).stop_calls == 1
 
 
 def test_short_take_fails_once_and_keeps_the_signal(monkeypatch):
@@ -78,7 +86,7 @@ def test_short_take_fails_once_and_keeps_the_signal(monkeypatch):
     events = []
     take = live_session.LiveTake(on_event=events.append)
     take.start()
-    take.capture._signal = np.zeros(100, dtype=np.float32)  # < 0.5 s
+    _capture(take)._signal = np.zeros(100, dtype=np.float32)  # < 0.5 s
     take.stop()
 
     with pytest.raises(ValueError):

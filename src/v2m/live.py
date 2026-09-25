@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import time
 
-from .core.i18n import note_display_pair, tr, tr_figure
+from .core.i18n import note_display_pair, tr, tr_chord_label, tr_figure, tr_key_label
 from .core.live_session import LiveEvent, LiveTake
+from .core.pipeline import LIVE_CONF
 from .core.report import export_result, live_export_dir, live_take_name
 
 
 class LiveSession:
     """CLI adapter: print a shared LiveTake and export its final result."""
 
-    def __init__(self, min_conf: float = 0.5, transpose: int = 0, out_stem: str | None = None):
+    def __init__(self, min_conf: float = LIVE_CONF, transpose: int = 0, out_stem: str | None = None):
         self.min_conf = min_conf
         self.transpose = transpose
         self.out_stem = out_stem or live_take_name()
@@ -62,16 +63,16 @@ class LiveSession:
         # returns (a short take re-raises the take's own 'failed' error).
         res, _ = self.take.finalize()
         if res.tempo is None or res.key is None:
-            raise ValueError("analyse live incomplète")
+            raise ValueError(tr("err live incomplete"))
         take_dir = live_export_dir(self.out_stem)
         export_result(res, take_dir / self.out_stem, transpose=self.transpose)
         print(f"{tr('key tempo')}    : {res.tempo.bpm} BPM")
-        print(f"{tr('key key label')} : {res.key.best.label}")
+        print(f"{tr('key key label')} : {tr_key_label(res.key.best.label)}")
         if res.chord:
-            print(f"{tr('key chord label')} : {res.chord.best.label}")
+            print(f"{tr('key chord label')} : {tr_chord_label(res.chord.best.label)}")
         print(f"{tr('key notes label')} : {len(res.notes)}")
         print(
-            f"Export   : {take_dir / self.out_stem}.mid, {take_dir / self.out_stem}.musicxml, "
+            f"{tr('key export label')} : {take_dir / self.out_stem}.mid, {take_dir / self.out_stem}.musicxml, "
             f"{take_dir / self.out_stem}.json, {take_dir / self.out_stem}.csv"
         )
         return str(take_dir / f"{self.out_stem}.mid")

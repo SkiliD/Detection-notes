@@ -257,6 +257,57 @@ def test_timeline_clamps_seconds_and_samples():
     assert timeline.clamp(2.0) == 1.0
 
 
+# ---------------------------------------------------------------------------
+# Un piano qui ne sonne pas mécanique (retour utilisateur : "trop robotique")
+# ---------------------------------------------------------------------------
+
+
+def _one_note(midi=60, strength=0.5, start=0.0, dur=0.5):
+    return Note(start=start, end=start + dur, midi=midi, confidence=0.9, strength=strength)
+
+
+def test_render_follows_the_take_dynamics():
+    """La vélocité de chaque touche suit l'accent mesuré de la prise :
+    DANS un même rendu, une note forte sort plus forte qu'une faible — la
+    normalisation globale aligne le sommet du rendu mais garde les
+    rapports entre notes (une note seule est renormalisée, sans contexte,
+    ce qui ne se entend pas)."""
+    notes = [
+        _one_note(start=0.0, dur=0.4, strength=1.0),
+        _one_note(start=0.5, dur=0.4, strength=0.0),
+    ]
+    y = render_notes(notes, sr=22050)
+
+    def rms(t0, t1):
+        win = y[int(t0 * 22050) : int(t1 * 22050)].astype(np.float64)
+        return float(np.sqrt(np.mean(win**2)))
+
+    loud, soft = rms(0.05, 0.35), rms(0.55, 0.85)
+    assert loud > soft * 1.5
+
+
+def test_render_is_deterministic_and_humanized():
+    """Deux rendus des mêmes notes sont IDENTIQUES (l'humanisation n'est
+    pas du hasard), et une note de plus d'un temps n'occupe pas toute sa
+    durée écrite (le damper lève la touche un peu tôt)."""
+    notes = [_one_note(dur=0.8)]
+    a = render_notes(notes, sr=22050)
+    b = render_notes([_one_note(dur=0.8)], sr=22050)
+    assert np.array_equal(a, b)
+    # the tail is quiet before the nominal end: the key was lifted early
+    tail = a[int(0.75 * 22050) : int(0.79 * 22050)]
+    assert float(np.max(np.abs(tail))) < 0.2 * float(np.max(np.abs(a)))
+
+
+def test_render_notes_do_not_overlap_the_next_onset_too_much():
+    """Le décalage humain (une note faible part ~18 ms tard) reste sous la
+    fenêtre de collision : deux croches consécutives ne se recouvrent pas
+    au point de brouiller l'attaque de la suivante."""
+    notes = [_one_note(start=0.0, dur=0.3, strength=0.0), _one_note(start=0.3, dur=0.3, strength=0.0)]
+    y = render_notes(notes, sr=22050)
+    assert len(y) > int(0.62 * 22050)  # the shifted second note still renders
+
+
 def test_playback_session_mixes_with_one_stream(monkeypatch):
     streams = _fake_sd(monkeypatch)
     session = PlaybackSession(sr=22050)

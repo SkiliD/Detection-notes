@@ -163,8 +163,22 @@ class AccentStream:
 
 
 class DottedStream(AccentStream):
-    """One note per dotted beat (1.5 s), uniform strengths: strict 6/8
-    material with no subdivision and no accent contrast."""
+    """One note per dotted beat (1.5 s), strong/weak alternation: strict
+    6/8 material — the compound stress whose signature reads_dotted_pulse
+    looks for.
+    """
+
+    def feed(self, block, t):
+        i = len(self.seg.notes)
+        self.seg.notes.append(
+            LiveNote(start=i * 1.5, end=i * 1.5 + 1.2, midi=69,
+                     strength=(0.9 if i % 2 == 0 else 0.2))
+        )
+        return 0.01, []
+
+
+class FlatDottedStream(DottedStream):
+    """Same dotted spacing, but a FLAT pulse: no alternation, no reading."""
 
     def feed(self, block, t):
         i = len(self.seg.notes)
@@ -204,28 +218,48 @@ def test_livetake_publishes_the_detected_meter(monkeypatch):
     assert closed[-1].grid is take.grid
 
 
-def test_livetake_compound_meter_stays_default_and_it_is_documented(monkeypatch):
-    """Limite assumée : un 6/8 sans subdivision visible ne peut PAS être
-    détecté en direct, par construction.
+def test_livetake_publishes_compound_meter_on_dotted_pulse(monkeypatch):
+    """Une prise sur temps pointés (6/8) est publiée avec sa mesure en direct.
 
-    estimate_bpm_live lit la médiane des écarts comme des NOIRES ; des
-    attaques espacées d'un temps pointé (1,5 noire) donnent un BPM aux 2/3
-    du tempo composé vrai, et le repli d'octave ×2 ne compense jamais ×1,5 —
-    la grille ternaire du détecteur est donc évaluée au mauvais tempo, dans
-    TOUS les cas. La mesure composée reste détectable en direct dès que la
-    prise contient des croches (subdivision visible), qui ramènent la médiane
-    sur la noire ; sans elles, le repli 4/4 est l'état publié — exactement
-    comme hors ligne (la détection composée exige elle-même des onsets). Ce
-    test gèle cette limite : une "amélioration" de l'estimateur live devra la
-    lever sciemment, pas par accident.
+    La chaîne complète : estimate_bpm_live corrige la médiane (un temps
+    pointé avec alternance forte/faible vaut 1,5 noire — le repli ×2 ne
+    répare jamais ce rapport), puis detect_meter saute l'étape accents (qui
+    lirait les phases 0/2 de la grille ternaire comme une fausse valse) et
+    conclut 6/8 sur la grille ternaire. Le métronome live lit exactement
+    `grid.meter.n_slots`.
     """
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
     monkeypatch.setattr(live_session, "LivePitchStream", DottedStream)
 
-    take = live_session.LiveTake(on_event=lambda e: None)
+    events: list[live_session.LiveEvent] = []
+    take = live_session.LiveTake(on_event=events.append)
     take.start()
     block = np.zeros(512, dtype=np.float32)
     for _ in range(8):  # eight dotted beats of strict 6/8 material
         take._on_block(block, 2.0)
+    # corrected: median 1.5 s read as a DOTTED beat -> quarter tempo 60;
+    # without the correction the fold would publish 80 (the flat case below)
+    assert take.grid.bpm == 60.0
+    assert take.grid.meter.label == "6/8"
+    assert take.grid.meter.n_slots == 2
+    closed = [e for e in events if e.kind == "note_closed"]
+    assert closed[-1].grid is take.grid
+
+
+def test_livetake_flat_dotted_pulse_stays_default(monkeypatch):
+    """Limite assumée : sans alternance forte/faible, les écarts pointés
+    restent indistinguables de noires lents — le repli d'octave ×2 s'applique
+    (80 BPM ici, jamais les 100 du tempo composé) et la mesure reste 4/4.
+    Le discriminant timing-seul n'existe pas : des écarts uniformes
+    décrivent aussi bien « noires à 2/3 du tempo » que « temps pointés ».
+    """
+    monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
+    monkeypatch.setattr(live_session, "LivePitchStream", FlatDottedStream)
+
+    take = live_session.LiveTake(on_event=lambda e: None)
+    take.start()
+    block = np.zeros(512, dtype=np.float32)
+    for _ in range(8):
+        take._on_block(block, 2.0)
+    assert take.grid.bpm == 80.0
     assert take.grid.meter.label == "4/4"  # the default stands, no false 3/4
-    assert take.grid.meter.n_slots == 4

@@ -64,7 +64,7 @@ def _analyse(take: Path, out_dir: Path) -> dict:
     return {
         "n_notes": len(res.notes),
         "n_rests": len(res.rests or []),
-        "tempo_bpm": res.tempo.bpm,
+        "tempo_bpm": res.tempo.bpm if res.tempo else 0.0,
         "sha256": {
             name: hashlib.sha256((out_dir / name).read_bytes()).hexdigest()
             for name in ARTIFACTS

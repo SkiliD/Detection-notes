@@ -65,3 +65,46 @@ def test_file_dialog_speaks_the_current_language(qapp, monkeypatch):
 def test_both_languages_define_the_same_keys():
     """Une clé ajoutée d'un seul côté retomberait sur la clé (donc en anglais)."""
     assert set(i18n.STRINGS["fr"]) == set(i18n.STRINGS["en"])
+
+
+def test_results_panel_translates_key_label_and_figures(qapp):
+    """Le panneau affiche des étiquettes traduites, pas le stockage canonique.
+
+    Régression : `set_results` posait `res.key.best.label` ('C major') et les
+    figures ('noire') en brut — l'anglais fuyait dans une UI française et le
+    français dans une UI anglaise, alors que la portée traduit déjà via
+    `tr_key_label`.
+    """
+    from types import SimpleNamespace
+
+    from v2m.gui.widgets import ResultsPanel
+
+    note = SimpleNamespace(midi=60, figure="noire", start=0.0, end=0.5)
+    res = SimpleNamespace(
+        source="take.wav",
+        duration_s=1.0,
+        tempo=None,
+        meter=None,
+        key=SimpleNamespace(
+            best=SimpleNamespace(label="C major", score=0.91),
+            alternatives=[SimpleNamespace(label="A minor", score=0.74)],
+        ),
+        chord=None,
+        notes=[note],
+    )
+    panel = ResultsPanel()
+    try:
+        set_language("fr")
+        panel.set_results(res)
+        # the value slots ARE the i18n keys (SLOT_KEYS is the key tuple),
+        # so the tr() key guard sees every panel label statically
+        assert panel._values["key key"].text() == "C majeur"
+        assert panel._values["key alternatives"].text() == "A mineur"
+        assert panel._values["key figures"].text() == "noire ×1"
+
+        set_language("en")
+        panel.set_results(res)
+        assert panel._values["key key"].text() == "C major"
+        assert panel._values["key figures"].text() == "quarter ×1"
+    finally:
+        panel.deleteLater()

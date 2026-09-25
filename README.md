@@ -1,35 +1,40 @@
-# 🎤 Voix → MIDI
+**English** | [Français](README.fr.md)
 
-Application desktop qui **détecte les notes d'une voix** (hauteur, figures, mesure), le **tempo**, la **tonalité** et les **accords**, puis exporte un **fichier MIDI**, une **partition MusicXML** (PDF optionnel) et un **rapport JSON/CSV**. Fonctionne sur des **fichiers audio** (WAV/MP3/FLAC/OGG) ou **en temps réel au micro**.
+# 🎤 Voice → MIDI
+
+Desktop application that **detects sung notes** (pitch, note values, meter), the **tempo**, the **key** and the **chords**, then exports a **MIDI file**, a **MusicXML score** (optional PDF) and a **JSON/CSV report**. Works on **audio files** (WAV/MP3/FLAC/OGG) or **live from the microphone**.
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue) ![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green)
 
-## Fonctionnalités
+## Features
 
-- **Détection de hauteur** : pYIN (librosa) hors-ligne, YIN incrémental en temps réel
-- **Segmentation en notes** : hystérésis avec référence glissante + confirmation 3 frames, **guidée par les attaques** (consonnes, coups de glotte, changements de voyelle) : un glissando legato n'est pas une note, et les micro-notes qu'il fabriquait (6 notes chantées → 10 détectées) sont absorbées dans la note d'arrivée, à sa hauteur. Résiste au vibrato (une tenue avec vibrato déclenchait 19 « attaques »)
-- **Tempo** : beat tracking librosa avec repli ×2 / ÷2 (range 60–180 BPM), puis **raffinement sur les attaques de notes** (grille par moindres carrés → BPM exact)
-- **Tonalité** : profils Krumhansl-Schmuckler (24 candidatures majeur/mineur) + 2 candidates alternatives
-- **Accords** : reconnaissance globale, par segments jointifs de 2 s et **par mesure** (majeure, mineure, dim, aug, 7, maj7, m7) via histogramme pondéré — affichés dans la GUI et le JSON
-- **Progression d'accords** : un accord par **mesure** (aligné sur la mesure détectée, mesures identiques fusionnées) — se lit comme une grille : `Dm7 | Cmaj7 | G7 | C`
-- **Noms de notes bilingues** : anglaise (`A4`) **et** française (`La4`) côte à côte dans la GUI, le JSON (`name` / `name_fr`) et le CSV
-- **Interface fr / en** : langue choisie dans la GUI (bouton 🌐) ou `v2m --lang en` — traduit tous les libellés **et** le format des notes (`Do Ré Mi` ↔ `A B C`), choix persisté dans `~/.v2m_lang`
-- **Figures de notes** : chaque note est étiquetée (ronde → double-croche, pointées, triolets) selon le tempo détecté, avec tolérance sur l'interprétation humaine — champ `figure` dans le JSON et le CSV, **aussi en temps réel** sur le piano roll du mode micro
-- **Portée (notation)** : les notes et silences écrits sur une **vraie portée** — clé de sol, armure, chiffrage, figures (ronde → double-croche, pointées, triolets), soupirs et pauses avec hampes, crochets, points et altérations, lignes supplémentaires, barres de mesure et cartouche tempo · mesure · tonalité. Affichée **après l'analyse d'un fichier** et **en direct pendant la capture** (portée qui défile, la note en cours étant surlignée). Gravure vectorielle intégrée : aucun logiciel externe requis
-- **Mesure** : détection automatique — 3/4 vs 4/4 par les **accents d'attaque** (forces relatives RMS des notes, contrast requis), 6/8 par la grille ternaire des contretemps ; sans accent clair, 4/4 par défaut assumé. La partition et le rapport utilisent la mesure détectée
-- **Export MusicXML** : partition lisible (mesure détectée, armure, tempo, figures, liaisons à travers les barres, triolets) ouvrable dans MuseScore, Finale, Sibelius…
-- **Toutes les détections sur la partition** : accords par mesure en **chiffrage harmonique** au-dessus de la portée, noms de notes en **sol-fège** (Do, Ré, Mi…) sous chaque note, **têtes de note colorées selon la confiance** (vert = sûre → rouge = douteuse), cartouche récapitulatif (tempo · tonalité · mesure · accords) dans le titre
-- **Export MIDI** : meta-events `set_tempo` + `key_signature`, vélocité proportionnelle à la confiance, quantification 1/16 optionnelle, transposition ±48 demi-tons
-- **Export PDF** : gravure de la partition via MuseScore ou LilyPond (détection automatique, message d'installation sinon) — `--pdf` en CLI, case à cocher en GUI
-- **Rapport JSON** (tout, y compris la courbe de hauteur, la mesure, le nombre de mesures, la position mesure:temps de chaque note, l'accord global et les segments d'accords) + **CSV** (liste de notes avec figure et position)
-- **GUI PyQt6** : interface sombre soignée, piano roll, waveform, panneau de résultats avec tableaux par note (position, figure) et par segment d'accord, drag & drop, **mode notation** (couleur par figure), **bannière d'erreur rouge intégrée** (pas de popups bloquants)
-- **Mode temps réel** : indicateur note/Hz/niveau, **piano roll qui suit la capture** (fenêtre glissante de 10 s, curseur de temps, horloge `mm:ss`, compteur de notes et **mesure détectée** — 3/4, 4/4, 6/8 — affichée en direct), comparaison avec une partition déjà analysée (touche verte/rouge), la note tenue s'affiche **pendant** qu'on la chante, figures étiquetées en direct, export à l'arrêt — le suivi de hauteur tourne **hors du callback audio** (thread dédié), donc le pilote ne perd pas de blocs
-- **Trouveur de note** : reconnaissance isolée au micro, clavier de 88 touches et historique local des six dernières notes ; aucune analyse ni export
-- **Écoute de contrôle** : bouton ▶ (synthé local intégré, aucun logiciel externe) avec **curseur de lecture synchronisé** sur le piano roll et la waveform ; **double-clic** sur le piano roll pour démarrer la lecture à cet endroit
+- **Pitch detection**: pYIN (librosa) offline, incremental YIN in real time — search range C2–C7, so soprano top notes read at their own octave (the old C6 ceiling folded them one octave down)
+- **f0 stabilization**: the pitch derivative marks every moving zone (portamento ramp, note hand-over) as a **transition**, excluded from the pitch estimate — each note reads its **stable plateau**, with the vibrato riding on top
+- **Tuning correction**: a singer sitting consistently flat or sharp is re-centered — one global offset (median deviation to the nearest semitone, capped at ±0.35 st) is absorbed **before** rounding, so notes stop rounding on the wrong side; the residual per-note deviation feeds the key-aware snap
+- **Key-aware snapping**: a note sung almost halfway between two semitones resolves toward the neighbour it leans to when that neighbour is a degree of the detected key — a mistuned scale degree is re-anchored, a deliberate chromatic shade stays a shade
+- **Note segmentation**: hysteresis with a sliding reference + 3-frame confirmation, **driven by attacks** (consonants, glottal stops, vowel changes): a legato glissando is not a note, and the micro-notes it used to create (6 sung notes → 10 detected) are absorbed into the arrival note, at its pitch. Survives vibrato (a held note with vibrato used to trigger 19 "attacks"), **deep vibrato** (±0.6 semitone), fast **trills**, and reads **descending glides** like ascending ones (no duplicate fragment, the arrival starts at its consonant); a note arriving by portamento is read at its plateau pitch, never the ramp's; an explicitly repeated same pitch is read as a repetition even when the singer drifts between repeats
+- **Tempo**: librosa beat tracking with ×2 / ÷2 fallback (range 60–180 BPM), then **refinement on note attacks** (least-squares grid → exact BPM)
+- **Key**: Krumhansl-Schmuckler profiles (24 major/minor candidates) + 2 alternative candidates
+- **Chords**: global recognition, by adjacent 2 s segments and **per measure** (major, minor, dim, aug, 7, maj7, m7) via a weighted histogram — shown in the GUI and the JSON
+- **Chord progression**: one chord per **measure** (aligned on the detected meter, identical measures merged) — reads like a chart: `Dm7 | Cmaj7 | G7 | C`. In the French interface the chord labels are translated for display (`Am` is shown **La mineur**) — the JSON, the CSV and the MusicXML keep the canonical `Am`
+- **Bilingual note names**: English (`A4`) **and** French (`La4`) side by side in the GUI, the JSON (`name` / `name_fr`) and the CSV
+- **fr / en interface**: language chosen in the GUI (🌐 button) or `v2m --lang en` — translates every label **and** the note-name format (`Do Ré Mi` ↔ `A B C`), choice persisted in `~/.v2m_lang`
+- **Note values**: each note is labeled (whole → sixteenth, dotted values, **double-dotted** values, triplets) according to the detected tempo, tolerant of human interpretation — `figure` field in the JSON and the CSV, **also in real time** on the mic-mode piano roll. A double dot only engraves on a deliberate length (±1 % of the ideal value): a singer's timing around a plain note never lands one by accident
+- **Staff (notation)**: notes and rests written on a **real staff** — treble clef, key signature, time signature, note values (whole → sixteenth, dotted and double-dotted values, triplets), quarter/half/whole rests with stems, flags, dots and **accidentals (sharp, flat AND natural)**, ledger lines, barlines and a tempo · meter · key header. A key-signature note sung natural is spelled natural (F♮ in G major, with its own natural glyph — never a disguised E♯). Shown **after analyzing a file** and **live during capture** (scrolling staff, current note highlighted). Built-in vector engraving: no external software required
+- **Meter**: automatic detection — a take on **dotted pulses** is published as **6/8** (tempo corrected ×1.5); otherwise **attack accents** (the notes' relative RMS strengths, contrast required) decide 2/4, 3/4 vs 4/4 — a comparable strong/weak alternation reads as 2/4 (a march), a beat-1-strong / beat-3-secondary hierarchy stays 4/4 — and the ternary grid rescues an accent-less 6/8; with no clear accent, the conservative default is 4/4. The score and the report use the detected meter
+- **MusicXML export**: a readable score (detected meter, key signature, tempo, note values, ties across barlines, triplets) that opens in MuseScore, Finale, Sibelius…
+- **Every detection on the score**: per-measure chords as **harmony symbols** above the staff **with their readable name** ("La mineur" in the French UI — the file keeps the canonical symbol too), **solfège note names** (Do, Ré, Mi…) under each note, **noteheads colored by confidence** (green = sure → red = doubtful — the color now carries pYIN's real voicing probability, so a breathy note reads dimmer), recap header (tempo · key · meter · chords) in the title
+- **MIDI export**: `set_tempo` + `key_signature` meta-events, velocity proportional to confidence, optional 1/16 quantization, ±48 semitone transposition
+- **PDF export**: score engraving via MuseScore or LilyPond (auto-detected, install hint otherwise) — `--pdf` on the CLI, a checkbox in the GUI
+- **JSON report** (everything, including the pitch curve, the meter, the measure count, each note's measure:beat position, the global chord and the chord segments) + **CSV** (note list with value and position)
+- **PyQt6 GUI**: polished dark interface, piano roll, waveform, results panel with per-note (position, value) and per-chord-segment tables, drag & drop, **notation mode** (color by note value), **built-in red error banner** (no blocking popups)
+- **Real-time mode**: note/Hz/level indicator, **piano roll that follows the capture** (10 s sliding window, time cursor, `mm:ss` clock, note counter and **detected meter** — 3/4, 4/4, 6/8 — shown live), comparison with an already-analyzed score (green/red keys), the held note shows **while you sing it** (~125 ms display latency), note values labeled live, export on stop — pitch tracking runs **outside the audio callback** (dedicated thread), so the driver never drops blocks
+- **Note finder**: isolated mic recognition, 88-key keyboard and a local history of the last six notes; no analysis, no export
+- **Control playback**: ▶ button (built-in local synth, no external software) with a **playhead synchronized** on the piano roll and the waveform; **double-click** the piano roll to start playback from there. The piano follows the take's own dynamics (a strong accent hits harder than a soft note), strikes soft keys slower, breathes a few milliseconds around the grid and sits in a light room — deterministic, so a replay sounds identical
 
 ## Installation
 
-Python ≥ 3.10 (3.12 recommandé) :
+Python ≥ 3.10 (3.12 recommended):
 
 ```bash
 py -3.12 -m venv .venv
@@ -37,47 +42,47 @@ py -3.12 -m venv .venv
 pip install -e ".[dev]"
 ```
 
-## Utilisation
+## Usage
 
-### GUI (recommandé)
+### GUI (recommended)
 
 ```bash
-v2m gui            # ou : python -m v2m gui
+v2m gui            # or: python -m v2m gui
 ```
 
-- **Analyser un fichier** : bouton ou glisser-déposer d'un WAV/MP3/FLAC dans la fenêtre
-- **Voir la partition** : sous le piano roll, la portée affiche les notes réellement détectées (avec leurs figures) — elle s'adapte à la taille de la fenêtre et découpe la musique en systèmes avec numéros de mesure
-- **Chanter au micro** : piano roll qui défile tout seul — le curseur de temps avance avec la capture, la barre de la note en cours grandit pendant qu'on la tient, et l'étiquette de figure apparaît dès que la note se termine ; **la portée défile en dessous** et écrit la mélodie au fur et à mesure ; à l'arrêt, analyse finale (tempo, tonalité, mesure, accords) et export
-- Exports écrits à côté du fichier source (`.mid`, `.musicxml`, `.json`, `.csv`)
-- **Mode notation** : case à cocher au-dessus du piano roll — chaque note est colorée selon sa figure (ronde, blanche, noire, croche…), étiquette courte affichée sur les notes assez larges
-- **Écoute de contrôle** : bouton ▶ + curseur synchronisé ; un **clavier de piano** sous le piano roll allume les touches des notes qui sonnent pendant la lecture
+- **Analyze a file**: button or drag & drop a WAV/MP3/FLAC into the window
+- **See the score**: below the piano roll, the staff shows the notes actually detected (with their values) — it adapts to the window size and splits the music into systems with measure numbers
+- **Sing into the mic**: a self-scrolling piano roll — the time cursor advances with the capture, the current note's bar grows while you hold it, and the value label appears as soon as the note ends; **the staff scrolls below** and writes down the melody as you go; on stop, final analysis (tempo, key, meter, chords) and export
+- Exports are written next to the source file (`.mid`, `.musicxml`, `.json`, `.csv`)
+- **Notation mode**: checkbox above the piano roll — each note is colored by its value (whole, half, quarter, eighth…), a short label shows on wide-enough notes
+- **Control playback**: ▶ button + synchronized cursor; a **piano keyboard** under the piano roll lights up the keys of the notes sounding during playback
 
-### Ligne de commande
+### Command line
 
 ```bash
-# analyse complète avec quantification 1/16 selon le tempo détecté
+# full analysis with 1/16 quantization on the detected tempo
 v2m analyze chant.wav --quantize
 
-# interface et noms de notes en anglais (fr par défaut ; choix persisté)
+# interface and note names in English (fr default; persisted choice)
 v2m --lang en analyze chant.wav --quantize
 
 # options
 v2m analyze chant.wav --min-conf 0.7 --min-note 80 --transpose -12 -o sortie
 
-# temps réel (Ctrl+C pour arrêter et exporter)
+# real time (Ctrl+C to stop and export)
 v2m live
 ```
 
-La commande `analyze` écrit `sortie.mid`, `sortie.musicxml`, `sortie.json` et `sortie.csv` (`--pdf` ajoute `sortie.pdf` si MuseScore ou LilyPond est installé — sinon le PDF est ignoré avec un message d'installation et le code de sortie reste 0 ; si la gravure échoue, exit 2 et les quatre autres artefacts restent écrits) ; le JSON contient pour chaque note son champ `figure` (ex. `"noire"`, `"croche pointée"`), sa `position` `[mesure, temps]`, ses noms `name` / `name_fr` (anglaise et française), la `meter` détectée, `num_measures`, l'accord global `chord` et ses `chord_segments`.
+The `analyze` command writes `sortie.mid`, `sortie.musicxml`, `sortie.json` and `sortie.csv` (`--pdf` adds `sortie.pdf` if MuseScore or LilyPond is installed — otherwise the PDF is skipped with an install hint and the exit code stays 0; if engraving fails, exit 2 and the other four artifacts are still written); the JSON carries, for each note, its `figure` field (e.g. `"noire"`, `"croche pointée"` — figure names stay French canonical data), its `position` `[measure, beat]`, its `name` / `name_fr` names (English and French), the detected `meter`, `num_measures`, the global `chord` and its `chord_segments`.
 
 ```bash
-# avec export PDF de la partition (best-effort : message clair si aucun outil)
+# with PDF engraving of the score (best-effort: clear message when no tool)
 v2m analyze chant.wav --quantize --pdf
 ```
 
-La partition MusicXML embarque **toutes les détections** : chiffrages d'accords au-dessus de la portée (progression par mesure), noms sol-fège (Do, Ré, Mi…) sous chaque note, têtes de note colorées selon la confiance (vert = sûre → rouge = douteuse), cartouche récapitulatif dans le titre. Tout s'ouvre dans MuseScore, Finale ou Sibelius.
+The MusicXML score embeds **every detection**: chord symbols above the staff (per-measure progression) with their readable name ("La mineur"), solfège names (Do, Ré, Mi…) under each note, noteheads colored by confidence (green = sure → red = doubtful), recap header in the title. Everything opens in MuseScore, Finale or Sibelius.
 
-### Bibliothèque
+### Library
 
 ```python
 from v2m.core.pipeline import analyze_file
@@ -85,13 +90,13 @@ from v2m.core.report import export_result
 
 res = analyze_file("chant.wav")
 print(res.tempo.bpm, res.key.best.label, len(res.notes))
-print(res.notes[0].figure)          # ex. "noire"
+print(res.notes[0].figure)          # e.g. "noire" (French canonical value)
 if res.chord:
-    print(res.chord.best.label)     # ex. "Cmaj7" (None si indéterminé)
+    print(res.chord.best.label)     # e.g. "Cmaj7" (None when undetermined)
 
-rep = export_result(res, "out")     # écrit out.mid/.musicxml/.json/.csv
+rep = export_result(res, "out")     # writes out.mid/.musicxml/.json/.csv
 
-# en plus fin, pour construire un artefact soi-même :
+# more finely, to build an artifact yourself:
 from v2m.core.midi_export import build_midi
 mid = build_midi(res.notes, bpm=res.tempo.bpm, key=res.key)
 mid.save("out.mid")
@@ -101,87 +106,100 @@ mid.save("out.mid")
 
 ```
 src/v2m/
-├── cli.py               # sous-commandes analyze / live / gui
-├── live.py              # session temps réel CLI
+├── cli.py               # analyze / live / gui subcommands
+├── live.py              # CLI real-time session
 ├── core/
-│   ├── audio_io.py      # chargement fichier / capture micro (sounddevice)
-│   ├── pitch.py         # pYIN (offline) + YIN par bloc (temps réel)
-│   ├── notes.py         # nettoyage (médian + anti-vibrato) et segmentation (attaques, transitions)
-│   ├── onsets.py        # attaques : flux spectral hors ligne, niveau en temps réel
-│   ├── tempo.py         # BPM + beats (librosa.beat, repli ×2/÷2)
-│   ├── keys.py          # Krumhansl-Schmuckler, 24 candidatures
-│   ├── chords.py        # accords (triades + septièmes, global, segments et progression par mesure)│   ├── figures.py         # classification des figures ; catalogue dans grid.py│   ├── meter.py           # détection de mesure (accents 3/4 vs 4/4, ternaire 6/8)
-│   ├── grid.py            # BeatGrid, Meter, Figure/CATALOGUE et divisions MusicXML
-
-│   ├── playback.py      # rendu audio des notes + lecteur pour l'écoute de contrôle
-│   ├── liveseg.py       # temps réel : chaîne blocs → hauteur → attaques → notes (LivePitchStream)
-│   ├── notation.py      # portée : orthographe des hauteurs, armures, durées écrites, mise en page
-│   ├── midi_export.py   # écriture MIDI (tempo, armure, notes)
-│   ├── musicxml.py      # partition MusicXML (mesure détectée, armure, figures, ties,
-│   │                    #   accords <harmony>, paroles sol-fège, couleur de confiance)
-│   ├── pdf_export.py    # PDF via MuseScore/LilyPond (détection auto)
-│   ├── report.py        # export_result : les artefacts + le rapport JSON unifié
-│   ├── live_session.py  # LiveTake : une prise micro de bout en bout (capture → analyse)
-│   └── pipeline.py      # orchestration analyse_signal / analyze_file
+│   ├── audio_io.py      # file loading / mic capture (sounddevice)
+│   ├── pitch.py         # pYIN (offline) + block YIN (real time)
+│   ├── notes.py         # cleaning (median + anti-vibrato) and segmentation (attacks, transitions)
+│   ├── onsets.py        # attacks: offline spectral flux, live level rise
+│   ├── tempo.py         # BPM + beats (librosa.beat, ×2/÷2 fallback)
+│   ├── keys.py          # Krumhansl-Schmuckler, 24 candidates
+│   ├── chords.py        # chords (triads + sevenths, global, segments and per-measure progression)
+│   ├── figures.py       # note-value classification; catalog in grid.py
+│   ├── meter.py         # meter detection (dotted 6/8, accents 2/4, 3/4 vs 4/4)
+│   ├── grid.py          # BeatGrid, Meter, Figure/CATALOGUE and MusicXML divisions
+│   ├── playback.py      # note audio rendering + control-playback reader
+│   ├── liveseg.py       # real time: blocks → pitch → attacks → notes chain (LivePitchStream)
+│   ├── notation.py      # staff: pitch spelling, key signatures, written values, layout
+│   ├── midi_export.py   # MIDI writing (tempo, key signature, notes)
+│   ├── musicxml.py      # MusicXML score (detected meter, key signature, values, ties,
+│   │                    #   <harmony> chords, solfège lyrics, confidence color)
+│   ├── pdf_export.py    # PDF via MuseScore/LilyPond (auto-detection)
+│   ├── report.py        # export_result: the artifacts + the unified JSON report
+│   ├── live_session.py  # LiveTake: one mic take end to end (capture → analysis)
+│   └── pipeline.py      # analyze_signal / analyze_file orchestration
 └── gui/
-    ├── main_window.py   # état, navigation, callbacks, threads et exports
-    ├── pages.py         # assemblage des pages et branchement des actions
-    ├── staff.py         # portée dessinée au QPainter (clé, armure, notes, silences, barres)
-    └── widgets.py       # piano roll, waveform, panneau, indicateur live
+    ├── main_window.py   # state, navigation, callbacks, threads and exports
+    ├── pages.py         # page assembly and action wiring
+    ├── staff.py         # QPainter-drawn staff (clef, key signature, notes, rests, barlines)
+    └── widgets.py       # piano roll, waveform, panel, live indicator
 
 scripts/
-├── gui_smoke_test.py    # parcours GUI hors écran (fenêtre, panneau, langue, clavier)
-├── profile_analysis.py  # diagnostic : temps par étape d'analyse + cProfile
-└── score_accuracy.py    # diagnostic : ce que la transcription a fait d'une prise réelle
+├── gui_smoke_test.py    # offscreen GUI walkthrough (window, panel, language, keyboard)
+├── profile_analysis.py  # diagnostics: analysis time per stage + cProfile
+└── score_accuracy.py    # diagnostics: what the transcription did to a real take
 
 tests/
-└── voicetruth.py        # vérité terrain : voix de synthèse à notes connues + mesure d'écart
+└── voicetruth.py        # ground truth: synthetic voice with known notes + accuracy measure
 ```
 
-## Diagnostic (temps d'analyse)
+## Diagnostics (analysis time)
 
 ```bash
-# tableau des étapes : où passe le temps sur CETTE prise ?
+# stage table: where does the time go on THIS take?
 ./.venv/Scripts/python.exe scripts/profile_analysis.py chant.wav
 
-# moyenne de 3 exécutions + fonctions les plus lourdes (cProfile) + dump JSON
-./.venv/Scripts/python.exe scripts/profile_analysis.py chant.wav --repeat 3 --profile --json mesures.json
+# 3-run average + heaviest functions (cProfile) + JSON dump
+./.venv/Scripts/python.exe scripts/profile_analysis.py chant.wav --repeat 3 --profile --top 20 --json mesures.json --output artefacts
 ```
 
-Les étapes ne sont pas recopiées dans le script : il lit celles que le pipeline annonce déjà (`progress`), donc une étape renommée ou ajoutée apparaît ici toute seule. Deux colonnes à regarder : **Part** (poids de l'étape) et **Temps réel** (durée de l'étape / durée de l'audio — 0,037× = 27× plus rapide que la lecture, le seuil à surveiller pour une longue prise). Un passage à blanc de 2 s est écarté par défaut (`--no-warmup` pour le mesurer) : sans lui, les imports librosa et la compilation numba atterrissent sur la première étape et masquent le vrai coût. `--profile` ajoute un tableau cProfile séparant **le code du projet** (ce qu'on peut optimiser) des **bibliothèques** (où va le temps appelé).
+The stages are not duplicated in the script: it reads the ones the pipeline already announces (`progress`), so a renamed or added stage shows up here on its own. Two columns matter: **Share** (the stage's weight) and **Real-time** (stage duration / audio duration — 0.037× = 27× faster than listening, the threshold to watch on a long take). A 2 s warm-up pass is discarded by default (`--no-warmup` to measure it): without it, the librosa imports and the numba compilation land on the first stage and hide the real cost. `--repeat N` averages N runs (defaults to 1); `--top N` limits the cProfile table to its N heaviest lines; `--json file` writes the measurements to a JSON file; `--output dir` keeps the exported artifacts in that folder (else a temporary one is used). `--profile` adds a cProfile table separating **project code** (what can be optimized) from **libraries** (where called time goes).
 
-Sur `demo.wav` (8,5 s) le décodage domine ; sur une prise de 68 s (répétée 8×) pYIN pèse 53 % et `refine_bpm_with_onsets` 16 % — c'est ce dernier que le tableau montre en tête côté code du projet. Le calcul des attaques (un STFT de plus) coûte 0,12 s sur ces 68 s, soit 0,2 % du temps réel.
+On `demo.wav` (8.5 s) decoding dominates; on a 68 s take (repeated 8×) pYIN weighs 53% and `refine_bpm_with_onsets` 16% — the latter is what the table shows on top on the project-code side. The attack computation (one extra STFT) costs 0.12 s on those 68 s, i.e. 0.2% of real time.
 
-## Diagnostic (qualité de transcription)
+## Diagnostics (transcription quality)
 
 ```bash
-# ce que la transcription a fait de CETTE prise : notes, figures, positions…
+# what the transcription did to THIS take: notes, values, positions…
 ./.venv/Scripts/python.exe scripts/score_accuracy.py chant.wav
 
-# les signes de découpage douteux, et la comparaison attaques vs géométrie seule
+# dubious-cutting signs, and the attacks-vs-geometry-only comparison
 ./.venv/Scripts/python.exe scripts/score_accuracy.py chant.wav --json rapport.json --no-attacks
 
-# comparaison chiffrée à des notes connues (vérité terrain, même harnais que les tests)
+# scored comparison against known notes (ground truth, same harness as the tests)
 ./.venv/Scripts/python.exe scripts/score_accuracy.py chant.wav --truth chant_verite.json
+
+# does replaying the analysis twice give the same numbers? (drift => exit 1)
+./.venv/Scripts/python.exe scripts/score_accuracy.py chant.wav --compare
+
+# golden fingerprint: the take is compared to ITS OWN saved segmentation
+# (<audio>.golden.json, created on first run) — drift is caught even when
+# two replays agree with each other
+./.venv/Scripts/python.exe scripts/score_accuracy.py chant.wav --golden
 ```
 
-Sur une prise réelle il n'y a pas de vérité terrain : le script imprime donc d'abord ce que le pipeline a trouvé (tempo, mesure, tonalité, accords, chaque note avec sa figure et sa position), puis les **signes de découpage douteux** : attaques orphelines (une consonne sans début de note — une note est peut-être manquée), débuts non articulés (la note existe mais aucune attaque ne la date), fragments (notes plus courtes que la confirmation de 120 ms, typiques d'un glissando coupé en deux). Si `--no-attacks` donne le même nombre de notes, la preuve d'attaque ne sert à rien sur cette prise (pas de consonnes exploitables). La vérité terrain est un simple JSON `{"notes": [{"midi": 60, "start_s": 0.3, "dur_s": 0.6}, …]}`.
+On a real take there is no ground truth: the script first prints what the pipeline found (tempo, meter, key, chords, every note with its value and position), then the **dubious segmentation signs**: orphan attacks (a consonant with no note start — a note may be missing), unattacked starts (the note exists but no attack dates it), fragments (notes shorter than the 120 ms confirmation, typical of a glissando split in two). If `--no-attacks` gives the same note count, the attack evidence is useless on that take (no usable consonants). Ground truth is a simple JSON `{"notes": [{"midi": 60, "start_s": 0.3, "dur_s": 0.6}, …]}` — file names stay language-neutral (`chant_verite.json` in both READMEs); `--truth file.json` scores the transcription against those known notes, `--json file.json` writes the audit report, and `--output dir` keeps the exported artifacts (else a temporary folder).
 
-## Documentation projet
+Two modes protect segmentation **over time**: `--compare` replays the full analysis (re-decoding included) and compares the segmentation fingerprint (tempo, meter, key, notes, rests); `--golden` compares against the fingerprint saved next to the take (`<audio>.golden.json`, created on first run, gitignored like every `.json`) — a segmentation regression on a real take is caught even when two replays agree with each other. Both print the differences field by field and exit with code 1 when the fingerprint moved.
 
-- **`CONTEXT.md`** — glossaire du domaine (Analyse, Note, Tempo, Tonalité, Accord, Figure, Mesure, Export, Rapport) et conventions (langues, erreurs) : la référence pour toute évolution du code.
-- **`core/i18n.py`** — catalogue des chaînes utilisateur (fr/en) : toute nouvelle chaîne visible y passe par `tr()` ; les noms de notes suivent la langue (`note_display`), les figures stockées restent canoniques (`tr_figure` traduit à l'affichage).
-- **`AGENTS.md`** — apprentissages techniques et **règles de session** (non-régression, mise à jour des docs, lisibilité) pour les agents outillés ; lu automatiquement si l'option est activée dans le client.
+`--diagnose` audits the **thresholds the take actually exercised** — never recalibrate a knob on a take that does not test it: the curve's pitch range against the reading bounds (65 Hz–2100 Hz), the absorbed tuning offset (cents), the normalized attack strengths (deciles, against their floor), the residual pitch deviations that decide the key-aware snap, and the live path replayed as a stream (real display latency, `confirm_s`).
 
-## Qualité & limites
+## Project documentation
 
-- **Voix monodique** (une note à la fois) — la transcription polyphonique est hors périmètre
-- **Accords sur voix seule** : potentiellement ambigus (une mélodie suggère plusieurs harmonisations) — le rapport fournit des alternatives ; moins de deux hauteurs distinctes → pas d'accord
-- pYIN ≈ 0,3× la durée réelle du fichier
-- **Portée intégrée** : gravure maison (pas MuseScore) — monodique, clé de sol, notes sans ligatures (crochets pour les croches) et avec silences ; le PDF exporté reste la version gravée « professionnelle »
-- Le tempo détecté est celui de la performance chantée (humaine) ; la quantification reste optionnelle
-- **Transcription validée sur voix de synthèse** (`tests/voicetruth.py`, 19 cas : legato, détaché, consonnes, vibrato, bruit, voix graves/aiguës, croches/doubles-croches, portamentos) : hors ligne la segmentation est **exacte** — toutes les notes chantées retrouvées, aucune inventée. Le harnais est synthétique : une vraie prise bruitée reste à mesurer (`scripts/score_accuracy.py`)
-- En temps réel, la segmentation est volontairement plus grossière que l'analyse finale (pas de regard en arrière) : les doubles-croches (≈120 ms) peuvent être fusionnées et un portamento très long (>250 ms) décale l'attaque. Les hauteurs restent justes, et l'analyse finale — celle qui est exportée — reprend tout depuis l'audio enregistré
+- **`CONTEXT.md`** — domain glossary (Analysis, Note, Tempo, Key, Chord, Figure, Meter, Export, Report) and conventions (languages, errors): the reference for any code change.
+- **`core/i18n.py`** — the user-visible string catalog (fr/en): every new visible string goes through `tr()`; note names follow the language (`note_display`), stored figures stay canonical (`tr_figure` translates at display time).
+- **`AGENTS.md`** — technical learnings and **session rules** (non-regression, docs updated with the code, readability) for coding agents; read automatically when the option is enabled in the client.
+
+## Quality & limits
+
+- **Monophonic voice** (one note at a time) — polyphonic transcription is out of scope
+- **Chords on voice alone**: potentially ambiguous (a melody suggests several harmonizations) — the report provides alternatives; fewer than two distinct pitches → no chord
+- pYIN ≈ 0.3× the file's real duration
+- **Built-in staff**: home-grown engraving (not MuseScore) — monophonic, treble clef, unbeamed notes (flags on eighths) with rests; the exported PDF remains the "professional" engraved version
+- The detected tempo is the one of the (human) sung performance; quantization stays optional
+- **Transcription validated on synthetic voice** (`tests/voicetruth.py`, 19 cases: legato, détaché, consonants, vibrato, noise, low/high voices, eighths/sixteenths, portamentos): offline segmentation is **exact** — every sung note found, none invented. The harness is synthetic: a real noisy take remains to be measured (`scripts/score_accuracy.py`)
+- In real time, segmentation is deliberately coarser than the final analysis (no looking back): sixteenths (≈120 ms) can be merged and a very long portamento (>250 ms) shifts the attack. Pitches stay right, and the final analysis — the one exported — redoes everything from the recorded audio
 
 ## Tests
 
@@ -189,17 +207,25 @@ Sur une prise réelle il n'y a pas de vérité terrain : le script imprime donc 
 pytest tests/ -v
 ```
 
-360 tests : pitch (YIN/pYIN sur sinus connus, **flux YIN par blocs** : temps absolus monotones et mémoire bornée), segmentation, tempo (clics + raffinement sur attaques), tonalité, **accords** (triades, septièmes, basse, segments), **progression par mesure**, figures, **mesure par accents (3/4 vs 4/4) et 6/8**, MusicXML (+ **accords/paroles/couleurs**), noms de notes FR/EN, **rendu audio de contrôle**, **clavier PianoView**, **notation** (orthographe en armure, armures, durées écrites, mise en page mesure/système), **portée** (rendu offscreen, systèmes, défilement live), erreurs de chargement audio, export MIDI (meta-events relus), segmenteur live (+ **note en cours** pour le suivi temps réel), **suivi live du piano roll** (fenêtre glissante, preview, bande de hauteur stable, recoloration après étiquetage), **mode live de bout en bout** (micro factice → capture → analyse finale → export), **capture live hors callback** (file + thread, blocs jamais perdus, erreur d'appelant non fatale), **CLI `--pdf`** (outil absent → PDF ignoré, exit 0 ; conversion ratée → exit 2, artefacts et résumé toujours conservés), **enveloppe min/max de la waveform**, **i18n de la boîte de sélection de fichier** (et parité des clés fr/en), **script de diagnostic** (tableau des étapes aligné sur le pipeline réel, moyennes, cProfile, JSON, erreurs d'entrée), pipeline E2E WAV → artefacts, **justesse de transcription sur voix de synthèse** (19 cas, hors ligne exacts, preuve d'attaque jamais pire que la géométrie, aucune note inventée dans une note chantée, temps réel exact sur les phrases articulées), **attaques** (couverture des onsets chantés, une tenue avec vibrato ne produit plus 19 attaques, flux temps réel conservateur), **règles de transition** (glissando absorbé, vraie note courte préservée, hauteur d'arrivée), **mesure fantôme** (une ligne 4/4 n'est pas transcrite en 6/8).
+440+ tests: pitch (YIN/pYIN on known sines, **block YIN stream**: monotonic absolute times and bounded memory), segmentation, tempo (clicks + refinement on attacks), key, **chords** (triads, sevenths, bass, segments), **per-measure progression**, figures, **meter by accents (2/4, 3/4 vs 4/4) and dotted-pulse 6/8**, ×1.5 tempo corrected live and offline, MusicXML (+ **chords/lyrics/colors**), FR/EN note names, **audio rendering**, **PianoView keyboard**, **notation** (spelling in key signature, key signatures, written values, measure/system layout), **staff** (offscreen render, systems, live scrolling), audio-loading errors, MIDI export (meta-events re-read), live segmenter (+ **current note** for real-time tracking), **live piano roll tracking** (sliding window, preview, stable pitch band, recoloring after labeling), **end-to-end live mode** (fake mic → capture → final analysis → export), **live capture off the callback** (queue + thread, blocks never lost, caller error non-fatal), **CLI `--pdf`** (tool missing → PDF skipped, exit 0; conversion failed → exit 2, artifacts and summary always kept), **min/max waveform envelope**, **file-dialog i18n** (and fr/en key parity), **diagnostics script** (stage table aligned on the real pipeline, averages, cProfile, JSON, input errors), E2E WAV → artifacts pipeline, **transcription accuracy on synthetic voice** (19 cases, offline exact, attack evidence never worse than geometry, no note invented inside a sung note, real time exact on articulated phrases, **breaths never notated**: air intakes, isolated breath, breathy held note), **attacks** (sung onset coverage, a held note with vibrato no longer produces 19 attacks, conservative real-time flux), **transition rules** (glissando absorbed, genuine short note preserved, arrival pitch), **phantom meter** (a 4/4 line is not transcribed as 6/8), **single threshold policy** (`FILE_CONF`/`LIVE_CONF`, no locally rewritten default).
 
-Smoke test GUI headless :
+Quick loop while iterating — skips the 4 `slow` golden/fingerprint tests:
+
+```bash
+pytest tests/ -m "not slow"
+```
+
+Measured: ~47 s for the full run against the 90 s suite budget, ~31 s for the quick loop (about 16 s saved, roughly a third of the run). Every run prints its own cost (`suite cost: ...`); a green run past 90 s fails on purpose, so adding a slow test stays an explicit decision. The `slow` tests stay in the default run — CI runs the full suite, the quick loop is for the local loop.
+
+Headless GUI smoke test:
 
 ```bash
 QT_QPA_PLATFORM=offscreen python scripts/gui_smoke_test.py
 ```
 
-## Générer l'audio de démonstration
+## Generate the demo audio
 
 ```bash
-python scripts/make_demo.py     # demo.wav : gamme de Do majeur à 120 BPM
+python scripts/make_demo.py     # demo.wav: a C major scale at 120 BPM
 v2m analyze demo.wav --quantize
 ```

@@ -43,3 +43,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: takes >= 2 s (golden fingerprints replay real takes) — deselect with `-m 'not slow'` for a quick loop",
+]

@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import audio_io
+from .i18n import tr
 
 try:
     import sounddevice as sd
@@ -60,6 +61,20 @@ class Timeline:
         return min(max(0.0, value), self.duration)
 
 
+def _note_velocity(n) -> float:
+    """0..1 velocity of one note, from its measured onset accent.
+
+    `Note.strength` is the take-relative attack strength the pipeline
+    already computed (0..1, normalized on the loudest attack): it is the
+    singer's own dynamics, so the piano follows it instead of hitting
+    every key the same. A note without the field (or out of range) reads
+    the neutral 0.5.
+    """
+    s = getattr(n, "strength", 0.5)
+    s = 0.5 if s is None or s != s else float(s)
+    return min(1.0, max(0.0, s))
+
+
 def render_notes(
     notes,
     sr: int = audio_io.SR,
@@ -68,12 +83,19 @@ def render_notes(
 ) -> np.ndarray:
     """Render `notes` to a mono float32 signal with a small additive piano.
 
-    Each note becomes a struck string: hammer-fast attack, exponential
-    decay while the key holds, inharmonic partials (a stiff string's
-    partials sit slightly sharp, which is the piano's metallic edge) whose
-    higher ranks die faster. Enough realism to ear-check a melody without a
-    soundfont, cheap enough for hundreds of notes. `gain` scales the render
-    for mixing against another source (e.g. the singer's own voice).
+    Each note becomes a struck string: hammer attack, exponential decay
+    while the key holds, inharmonic partials (a stiff string's partials sit
+    slightly sharp, which is the piano's metallic edge) whose higher ranks
+    die faster. Enough realism to ear-check a melody without a soundfont,
+    cheap enough for hundreds of notes. `gain` scales the render for
+    mixing against another source (e.g. the singer's own voice).
+
+    The performance is deliberately NOT mechanical (the metronome-piano
+    feedback): velocities follow the take's own accents (`_note_velocity`),
+    a soft key strikes slower than a loud one, notes are placed a few ms
+    off the grid (later when weak), keyed a few cents apart, released a
+    touch before the next onset, and everything sits in a light room
+    (short noise IR). All deterministic: same notes -> same render.
     """
     if not notes:
         return np.zeros(0, dtype=np.float32)
@@ -81,18 +103,22 @@ def render_notes(
     y = np.zeros(length, dtype=np.float64)
     t_axis_cache: dict[int, np.ndarray] = {}
 
-    def tone(freq: float, n: int) -> np.ndarray:
+    def tone(freq: float, n: int, vel: float) -> np.ndarray:
         # `n` is the EXACT slice length in samples: re-deriving it from a
         # duration in seconds (int(dur * sr)) loses one sample on ~9% of
         # durations (float round-trip) and misshapes the += into a crash.
         idx = t_axis_cache.setdefault(n, np.arange(n) / sr)
-        # hammer attack (4 ms) and a key-lift fade; the decay itself lives
-        # on each partial below (higher partials die faster, like a string)
+        # hammer attack: a LOUD key strikes fast (3 ms), a soft one slow
+        # (12 ms) — that attack-time spread is a big part of why a real
+        # piano does not sound like a metronome
         env = np.ones(n)
-        a = min(n, int(0.004 * sr))
+        a = min(n, max(1, int((0.003 + 0.009 * (1.0 - vel)) * sr)))
         env[:a] = np.linspace(0.0, 1.0, a, endpoint=False)
-        r = min(n - a, int(0.060 * sr))
-        env[n - r :] *= np.linspace(1.0, 0.0, r)
+        # key-lift fade; the decay itself lives on each partial below
+        # (higher partials die faster, like a string)
+        r = min(n - a, int((0.06 + 0.04 * (1.0 - vel)) * sr))
+        if r > 0:
+            env[n - r :] *= np.linspace(1.0, 0.0, r)
         wave = np.zeros(n)
         for k in range(1, 7):
             fk = freq * k * np.sqrt(1.0 + 0.0004 * k * k)
@@ -100,20 +126,49 @@ def render_notes(
                 break
             tau = 0.9 / k**0.8
             wave += k**-1.7 * np.exp(-idx / tau) * np.sin(2 * np.pi * fk * idx)
-        return 0.5 * env * wave
+        return (0.25 + 0.75 * vel) * env * wave
 
     for n in notes:
-        i0, i1 = int(n.start * sr), min(length, int(n.end * sr))
+        vel = _note_velocity(n)
+        # human placement: a weak note lands a few ms late, a strong one on
+        # time; every key is released a touch early (the damper felt), and
+        # tuned a few cents off its neighbour — a deterministic pseudo-
+        # random walk of the tuning, so the render stays reproducible
+        start = n.start + 0.018 * (1.0 - vel)
+        # the damper sits the key a touch early; the duration keeps its
+        # proportion from the actual (shifted) onset
+        dur = max(0.03, n.duration * 0.97)
+        end = start + dur
+        cents = 4.0 * np.sin(n.start * 12.9898) + 2.5 * np.sin(n.start * 4.898)
+        f = float(440.0 * 2.0 ** ((int(n.midi) + transpose - 69 + cents / 100.0) / 12.0))
+        i0, i1 = max(0, int(start * sr)), min(length, int(end * sr))
         if i1 <= i0:
             continue
-        f = float(440.0 * 2.0 ** ((int(n.midi) + transpose - 69) / 12.0))
-        y[i0:i1] += tone(f, i1 - i0)
+        y[i0:i1] += tone(f, i1 - i0, vel)
     peak = float(np.max(np.abs(y))) if len(y) else 0.0
     if peak > 0:
         y *= 0.85 / peak
+    y = _room_tail(y, sr)
     # the gain is applied AFTER normalization (it must be audible) and the
     # result clipped: the device would hard-clip anything beyond ±1 anyway
     return np.clip(y * gain, -1.0, 1.0).astype(np.float32)
+
+
+def _room_tail(y: np.ndarray, sr: int) -> np.ndarray:
+    """A light room: one short decaying-noise IR, truncated to `len(y)`.
+
+    A dry additive piano reads synthetic no matter how good the partials;
+    ~120 ms of diffuse tail glues the notes together the way a room does.
+    Cheap (one FFT convolution) and deterministic (fixed seed).
+    """
+    from scipy.signal import fftconvolve
+
+    rng = np.random.default_rng(20177)
+    ir_n = int(0.12 * sr)
+    ir = rng.standard_normal(ir_n) * np.exp(-np.arange(ir_n) / (0.035 * sr))
+    ir /= np.max(np.abs(ir))
+    wet = fftconvolve(y, ir * 0.09)[: len(y)]
+    return y + wet
 
 
 def pitch_shift_signal(y: np.ndarray, semitones: float, sr: int = audio_io.SR) -> np.ndarray:
@@ -247,7 +302,7 @@ class PlaybackSession:
 
     def play(self, mode: str = "piano", t: float = 0.0) -> bool:
         if sd is None:
-            self._report_error("sounddevice indisponible (pas de périphérique audio ?)")
+            self._report_error(tr("err sounddevice missing"))
             return False
         self.stop()
         self._signal = self._selected(mode)

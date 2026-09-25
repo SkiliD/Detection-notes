@@ -134,7 +134,7 @@ class LiveThread(QThread):
             self.failed.emit(event.error)
 
     def run(self) -> None:
-        self.take = LiveTake(min_conf=0.5, on_event=self._on_take_event)
+        self.take = LiveTake(on_event=self._on_take_event)  # default thresholds (pipeline)
         try:
             self.take.start()
             while not self._stop:
@@ -524,7 +524,7 @@ class MainWindow(QMainWindow):
         self.source_path = path
         self.label_file.setText(p.name)
         self.progress.setValue(0)
-        opts = AnalyzeOptions(min_conf=0.6)
+        opts = AnalyzeOptions()  # default thresholds, one policy (pipeline)
         self.analyze_thread = AnalysisThread(path, opts)
         self.analyze_thread.progress.connect(self._on_progress)
         self.analyze_thread.finishedOk.connect(self._on_analysis_done)

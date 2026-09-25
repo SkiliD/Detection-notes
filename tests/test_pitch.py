@@ -69,12 +69,19 @@ def test_yin_block_stream_tracks_pitch():
 
 
 def test_yin_block_confirms_a_live_note():
-    """Bout en bout : le segmenteur live doit voir une note sur un sinus."""
+    """Bout en bout : le segmenteur live doit voir une note sur un sinus.
+
+    La config de la CHAÎNE LIVE (window 512, hop 256 — 11,6 ms par trame)
+    est celle qui compte : à 46 ms de hop (2048/1024), trois trames
+    couvrent 93 ms et la fenêtre confirm_s (0.09 s) ne peut plus jamais en
+    tenir trois — aucune note ne se confirme jamais à ce pas grossier.
+    La production ne passe que par LivePitchStream (512/256).
+    """
     from v2m.core.liveseg import LiveNoteSegmenter
 
     y = np.concatenate([sine_note(440.0, 0.5, sr=SR), np.zeros(SR // 2, dtype=np.float32)])
     seg = LiveNoteSegmenter()
-    for t, hz in _stream(y, 1024, window=2048, hop=1024):
+    for t, hz in _stream(y, 1024, window=512, hop=256):
         seg.push(t, hz)
     seg.flush(1.0)
     assert [n.midi for n in seg.notes] == [69]
@@ -88,6 +95,33 @@ def test_pyin_440hz_median():
     assert len(voiced) > 20
     med = float(np.median(voiced))
     assert abs(hz_to_midi(med) - 69.0) < 0.5
+
+
+def test_pyin_confidence_is_the_voicing_probability():
+    """`confidence` porte la PROBABILITÉ de voising de pYIN, pas le flag binaire.
+
+    L'ancien code jetait le vprob (3ᵉ retour de librosa.pyin) pour un flag
+    1.0 partout où f0 existait : `clean_pitch` n'avait donc RIEN à masquer —
+    les couleurs MusicXML et les vélocités MIDI étaient constantes, et le
+    voising douteux d'une voix soufflée passait pour une voix sûre. Mesuré
+    sur le harnais voix : tenue claire ≈ 0.95, soufflée (bruit 0.10, le
+    contrat) ≥ 0.83, une frame de souffle sur tenue 0.49-0.59.
+    """
+    import sys
+
+    import voicetruth
+
+    sys.path.insert(0, "tests")
+    truth = [voicetruth.SungNote(64, 0.2, 0.5)]
+    y = voicetruth.synthesize(truth, consonant_s=0.05, glide_s=0.03)
+    track = track_pitch_offline(y, SR)
+    note_frames = (track.times >= 0.25) & (track.times <= 0.6) & ~np.isnan(track.hz)
+    assert note_frames.sum() >= 10
+    # l'ancien flag binaire = 1.0 exactement ; le vprob, lui, varie
+    assert track.confidence[note_frames].max() < 0.999
+    assert float(np.median(track.confidence[note_frames])) >= 0.8  # note sûre
+    # et les frames SANS f0 restent à 0 (contrat du masque)
+    assert float(track.confidence[np.isnan(track.hz)].max(initial=0.0)) == 0.0
 
 
 def test_pyin_two_octaves():

@@ -126,3 +126,30 @@ def test_wav_file_roundtrip(tmp_path):
     y = load_file(wav_path)
     res = analyze_signal(y, SR, source=wav_path)
     assert [n.midi for n in res.notes] == [57, 60, 64, 67]
+
+
+def test_threshold_policy_has_one_owner():
+    """Les seuils d'analyse ont UNE politique : pipeline FILE_CONF / LIVE_CONF.
+
+    La régression à refuser : un défaut réécrit localement (la GUI
+    hardcodait son propre 0.6, le CLI et LiveTake les leurs) — changer la
+    politique deviendrait une chasse aux copies. min_note_s appartient à
+    notes.py (le domaine), bpm_range à tempo.py (le repli est son métier) :
+    le CLI et le dataclass les lisent, personne ne les réécrit.
+    """
+    from v2m import cli
+    from v2m.core.live_session import LiveTake
+    from v2m.core.notes import DEFAULT_MIN_NOTE_S
+    from v2m.core.pipeline import FILE_CONF, LIVE_CONF, AnalyzeOptions
+    from v2m.core.tempo import BPM_RANGE
+
+    assert AnalyzeOptions().min_conf == FILE_CONF
+    assert AnalyzeOptions().min_note_s == DEFAULT_MIN_NOTE_S
+    assert AnalyzeOptions().bpm_range == BPM_RANGE
+    assert LiveTake().min_conf == LIVE_CONF
+    parser = cli.build_parser()
+    analyzed = parser.parse_args(["analyze", "x.wav"])
+    live = parser.parse_args(["live"])
+    assert analyzed.min_conf == FILE_CONF
+    assert analyzed.min_note == int(DEFAULT_MIN_NOTE_S * 1000)
+    assert live.min_conf == LIVE_CONF

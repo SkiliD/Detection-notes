@@ -64,16 +64,17 @@ def figures_summary(notes) -> dict[str, int]:
 
 
 _SHORT = {"ronde": "R", "blanche": "B", "noire": "N", "croche": "C",
-          "double-croche": "DC"}
+          "double-croche": "DC", "trente-deuxième": "32"}
 
 
 def short_label(figure: str | None) -> str:
-    """Short display label: 'N.', 'C', '3N' (triplet)..."""
+    """Short display label: 'N.', 'C', '3N' (triplet), 'N..' (double dotted)..."""
     if not figure:
         return ""
     if figure.startswith("triolet de "):
         base = figure.removeprefix("triolet de ")
         return f"3{_SHORT.get(base, '?')}"
-    base = figure.removesuffix(" pointée")
+    dots = 2 if "double-pointée" in figure else 1 if "pointée" in figure else 0
+    base = figure.removesuffix(" pointée").removesuffix(" double-pointée")
     label = _SHORT.get(base, "?")
-    return f"{label}." if "pointée" in figure else label
+    return f"{label}." * dots if dots else label

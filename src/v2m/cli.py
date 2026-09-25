@@ -8,9 +8,18 @@ from pathlib import Path
 
 from . import __version__
 from .core.audio_io import AUDIO_EXTS
-from .core.i18n import get_language, note_display, set_language, tr
+from .core.i18n import (
+    get_language,
+    note_display,
+    set_language,
+    tr,
+    tr_chord_label,
+    tr_figure,
+    tr_key_label,
+)
 from .core.pdf_export import PdfExportError, PdfToolMissing
-from .core.pipeline import AnalyzeOptions, analyze_file
+from .core.notes import DEFAULT_MIN_NOTE_S
+from .core.pipeline import FILE_CONF, LIVE_CONF, AnalyzeOptions, analyze_file
 from .core.report import engrave_pdf, export_result
 
 
@@ -67,16 +76,18 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     # analyze_signal always produces a tempo and a key (the detectors return
     # an object even on silence), so the summary reads them unguarded.
     assert res.tempo is not None and res.key is not None
+    # the summary is display: key labels ('C major') and figure names
+    # ('noire') are stored canonical and translated HERE, never in the data
     print(f"{tr('key tempo')}     : {res.tempo.bpm} BPM")
-    print(f"{tr('key key label')} : {res.key.best.label} (conf. {res.key.best.score:.2f})")
+    print(f"{tr('key key label')} : {tr_key_label(res.key.best.label)} (conf. {res.key.best.score:.2f})")
     for a in res.key.alternatives:
-        print(f"  {tr('key candidate')}: {a.label} ({a.score:.2f})")
-    print(f"{tr('key meter')}    : {res.meter.label if res.meter else tr('key detect meter')}")
-    print(f"{tr('key chord label')} : {rep['chord']['label'] if rep['chord'] else '—'}")
+        print(f"  {tr('key candidate')}: {tr_key_label(a.label)} ({a.score:.2f})")
+    print(f"{tr('key meter'):<10}: {res.meter.label if res.meter else tr('key detect meter')}")
+    print(f"{tr('key chord label')} : {tr_chord_label(rep['chord']['label']) if rep['chord'] else '—'}")
     print(f"{tr('key notes label')} : {len(res.notes)}")
     figs = rep["figures_summary"]
     if figs:
-        print(f"{tr('key figures')}   : {', '.join(f'{k} ×{v}' for k, v in figs.items())}")
+        print(f"{tr('key figures')}   : {', '.join(f'{tr_figure(k)} ×{v}' for k, v in figs.items())}")
     exports = f"{stem}.mid, {stem}.musicxml, {stem}.json, {stem}.csv"
     if pdf_written:
         exports += f", {stem}.pdf"
@@ -106,32 +117,38 @@ def _cmd_gui(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface. Threshold defaults come from pipeline's one policy."""
     parser = argparse.ArgumentParser(
         prog="v2m",
-        description="Voix -> MIDI : notes, tempo, tonalité et accords (fr / en).",
+        description="Voice -> MIDI: notes, tempo, key and chords (fr / en).",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--lang", choices=("fr", "en"), default=None,
-        help="Langue des messages et du format des notes (défaut : fr, persisté dans ~/.v2m_lang)",
+        help="Message and note-name language (default: fr, persisted in ~/.v2m_lang)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_an = sub.add_parser("analyze", help="Analyze an audio file -> MIDI + MusicXML + JSON + CSV")
     p_an.add_argument("input", help="Audio file (WAV/MP3/FLAC/OGG)")
     p_an.add_argument("-o", "--output", help="Output stem (default: same name as input)")
-    p_an.add_argument("--min-conf", type=float, default=0.6, help="Pitch confidence threshold (0..1)")
-    p_an.add_argument("--min-note", type=int, default=60, help="Minimum note duration in ms")
+    p_an.add_argument("--min-conf", type=float, default=FILE_CONF, help="Pitch confidence threshold (0..1)")
+    p_an.add_argument("--min-note", type=int, default=int(DEFAULT_MIN_NOTE_S * 1000), help="Minimum note duration in ms")
     p_an.add_argument("--quantize", action="store_true", help="Quantize to the 1/16 grid at the detected tempo")
     p_an.add_argument("--transpose", type=int, default=0, help="Transpose in semitones")
     p_an.add_argument("--pdf", action="store_true", help="Also engrave the score to PDF (needs MuseScore or LilyPond)")
 
     p_live = sub.add_parser("live", help="Real-time mode: sing, Ctrl+C to export")
-    p_live.add_argument("--min-conf", type=float, default=0.5, help="Pitch confidence threshold (0..1)")
+    p_live.add_argument("--min-conf", type=float, default=LIVE_CONF, help="Pitch confidence threshold (0..1)")
     p_live.add_argument("--transpose", type=int, default=0, help="Transpose in semitones")
 
     p_gui = sub.add_parser("gui", help="Launch the graphical interface")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
 
     args = parser.parse_args(argv)
     if args.lang:

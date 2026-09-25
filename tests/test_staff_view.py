@@ -55,6 +55,37 @@ def test_empty_staff_paints_without_notes(qapp):
     assert view.visible_window() == (0.0, 0.0)
 
 
+def test_natural_accidental_draws_its_own_glyph(qapp):
+    """Le bécarre est SON glyphe, pas un bémol déguisé.
+
+    alter==0 tombait dans le else (bémol) : une lettre d'armure chantée
+    bécarre était gravée avec une FLAT — hauteur fausse sur le papier. Le
+    bécarre a deux verticales à x - 0.17S et x + 0.19S ; le bémol n'a qu'une
+    tige à x - 0.06S, donc les deux glyphes se distinguent par l'encre au
+    voisinage de la 2ᵉ verticale (mêmes mesures que l'inspecteur ASCII).
+    """
+    from v2m.core.grid import BeatGrid
+
+    view = StaffView()
+    view.resize(420, 160)
+    # F5 (step 38, top line) natural in G major: explicit accidental
+    notes = [_note(77, 0.0)]          # F5, alter 0 -> natural engraved
+    view.set_score(notes, grid=BeatGrid(120.0), key="G major")
+    lay = view.layout()
+    assert lay.notes[0].accidental and lay.notes[0].alter == 0
+
+    img = view.grab().toImage()
+    # accidental x = notes_x + 1st-note x - 1.25S ; second vertical at +0.19S
+    from v2m.gui.staff import S as S_PX
+    from v2m.gui.staff import TOP_LINE_STEP
+
+    y = HEADER_H + (TOP_LINE_STEP - lay.notes[0].step) * (S_PX / 2.0)
+    x2 = view._notes_x(lay) - 1.25 * S_PX + 0.19 * S_PX
+    ink2 = _ink(view, x0=x2 - 2, y0=y - 0.9 * S_PX, x1=x2 + 2, y1=y + 0.9 * S_PX)
+    # the flat's stem (the old glyph) leaves this column EMPTY
+    assert ink2 > 0, "le bécarre n'a pas de 2ᵉ verticale (glyphe bémol ?)"
+
+
 def test_score_needs_no_meter_or_key(qapp):
     """A take whose meter stayed undetected still renders (4/4 assumed)."""
     view = StaffView()

@@ -1,6 +1,6 @@
 """Tests tonalité : gammes connues -> candidates attendues."""
 
-from v2m.core.keys import detect_key, pitch_class_histogram
+from v2m.core.keys import detect_key, pitch_class_histogram, scale_pitch_classes, snap_to_key
 from v2m.core.notes import Note
 
 
@@ -56,3 +56,55 @@ def test_histogram_weighted_by_duration():
 def test_empty_notes():
     res = detect_key([])
     assert res.best.score == 0.0
+
+
+# ---------------------------------------------------------------------------
+# snap_to_key : le collage à la gamme (déviation résiduelle + contexte)
+# ---------------------------------------------------------------------------
+
+
+def _one(midi: int, dev: float) -> Note:
+    return Note(start=0.0, end=0.5, midi=midi, confidence=0.9, deviation=dev)
+
+
+def test_scale_pitch_classes_covers_the_key():
+    s = scale_pitch_classes(detect_key(_notes_from_midis([(60, 0.4), (64, 0.4), (67, 0.4)])).best)
+    assert len(s) == 7 and 0 in s and 7 in s  # C major: C and G present, F# absent
+    assert 6 not in s
+
+
+def test_ambiguous_out_of_scale_note_resolves_toward_its_lean():
+    """Un Fa# chanté PRESQUE juste (deviation -0.4 : penche vers le bas) en
+    Do majeur rejoint Fa, le degré vers lequel il penche — la règle du
+    collage à la gamme. Un Fa# franc (deviation ~0) reste chromatique."""
+    key = detect_key(_notes_from_midis([(60, 0.4), (64, 0.4), (67, 0.4)])).best
+    flat_fsharp = [_one(66, -0.4)]  # 40 cents flat of F#3 -> leans to F
+    assert snap_to_key(flat_fsharp, key) == 1
+    assert flat_fsharp[0].midi == 65  # F3
+    assert flat_fsharp[0].deviation == 0.0
+    sharp_fsharp = [_one(66, 0.05)]  # a chromatic shade: untouched
+    assert snap_to_key(sharp_fsharp, key) == 0
+    assert sharp_fsharp[0].midi == 66
+
+
+def test_mistuned_scale_degree_is_re_anchored():
+    """Un degré de la gamme chanté de travers (deviation >= ±0.3) est
+    ré-ancré sur son degré : la clé le dit, le penche était du bruit vocal.
+    La même nuance sous le seuil reste une nuance."""
+    key = detect_key(_notes_from_midis([(60, 0.4), (64, 0.4), (67, 0.4)])).best
+    mistuned = [_one(65, 0.45)]  # F sung 45 cents sharp: a scale degree anyway
+    assert snap_to_key(mistuned, key) == 1
+    assert mistuned[0].midi == 65 and mistuned[0].deviation == 0.0
+    shade = [_one(65, 0.10)]
+    assert snap_to_key(shade, key) == 0
+    assert shade[0].deviation == 0.10  # kept: expression, not mistune
+
+
+def test_snap_without_key_or_without_deviation_is_a_noop():
+    notes = [_one(66, -0.4)]
+    assert snap_to_key(notes, None) == 0
+    assert notes[0].midi == 66
+    bare = [Note(start=0.0, end=0.5, midi=66, confidence=0.9)]  # no deviation field value
+    key = detect_key(_notes_from_midis([(60, 0.4), (64, 0.4), (67, 0.4)])).best
+    assert snap_to_key(bare, key) == 0  # default dev 0.0: below the band
+    assert bare[0].midi == 66

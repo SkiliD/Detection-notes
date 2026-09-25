@@ -9,9 +9,11 @@ for display only.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
-from .music import midi_to_name, midi_to_name_fr
+from .music import NOTE_NAMES, NOTE_NAMES_FR, midi_to_name, midi_to_name_fr
 
 LANG_FILE = Path.home() / ".v2m_lang"
 
@@ -77,6 +79,18 @@ STRINGS = {
         "err ui export failed": "Export impossible : {e}",
         "err ui pdf": "Export PDF : {e}",
         "err ui mic": "Micro indisponible : {e}",
+        "err sounddevice missing": "sounddevice indisponible (pas de périphérique audio ?)",
+        "err take stopped": "cette prise live est déjà arrêtée",
+        "err live incomplete": "analyse live incomplète",
+        "err export incomplete": "export_result exige une analyse complète (tempo + tonalité)",
+        "err export needs meter": "export_result exige une mesure",
+        "err pdf install hint": "Installez MuseScore (https://musescore.org) ou LilyPond (https://lilypond.org) puis vérifiez qu'il est dans le PATH.",
+        "err pdf not runnable": "« {cmd} » introuvable à l'exécution. {hint}",
+        "err pdf skipped": "PDF ignoré : {hint}",
+        "err pdf no tool": "Aucun outil de gravure trouvé (MuseScore, LilyPond). {hint}",
+        "err pdf timeout": "{name} n'a pas répondu (délai de 120 s).",
+        "err pdf conversion": "Échec de la conversion via {name} : {msg}",
+        "err pdf exit code": "code de sortie {code}",
         "err ui playback": "Lecture audio impossible : {e}",
         "ui window title": "Voix → MIDI — notes, tempo, tonalité et accords",
         "ui app subtitle": "Chantez : l'application détecte les notes, le tempo, la tonalité et les accords,\npuis exporte un fichier MIDI, une partition MusicXML et un rapport JSON/CSV.",
@@ -198,6 +212,18 @@ STRINGS = {
         "err ui export failed": "Export failed: {e}",
         "err ui pdf": "PDF export: {e}",
         "err ui mic": "Microphone unavailable: {e}",
+        "err sounddevice missing": "sounddevice unavailable (no audio device?)",
+        "err take stopped": "this live take is already stopped",
+        "err live incomplete": "live analysis incomplete",
+        "err export incomplete": "export_result requires a complete analysis (tempo + key)",
+        "err export needs meter": "export_result requires a meter",
+        "err pdf install hint": "Install MuseScore (https://musescore.org) or LilyPond (https://lilypond.org), then make sure it is on the PATH.",
+        "err pdf not runnable": "'{cmd}' not found at run time. {hint}",
+        "err pdf skipped": "PDF skipped: {hint}",
+        "err pdf no tool": "No engraving tool found (MuseScore, LilyPond). {hint}",
+        "err pdf timeout": "{name} did not respond (timeout 120 s).",
+        "err pdf conversion": "Conversion via {name} failed: {msg}",
+        "err pdf exit code": "exit code {code}",
         "err ui playback": "Audio playback failed: {e}",
         "ui window title": "Voix → MIDI — notes, tempo, key and chords",
         "ui app subtitle": "Sing: the app detects notes, tempo, key and chords,\nthen exports a MIDI file, a MusicXML score and a JSON/CSV report.",
@@ -264,6 +290,7 @@ STRINGS = {
 }
 
 _current = "fr"
+_debug = os.environ.get("V2M_DEBUG_TR") == "1"
 
 
 def available_languages() -> tuple[str, ...]:
@@ -280,6 +307,12 @@ def set_language(lang: str) -> None:
         LANG_FILE.write_text(lang, encoding="utf-8")
     except OSError:
         pass  # persistence is best-effort; the runtime switch still works
+
+
+def set_debug(on: bool) -> None:
+    """Log missing tr() keys on stderr (also arms set_language, in DEBUG)."""
+    global _debug
+    _debug = bool(on)
 
 
 def get_language() -> str:
@@ -306,8 +339,20 @@ def toggle_language() -> str:
 
 
 def tr(key: str) -> str:
-    """Translate a user-facing string in the current language."""
-    return STRINGS[_current].get(key, key)
+    """Translate a user-facing string in the current language.
+
+    A missing key falls back to the key itself, which never raises — so a
+    typo'd key ships silently and the user just reads the raw key. In DEBUG
+    mode (V2M_DEBUG_TR=1 at import time, or set_debug(True)) every miss is
+    logged on stderr: this is what catches the DYNAMIC call sites (a key
+    built into a variable) the static AST guard cannot see.
+    """
+    if key not in STRINGS[_current]:
+        if _debug:
+            print(f"[v2m i18n] clé absente de la table « {_current} » : {key!r}",
+                  file=sys.stderr)
+        return key
+    return STRINGS[_current][key]
 
 
 def note_display(midi: int) -> str:
@@ -324,53 +369,120 @@ def note_display_pair(midi: int) -> str:
     return f"{midi_to_name_fr(midi)} / {midi_to_name(midi)}"
 
 
+# English display of every canonical figure name, keyed by the WHOLE name:
+# English puts the dot BEFORE the value (« dotted half », never « half
+# dotted ») and folds « double-croche » into one word — word-by-word
+# replacement cannot express either. Rests follow the same dotted-first
+# order; the vocabulary is closed (pinned against grid.CATALOGUE by the
+# i18n tests), so there is no word-level fallback path.
+_FIGURE_EN = {
+    "ronde": "whole",
+    "blanche": "half",
+    "noire": "quarter",
+    "croche": "eighth",
+    "double-croche": "sixteenth",
+    "trente-deuxième": "thirty-second",
+    "ronde pointée": "dotted whole",
+    "blanche pointée": "dotted half",
+    "noire pointée": "dotted quarter",
+    "croche pointée": "dotted eighth",
+    "double-croche pointée": "dotted sixteenth",
+    "pause": "whole rest",
+    "demi-pause": "half rest",
+    "soupir": "quarter rest",
+    "demi-soupir": "eighth rest",
+    "quart de soupir": "sixteenth rest",
+    "seizième de soupir": "thirty-second rest",
+    "pause pointée": "dotted whole rest",
+    "demi-pause pointée": "dotted half rest",
+    "soupir pointée": "dotted quarter rest",
+    "demi-soupir pointée": "dotted eighth rest",
+    "quart de soupir pointée": "dotted sixteenth rest",
+    "noire double-pointée": "double dotted quarter",
+    "croche double-pointée": "double dotted eighth",
+    "soupir double-pointée": "double dotted quarter rest",
+    "demi-soupir double-pointée": "double dotted eighth rest",
+    "quart de soupir double-pointée": "double dotted sixteenth rest",
+}
+
+
 def tr_figure(figure: str | None) -> str:
-    """Display a canonical French figure name ('noire') in the UI language."""
+    """Display a canonical French figure name ('noire') in the UI language.
+
+    A name outside the table comes back unchanged, like tr()'s key
+    fallback — half-translating unknown input is worse than showing the
+    canonical name, and the vocabulary is closed.
+    """
     if not figure:
         return ""
     if _current == "fr":
         return figure
-    en = {
-        "ronde": "whole",
-        "blanche": "half",
-        "noire": "quarter",
-        "croche": "eighth",
-        "double-croche": "sixteenth",
-        "pointée": "dotted",
-        "triolet de ": "triplet of ",
-    }
-    # longest first: "demi-pause" contains "pause", "quart de soupir"
-    # contains "soupir" — a naive order would half-translate the label.
-    rest_en = [
-        ("quart de soupir", "sixteenth rest"),
-        ("demi-soupir", "eighth rest"),
-        ("soupir", "quarter rest"),
-        ("demi-pause", "half rest"),
-        ("pause", "whole rest"),
-    ]
-    out = figure
-    for fr_word, en_word in en.items():
-        out = out.replace(fr_word, en_word)
-    for fr_word, en_word in rest_en:
-        out = out.replace(fr_word, en_word)
-    return out
+    if figure.startswith("triolet de "):
+        return "triplet of " + tr_figure(figure[len("triolet de "):])
+    return _FIGURE_EN.get(figure, figure)
+
+
+# French display of the key modes, keyed by the WHOLE canonical mode word
+# from keys.KEY_PROFILES — the same whole-name-table design as _FIGURE_EN.
+# The guard tests pin this table against the detection source, so a mode
+# added there without its display translation fails the i18n tests.
+_MODE_FR = {
+    "major": "majeur",
+    "minor": "mineur",
+}
 
 
 def tr_key_label(label: str) -> str:
-    """Translate a key label ('C major') into the UI language."""
+    """Translate a key label ('C major') into the UI language.
+
+    The mode word is looked up in _MODE_FR; a mode outside the table comes
+    back unchanged, like tr()'s key fallback — the vocabulary is closed and
+    pinned against keys.KEY_PROFILES by the i18n tests.
+    """
     tonic, _, mode = label.partition(" ")
     if _current == "en":
         return label
-    fr_mode = {"major": "majeur", "minor": "mineur"}.get(mode, mode)
-    return f"{tonic} {fr_mode}".strip()
+    return f"{tonic} {_MODE_FR.get(mode, mode)}".strip()
 
 
-def tr_chord_quality(quality: str) -> str:
-    """Optional French expansion of chord qualities ('m' -> 'mineur')."""
-    if _current == "en" or not quality:
-        return quality
-    fr = {"m": "mineur", "dim": "dim", "aug": "aug", "7": "7", "maj7": "maj7", "m7": "m7"}
-    return fr.get(quality, quality)
+# Whole-label chord translation, keyed by quality, Pinned to its producer:
+# the keys are exactly chords.CHORD_TEMPLATES (a quality added there without
+# its display word fails the i18n guard, like tr_figure's). Replaces the
+# deleted per-suffix tr_chord_quality (ADR 0004), which could only expand
+# "m" and left "Am" as "Am" — the label a French reader reads whole.
+_CHORD_QUALITY_FR = {
+    "": "majeur",
+    "m": "mineur",
+    "dim": "diminué",
+    "aug": "augmenté",
+    "7": "septième",
+    "maj7": "septième majeure",
+    "m7": "septième mineure",
+}
+
+
+def tr_chord_label(label: str) -> str:
+    """Translate a whole chord label ('Am', 'Cmaj7') into the UI language.
+
+    Storage stays canonical ('Am' in the JSON and MusicXML); this is the
+    DISPLAY edge, like tr_figure/tr_key_label. The root is PARSED against
+    music.NOTE_NAMES (the English table chords.py builds labels from —
+    two-char 'C#'/'F#' first, so 'C#m' is not 'C' + '#m') and DISPLAYED in
+    the solfège table; the quality — every suffix after the root, one of
+    the CHORD_TEMPLATES keys — is looked up in the table above. An unknown
+    root or quality comes back unchanged: half-translating an unknown label
+    is worse than showing the canonical name.
+    """
+    if _current == "en":
+        return label
+    for i in (2, 1):
+        if i <= len(label) and label[:i] in NOTE_NAMES:
+            root, quality = label[:i], label[i:]
+            if quality not in _CHORD_QUALITY_FR:
+                return label
+            fr_root = NOTE_NAMES_FR[NOTE_NAMES.index(root)]
+            return f"{fr_root} {_CHORD_QUALITY_FR[quality]}"
+    return label
 
 
 __all__ = [
@@ -379,10 +491,11 @@ __all__ = [
     "get_language_display",
     "note_display",
     "note_display_pair",
+    "set_debug",
     "set_language",
     "toggle_language",
     "tr",
-    "tr_chord_quality",
+    "tr_chord_label",
     "tr_figure",
     "tr_key_label",
 ]

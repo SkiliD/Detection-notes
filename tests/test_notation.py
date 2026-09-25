@@ -47,6 +47,27 @@ def test_spell_follows_the_key_signature():
     assert (f_sharp.letter, f_sharp.alter) == ("F", 1)
 
 
+def test_spell_key_letter_sung_natural_stays_natural():
+    """Une lettre de l'armure chantée bécarre s'écrit NATURELLE, pas voisine.
+
+    Mesuré : en Sol majeur, un Fa bécarre tombait dans le repli chromatique
+    et ressortait E# (le voisin alteré le plus proche) — la portée gravait
+    une hauteur fausse au lieu d'un Fa avec bécarre. Le naturel est TOUJOURS
+    l'orthographe gagnante quand la lettre de l'armure existe.
+    """
+    f_nat = spell(65, fifths=1)      # F natural in G major (F# of the key undone)
+    assert (f_nat.letter, f_nat.alter) == ("F", 0)
+    assert accidental_needed(0, "F", 1)   # and it needs a natural sign
+
+    b_nat = spell(71, fifths=-1)     # B natural in F major (Bb of the key undone)
+    assert (b_nat.letter, b_nat.alter) == ("B", 0)
+    assert accidental_needed(0, "B", -1)
+
+    # non-regression of the neighbour spellings the fallback already got right
+    assert spell(61, fifths=0).letter == "C"     # C# in C major
+    assert spell(61, fifths=-1).letter == "D"    # Db in F major
+
+
 def test_spell_octave_belongs_to_the_letter():
     # B#3 and Cb4 sit at the same pitch as C4 (60) but on different steps
     assert spell(60, fifths=0).octave == 4
