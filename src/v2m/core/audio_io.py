@@ -20,6 +20,17 @@ except Exception:  # pragma: no cover - no audio device in CI
 SR = 22_050        # analysis sample rate
 GATE_RMS = 0.008   # below this level a live block counts as silence
 
+# A capture stream opener: the SAME signature and contract as
+# `sd.InputStream` (opens, `start()`s, `stop()`/`close()`), so the real
+# device and every test/replay fake are interchangeable. Injection is the
+# whole point: a GUI replaying a take must not swap `sd.InputStream` on
+# the module (a global) while the user's real microphone capture reads it.
+StreamFactory = Callable[..., Any]
+
+# An audio OUTPUT stream opener for a replayed take (`core.replay`): same
+# contract as `sd.OutputStream`. Optional — a replay without a speaker
+# (headless machine, CI) still runs, it just does not monitor itself.
+
 # Accepted input containers, shared by the CLI and the GUI (a tuple:
 # `str.endswith` accepts it, unlike a set).
 AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")
@@ -51,6 +62,22 @@ def load_file(path: str, sr: int = SR) -> np.ndarray:
     return np.asarray(y, dtype=np.float32)
 
 
+def save_file(signal: np.ndarray, path: str, sr: int = SR) -> str:
+    """Write a mono float32 signal to `path`; return the path written.
+
+    Used for the live take's own audio (the live page's checkbox): the take is
+    the user's data, so it is written as 16-bit PCM WAV, the format every
+    editor reads, right next to the other artifacts. The folder is created if
+    needed (a per-take live folder may not exist yet).
+    """
+    import soundfile as sf
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(p), np.asarray(signal, dtype=np.float32), sr, subtype="PCM_16")
+    return str(p)
+
+
 @dataclass
 class LiveCapture:
     """Microphone capture in blocks, with a user callback.
@@ -68,6 +95,10 @@ class LiveCapture:
     blocksize: int = 1024             # ~23 ms per block
     sr: int = SR                      # analysis sample rate
     on_block: Optional[Callable[[np.ndarray, float], None]] = None
+    # The InputStream opener (same contract as `sd.InputStream`). None = the
+    # real device; a replay or a test injects its own fake — never by
+    # patching `audio_io.sd` while a GUI capture might read it.
+    stream_factory: Optional[StreamFactory] = None
     chunks: list = field(default_factory=list, repr=False)
     # `Any` because sounddevice may be absent (the module-level guard), and a
     # closed stream is set back to None; both call sites re-guard.
@@ -108,7 +139,9 @@ class LiveCapture:
     def start(self) -> None:
         if sd is None:  # pragma: no cover - needs a real audio device
             raise RuntimeError(tr("err sounddevice missing"))
-        self._stream = sd.InputStream(
+        self._stream = (
+            self.stream_factory or sd.InputStream
+        )(
             samplerate=self.samplerate,
             channels=1,
             blocksize=self.blocksize,

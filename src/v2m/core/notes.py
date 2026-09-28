@@ -6,12 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, hz_to_midi, on_piano
+from .music import hz_to_midi, on_piano
+from .observation import DEFAULT_GAP_S, VoiceObservation
 from .onsets import Attacks
 
-DEFAULT_MIN_CONF = 0.6
 DEFAULT_MIN_NOTE_S = 0.060   # 60 ms
-DEFAULT_GAP_S = 0.050        # gaps < 50 ms are interpolated
 DEFAULT_SEMITONES = 0.5      # note break when |dmidi| > 0.5
 NEAR_MERGE_ST = 0.4          # merge segments whose medians are close
 ATTACK_TOL_S = 0.120         # an attack this close confirms a note start
@@ -21,15 +20,6 @@ SWEEP_THROUGH_ST = 0.4       # how far the middle may deviate from a straight pa
 SWEEP_TAIL_FRAMES = 3        # hand-over window (~60 ms)
 SWEEP_TAIL_ST = 0.30         # a glide is still moving through that window
 SAME_ONSET_S = 0.100         # two onsets this close are one articulation
-# f0 stabilization: a frame whose |df0/dt| exceeds this (semitones/second)
-# is a TRANSITION (portamento ramp, note hand-over), not a plateau. The
-# threshold sits ABOVE the vibrato peaks and BELOW the true ramps, both
-# measured on the truth harness: vibrato ±0.4 st peaks at 10 st/s, ±0.6 st
-# at 25 st/s, while a 90 ms legato glide reaches 17-85 st/s. A higher
-# value would keep ramp frames in the plateaus (a real take's slow drift
-# then reads as pitch); a lower one would shave the vibrato's turning
-# points into phantom micro-notes.
-TRANSITION_ST_S = 40.0
 # A singer's systematic offset absorbed by _measure_tuning_offset: beyond
 # this the take is TRANSPOSED (or misread), not out of tune — absorbing it
 # would re-key the melody.
@@ -65,86 +55,6 @@ class Note:
     @property
     def duration(self) -> float:
         return self.end - self.start
-
-
-def clean_pitch(track, min_conf: float = DEFAULT_MIN_CONF) -> None:
-    """Median filter against octave jumps + masking of unvoiced frames.
-
-    Modifies track.hz / track.confidence in place.
-
-    `min_conf` is accepted for API stability but is NOT applied as a hard
-    mask, and that refusal is measured, twice: pYIN scores every TRANSITION
-    frame low (a glide in a 93 ms window is noise — measured on the truth
-    harness, every frame of a 250 ms portamento carries vprob 0.016-0.62)
-    while a breath ON a held note scores 0.49-0.59. Any threshold that
-    excludes the breath also masks the glide, breaking `_attach_run`'s
-    fusion (5 truth cases); a local-density variant (mask isolated doubt,
-    keep collective doubt) shifted chant.wav's refined tempo 171.0 -> 153.5
-    and broke a measure closure (102/96 divisions) — refused. The mask
-    therefore only drops UNVOICED frames (`confidence == 0`, i.e. no f0):
-    with the old binary flag it was already a no-op, and the voicing doubt
-    now travels OUT instead — Note.confidence carries the real vprob, so
-    report.json, the MIDI velocities and the MusicXML colors mean something.
-    """
-    hz = track.hz.copy()
-    voiced = ~np.isnan(hz) & (track.confidence > 0.0)
-    if voiced.sum() < 3:
-        track.hz = np.where(voiced, hz, np.nan)
-        track.confidence = np.where(voiced, track.confidence, 0.0)
-        track.transition = np.zeros(len(track.hz), dtype=bool)
-        return
-
-    midi = hz_to_midi(hz)
-    dt = float(np.median(np.diff(track.times))) if len(track.times) > 1 else 0.01
-    # median filter (odd window ~ 5 frames) to remove octave jumps
-    med = midi.copy()
-    k = 2
-    idx = np.arange(len(midi))
-    for i in idx[voiced]:
-        lo, hi = max(0, i - k), min(len(midi), i + k + 1)
-        seg = midi[lo:hi][~np.isnan(midi[lo:hi])]
-        if len(seg):
-            med[i] = np.median(seg)
-    # second pass: keep frames close to the median (< 1 semitone)
-    ok = voiced & (np.abs(midi - med) < 1.0)
-    ok &= voiced & (med >= PIANO_MIN_MIDI) & (med <= PIANO_MAX_MIDI)
-    # vibrato smoothing: 9-frame median (~90 ms) — reduces vibrato while
-    # PRESERVING sharp note transitions (a median does not blur hard edges,
-    # unlike a moving average).
-    smoothed = _median_filter_nan(med, k=4)
-    smoothed = np.where(np.isnan(med), np.nan, smoothed)
-    # f0 stabilization (AGENTS.md): where the pitch DERIVATIVE exceeds the
-    # transition threshold the curve is MOVING (portamento ramp, note
-    # hand-over). Those frames stay in the curve — the hysteresis and the
-    # hand-over heuristics were calibrated with them, and masking them out
-    # would open fake gaps under every legato slide (a sounding glide is
-    # not a rest) — but they are MARKED so `_Segment.pitch` estimates a
-    # note's height on its STABLE PLATEAU only. The mask is dilated one
-    # frame on each side: a median-smoothed ramp edge still reads ~half
-    # the true slope at the exact boundary.
-    slope = np.abs(np.gradient(smoothed)) / dt
-    moving = np.nan_to_num(slope, nan=0.0) > TRANSITION_ST_S
-    dilated = moving.copy()
-    dilated[1:] |= moving[:-1]
-    dilated[:-1] |= moving[1:]
-    track.transition = dilated & ok
-    track.hz = np.where(ok, 440.0 * 2.0 ** ((smoothed - 69.0) / 12.0), np.nan)
-    track.confidence = np.where(ok, track.confidence, 0.0)
-
-
-def _median_filter_nan(x: np.ndarray, k: int = 4) -> np.ndarray:
-    """Median filter (2k+1 window) ignoring NaNs, edge-preserving."""
-    n = len(x)
-    if k < 1 or n == 0:
-        return x
-    out = np.array(x, dtype=float, copy=True)
-    for i in range(n):
-        lo, hi = max(0, i - k), min(n, i + k + 1)
-        seg = x[lo:hi]
-        seg = seg[~np.isnan(seg)]
-        if len(seg):
-            out[i] = float(np.median(seg))
-    return out
 
 
 @dataclass
@@ -818,25 +728,31 @@ def _fuse_close(segments: list[_Segment], gap_s: float) -> list[_Segment]:
     return fused
 
 
-def track_to_notes(
-    track,
-    sr: int,
-    min_conf: float = DEFAULT_MIN_CONF,
+def interpret(
+    observation: VoiceObservation,
     min_note_s: float = DEFAULT_MIN_NOTE_S,
     gap_s: float = DEFAULT_GAP_S,
     semitones: float = DEFAULT_SEMITONES,
-    attacks: Attacks | None = None,
-    tuning_out: dict | None = None,
 ) -> list[Note]:
-    """Segment the cleaned pitch curve into notes (start, end, midi).
+    """Read the observation's evidence into notes (start, end, midi).
 
-    `attacks` (see onsets.detect_attacks) tells a real note start from a
-    legato glide; without it the segmentation falls back on geometry only.
-    `tuning_out`, when given, receives the measured global tuning offset
-    (`{"tuning_offset_st": float}`) — the return value is a plain list, so
-    the offset travels through this side channel instead of a module global.
+    The evidence is already CLEANED and measured: `VoiceObservation.
+    from_signal` owns `clean_pitch`, the attacks and the frame clock, so this
+    function only interprets what it carries — no `sr`, no `min_conf` (both
+    died with the old parameters: `sr` was never read, and the confidence
+    parameter is inert by ADR 0005).
+
+    `min_note_s` / `gap_s` / `semitones` keep their defaults HERE because
+    notes.py is the ONE writer of the segmentation policy (a 0.6 written in
+    the pipeline once detached the offline defaults from the tested ones).
+
+    Writing `observation.tuning_offset_st` is this pass's one side effect:
+    the take's systematic offset is measured on the candidate plateaus,
+    before rounding, and the caller reads it back from the same object (it
+    used to travel through a `tuning_out` dict side channel).
     """
-    clean_pitch(track, min_conf=min_conf)
+    track = observation.pitch
+    attacks = observation.attacks
     midi = hz_to_midi(track.hz)
     times = track.times
 
@@ -883,8 +799,7 @@ def track_to_notes(
     # the nearest semitone, applied before rounding (otherwise every note
     # rounds on the wrong side)
     offset = _measure_tuning_offset([fp for _, fp in candidates])
-    if tuning_out is not None:
-        tuning_out["tuning_offset_st"] = offset
+    observation.tuning_offset_st = offset
     notes: list[Note] = []
     for s, fp in candidates:
         adjusted = fp - offset
@@ -915,8 +830,10 @@ def track_to_notes(
     # undo the cut, so this pass runs after it)
     merged = _split_rearticulated(merged, attacks, hz_to_midi(track.hz), times)
 
-    # temporal snap: center note starts/ends on the frame
-    frame_dt = float(np.median(np.diff(times))) if len(times) > 1 else 0.01
+    # temporal snap: center note starts/ends on the frame — the frame clock
+    # is a field of the observation (one owner; a hand-built observation that
+    # left it unset falls back on the analysis frame length)
+    frame_dt = observation.frame_dt if observation.frame_dt > 0 else 0.01
     for n in merged:
         n.start = max(0.0, n.start - frame_dt / 2)
         n.end = n.end + frame_dt / 2

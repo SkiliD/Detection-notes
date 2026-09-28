@@ -1,22 +1,22 @@
-"""Contrôles sur une partition MusicXML exportée (support de test, pas de code).
+"""Checks on an exported MusicXML score (test support, not shipped code).
 
-Le même contrat sert aux deux endroits qui jugent une partition : le filet de
-référence, qui compare des octets, et les cas synthétiques, qui exercent ce que
-les prises réelles ne contiennent pas. Écrire le contrôle une fois évite qu'ils
-divergent.
+The same contract serves the two places that judge a score: the
+reference net, which compares bytes, and the synthetic cases, which
+exercise what the real takes never contain. Writing the check once
+keeps them from diverging.
 
-Le juge n'est pas la table de l'export mais l'arithmétique de MusicXML : une
-blanche vaut deux noires, un point ajoute la moitié, un triolet prend les deux
-tiers. C'est le seul point de vue qui puisse voir un `<type>` mentir sur sa
-`<duration>`, puisque les deux chiffres viennent de chemins différents dans
-l'export (la durée de l'analyse, le type du catalogue des valeurs écrites).
+The judge is not the export's table but MusicXML's arithmetic: a half
+is two quarters, a dot adds half, a triplet takes two thirds. That is
+the only vantage that can see a `<type>` lie about its `<duration>`,
+since the two numbers come from different paths in the export (the
+analysis's duration, the written-values catalogue's type).
 """
 
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
-# Durée de chaque type, dans les divisions de l'export (24 par noire).
+# Duration of each type, in the export's divisions (24 per quarter).
 BASE_DIVISIONS = {
     "whole": 96.0,
     "half": 48.0,
@@ -28,19 +28,19 @@ BASE_DIVISIONS = {
 
 
 def score_root(xml: str) -> ET.Element:
-    """L'arbre d'un score exporté, sans sa DOCTYPE (une DTD externe)."""
+    """The tree of an exported score, without its DOCTYPE (an external DTD)."""
     return ET.fromstring(xml.split("?>", 1)[1])
 
 
 def text_of(el: ET.Element | None) -> str:
-    """Le texte d'un élément requis : absent ou vide, le fichier est invalide."""
+    """The text of a required element: absent or empty, the file is invalid."""
     if el is None or el.text is None:
-        raise AssertionError("élément requis absent du score exporté")
+        raise AssertionError("required element missing from the exported score")
     return el.text
 
 
 def written_divisions(note: ET.Element) -> float:
-    """Durée qu'annonce le `<type>` écrit, points et triolet compris."""
+    """The duration the written `<type>` announces, dots and triplet included."""
     divisions = BASE_DIVISIONS[text_of(note.find("type"))] * (
         2.0 - 2.0 ** -len(note.findall("dot"))
     )
@@ -50,23 +50,23 @@ def written_divisions(note: ET.Element) -> float:
 
 
 def assert_measures_close(root: ET.Element, label: str) -> None:
-    """Chaque mesure totalise sa signature, et aucun `<type>` ne ment.
+    """Every measure totals its signature, and no `<type>` lies.
 
-    La longueur de mesure est calculée depuis le fichier lui-même (`beats` ×
-    divisions × 4 / valeur du temps), donc 6/8 vaut 36 divisions comme un
-    importateur le lirait — le contrôle ne connaît pas la Grille.
+    The measure length is computed from the file itself (`beats` x
+    divisions x 4 / beat-type), so 6/8 is 36 divisions the way an
+    importer would read it — the check knows nothing about the Grid.
     """
     attrs = root.find("part/measure/attributes")
-    assert attrs is not None, "attributs de mesure absents"
+    assert attrs is not None, "measure attributes missing"
     divisions = int(text_of(attrs.find("divisions")))
     beats = int(text_of(attrs.find("time/beats")))
     beat_type = int(text_of(attrs.find("time/beat-type")))
     measure = beats * 4 * divisions // beat_type
     for m in root.findall("part/measure"):
-        where = f"{label} mesure {m.get('number')}"
+        where = f"{label} measure {m.get('number')}"
         notes = m.findall("note")
         total = sum(int(text_of(n.find("duration"))) for n in notes)
-        assert total == measure, f"{where} : la mesure totalise {total} / {measure}"
+        assert total == measure, f"{where} : the measure totals {total} / {measure}"
         for n in notes:
             duration = int(text_of(n.find("duration")))
             assert abs(written_divisions(n) - duration) < 1e-9, (

@@ -35,6 +35,11 @@ MIN_RMS = 0.006        # absolute floor: silence never produces an attack
 MIN_GAP_S = 0.060      # two attacks closer than this are the same event
 MIN_SCORE = 1.0        # peak height required, in units of the reference ratio
 MIN_STRENGTH = 0.20    # relative floor: a breath-noise ripple is not an attack
+# Samples per ACCENT-envelope frame: the envelope the per-note accent is
+# read on. Finer than the detector's 20 ms one, and deliberately separate
+# from it (AGENTS.md measured that fusing the two moves strengths without
+# changing one decision). The observation carries these values.
+ACCENT_HOP = 256
 BASELINE_MS = 400.0    # slow baseline: a phrase, not a single note
 CHARACTER_HZ = 4000.0  # consonant bursts are broadband: look above the harmonics
 FLUX_REF = 25.0        # rms-relative character-band flux of a consonant burst
@@ -62,6 +67,7 @@ FLATNESS_TRIGGER = 0.20
 # already decayed to the burst's own level and no threshold separates
 # anything from it anymore. Measured margins: bursts <= 0.74, glides >= 0.87.
 DIP_RATIO = 0.80
+
 # ...and the dip must be INTERNAL to the block: a consonant burst DIPS the
 # vowel inside its own block (the burst rides silence — sub-window rms
 # measured 0.004-0.007 vs the note's 0.054-0.058), while a RELEASE block
@@ -72,7 +78,20 @@ DIP_RATIO = 0.80
 # fragment (measured: the voice-accuracy grave/haute lines, +1 fragment).
 SUBWINDOWS = 8
 SUBWINDOW_DIP = 0.20
-
+# A level-RISE attack must be preceded by a DEEP dip of the level (a real
+# re-attack is separated from the previous note by a gap or a glottal
+# closure: measured 0.0-0.2x the recent peak; an amplitude tremolo never
+# dips below ~0.4x even at ±60 % depth — measured — so without this
+# guard every rise of a deep tremolo cleared STREAM_LEVEL and a held note
+# split on every cycle, 7-10 "notes" for one sung note). A real re-attack
+# is preceded by a NEAR-SILENT gap or glottal closure (0.0-0.2x measured).
+# The consonant-burst path is unaffected (it has its own
+# flatness+internal-dip test); the floor of the comparison is
+# STREAM_FLOOR so SILENCE (before the first note, rms 0 against a zero
+# peak) counts as deep. Window: the rise follows its dip within a few
+# blocks.
+DEEP_DIP_RATIO = 0.25
+DEEP_DIP_WINDOW_S = 0.25
 
 @dataclass
 class Attacks:
@@ -162,16 +181,76 @@ def detect_attacks(y: np.ndarray, sr: int, frame_ms: float = FRAME_MS) -> Attack
         # a relative floor removes the ripples without touching consonants.
         keep = strengths >= MIN_STRENGTH
         times, strengths = times[keep], strengths[keep]
+    # Second evidence, the offline twin of the live seam witness: a
+    # GLOTTAL RE-EMISSION has no consonant and no burst — the envelope
+    # dips to near-silence (~30 ms) and recovers on the SAME pitch. Its
+    # edge is flat (no flux: the spectrum keeps its shape) and its level
+    # ratio never clears the take's strongest onset, so neither detector
+    # above fires (measured: a full legato phrase of re-emitted notes read
+    # ONE note offline). A near-silent trough INSIDE a sounding phrase is
+    # a re-attack: date it at the recovery with a full strength. Guards,
+    # all measured: the reference is the LOCAL peak (rolling max ~0.5 s) —
+    # against the take's global peak a quiet passage of a wide-dynamics
+    # take sat under the ratio everywhere and peppered chant.wav with fake
+    # attacks (tempo 171 -> 155); the trough must be SHORT (<= 3 frames,
+    # 60 ms — the live SPLIT_FRAMES contract): a rest between phrases
+    # recovers too but its silence is LONGER, and firing on its edge cost
+    # demo.wav a spurious split; and the phrase must actually sound around
+    # it (local peak >= MIN_RMS).
+    if len(rms):
+        from scipy.ndimage import maximum_filter1d
+
+        local_peak = maximum_filter1d(rms, size=max(3, int(0.5 / (frame_ms / 1000.0))))
+        deep = np.flatnonzero(
+            (rms < DEEP_DIP_RATIO * local_peak) & (local_peak >= MIN_RMS))
+        dip_events = []
+        if len(deep):
+            splits = np.where(np.diff(deep) > 2)[0]
+            for grp in np.split(deep, splits + 1):
+                a, b = int(grp[0]), int(grp[-1])
+                if b - a + 1 > 3:
+                    continue  # a rest, not a closure
+                if b + 3 < len(rms) and rms[b + 1 : b + 4].max() >= DEEP_DIP_RATIO * local_peak[b]:
+                    dip_events.append(b + int(np.argmax(rms[b + 1 : b + 4])))
+            added = []
+            for c in dip_events:
+                t_c = c * frame_ms / 1000.0
+                if all(abs(t_c - t) > MIN_GAP_S for t in times):
+                    added.append(t_c)
+            if added:
+                times = np.concatenate([times, np.asarray(added)])
+                strengths = np.concatenate(
+                    [strengths, np.full(len(added), 1.0)])
+                order = np.argsort(times)
+                times, strengths = times[order], strengths[order]
     return Attacks(np.asarray(times, dtype=float), strengths)
 
 
-def compute_onset_strengths(notes, y: np.ndarray, sr: int) -> None:
-    """Fill `note.strength` (0..1) from the audio envelope at each onset.
+def accent_envelope(y: np.ndarray, hop: int = ACCENT_HOP) -> np.ndarray:
+    """The accent RMS envelope: one smoothed value per `hop` samples.
 
-    The signal is cut into small RMS frames; a note's strength is the peak
-    envelope around its start, normalized against the recording's own
-    quiet/floor percentiles — so accents are RELATIVE within one take,
-    which is what meter phase discrimination needs (no absolute loudness).
+    The observation computes it once and carries it, so the per-note accent
+    is a second pass over evidence that already exists (no audio retained,
+    no envelope recomputed).
+    """
+    if hop < 1 or len(y) == 0:
+        return np.zeros(0, dtype=float)
+    n_frames = len(y) // hop
+    if n_frames < 1:
+        return np.zeros(0, dtype=float)
+    frames = np.asarray(y[: n_frames * hop], dtype=np.float64).reshape(n_frames, hop)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    return np.convolve(rms, np.ones(3) / 3, mode="same")  # ~3-frame smoothing
+
+
+def compute_onset_strengths(observation, notes) -> None:
+    """Fill `note.strength` (0..1) from the observation's accent envelope.
+
+    A note's strength is the peak envelope around its start, normalized
+    against the take's own quiet/floor percentiles — so accents are RELATIVE
+    within one take, which is what meter phase discrimination needs (no
+    absolute loudness). The envelope comes from the observation (its own hop
+    and rate), never recomputed here.
 
     The window is deliberately ASYMMETRIC (2 frames back, 7 forward):
     the segmenter dates a note at its first stable-pitch frame, which can
@@ -183,15 +262,14 @@ def compute_onset_strengths(notes, y: np.ndarray, sr: int) -> None:
     """
     if not notes:
         return
-    hop = 256
-    n_frames = len(y) // hop
-    if n_frames < 4:
+    env = observation.accent_envelope
+    hop = observation.accent_hop or ACCENT_HOP
+    sr = observation.sample_rate
+    if env is None or len(env) < 4:
         for n in notes:
             n.strength = 0.5
         return
-    frames = np.asarray(y[: n_frames * hop], dtype=np.float64).reshape(n_frames, hop)
-    rms = np.sqrt(np.mean(frames ** 2, axis=1))
-    env = np.convolve(rms, np.ones(3) / 3, mode="same")  # ~3-frame smoothing
+    n_frames = len(env)
     floor = float(np.percentile(env, 20))
     span = max(float(np.percentile(env, 98)) - floor, 1e-9)
     for n in notes:
@@ -237,8 +315,9 @@ class AttackTracker:
     level_ratio: float = STREAM_LEVEL
     floor_rms: float = STREAM_FLOOR
     min_gap_s: float = MIN_GAP_S
-    strength: float = 0.0      # level rise of the LAST attack, 0..1
-    peak_ratio: float = 0.0    # loudest attack ratio so far (normalization)
+    strength: float = 0.0      # accent of the LAST attack: level vs recent peak
+    peak_ratio: float = 0.0    # biggest floor rise so far (diagnostic)
+    max_silent_ratio: float = 0.0  # biggest silent-floor rise seen (diagnostic)
     alpha: float = STREAM_ALPHA
     alpha_down: float = STREAM_ALPHA_DOWN
     recent: deque = field(default_factory=lambda: deque(maxlen=MAX_RECENT))
@@ -249,6 +328,7 @@ class AttackTracker:
     _primed: bool = False
     _hf_floor: float = 0.0        # recent LOW of the spectral flatness
     _peak_rms: float = 0.0        # recent HIGH of the level (dip reference)
+    _last_deep_t: float = -1e9    # last DEEP level dip (loud attacks need one)
 
     @staticmethod
     def level(block: np.ndarray) -> float:
@@ -300,6 +380,10 @@ class AttackTracker:
             self._peak_rms = rms
         else:
             self._peak_rms += 0.02 * (rms - self._peak_rms)
+        # a DEEP dip marks the level: the next rise within the window is a
+        # re-attack from a gap/closure, not a tremolo cycle (DEEP_DIP_RATIO)
+        if rms < max(DEEP_DIP_RATIO * self._peak_rms, self.floor_rms):
+            self._last_deep_t = t
         attack = False
         # a burst rides a live note: the block must carry real energy vs the
         # recent peak (a RATIO, not STREAM_FLOOR — a quiet take's bursts sit
@@ -328,6 +412,8 @@ class AttackTracker:
                 sub = np.sqrt((x.reshape(-1, SUBWINDOWS) ** 2).mean(axis=1))
                 dips = float(sub.min()) < SUBWINDOW_DIP * self._peak_rms
             spaced = (t - self._last_t) >= self.min_gap_s
+            deep_ok = (t - self._last_deep_t) <= DEEP_DIP_WINDOW_S
+            loud = loud and deep_ok
             attack = bool((loud or (burst_like and dips)) and spaced)
         if attack:
             self._last_t = t
@@ -340,7 +426,20 @@ class AttackTracker:
             # attack to 1.0: the threshold is a floor, not a reference.)
             ratio = rms / max(self.floor_rms_seen, 1e-9)
             self.peak_ratio = max(self.peak_ratio, ratio)
-            self.strength = min(1.0, ratio / max(self.peak_ratio, 1e-9))
+            self.max_silent_ratio = max(self.max_silent_ratio, ratio)
+            # The accent measure is the LEVEL against the recent LEVEL PEAK
+            # (peak_rms, ~1 s decay), NOT the re-armed floor: every gap
+            # empties that floor to silence, so every mid-take attack read
+            # "risen from silence" and the normalization degenerated —
+            # measured, a full melody with gaps came out all-zero accents
+            # and the meter went blind. Against the peak the measure is
+            # bounded 0..1 and keeps the take's dynamics: a note half as
+            # loud reads ~0.5, the contrast the meter's thresholds expect.
+            # (An earlier attempt normalized against the loudest
+            # floor-ratio and made the take's first onset — rising from the
+            # pre-take noise floor, ratio 1e8 — flatten every later
+            # strength to ~0; max_silent_ratio keeps that diagnostic.)
+            self.strength = min(1.0, rms / max(self._peak_rms, 1e-9))
             # re-arm the flatness reference at the burst's own value: the
             # SAME consonant cannot fire twice while its flatness decays back
             # to the vowel's (~2 blocks, alpha above)
@@ -356,6 +455,13 @@ class AttackTracker:
                 # 0.60 s) with the second block at 1.7x the dipped floor.
                 self.baseline_rms = rms
                 self.floor_rms_seen = rms
+                # the loud attack CONSUMES its deep dip: every real
+                # re-attack carries its own gap/closure before it, so a
+                # stale mark must not license the NEXT rise (measured on an
+                # amplitude tremolo: the mark left over from the real note
+                # start fired the first AM cycle 0.19 s later; deeper AM
+                # re-marked every trough and split the note on every cycle)
+                self._last_deep_t = -1e9
         elif rms < self.baseline_rms:
             # the level fell (a gap, a breath between two phrases): follow it
             # DOWN faster than it climbs, so the next note — even at the same
@@ -370,9 +476,11 @@ class AttackTracker:
         self.baseline_rms = 0.0
         self.floor_rms_seen = 0.0
         self.peak_ratio = 0.0
+        self.max_silent_ratio = 0.0
         self.strength = 0.0
         self._hf_floor = self.hf_ratio
         self._peak_rms = 0.0
         self.recent.clear()
         self._last_t = -1e9
         self._primed = False
+        self._last_deep_t = -1e9

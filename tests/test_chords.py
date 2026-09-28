@@ -91,8 +91,8 @@ def test_segments_cover_long_recording():
 
 
 def test_segments_are_adjacent_windows_not_overlapping_ones():
-    """Régression : les fenêtres se recouvraient de moitié (pas de 1 s), donc
-    chaque accord sortait deux fois dans le JSON et dans le tableau."""
+    """Regression: the windows overlapped by half (step of 1 s), so every
+    chord came out twice in the JSON and in the table."""
     notes = []
     t = 0.0
     for pc in (0, 4, 7, 0, 4, 7, 0, 4):

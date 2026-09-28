@@ -19,7 +19,7 @@ def test_estimate_live_120():
 
 
 def test_estimate_live_folds_octave():
-    # gaps de 1 s (60 BPM)... médiane -> 60 ; dans le range directement
+    # gaps of 1 s (60 BPM)... median -> 60; inside the range directly
     notes = _notes_at_beats(60.0, 6)
     bpm = estimate_bpm_live(notes)
     assert bpm is not None and 50.0 <= bpm <= 130.0
@@ -31,11 +31,11 @@ def test_estimate_live_too_few_notes():
 
 
 def test_estimate_live_dotted_pulse_corrects_to_quarter():
-    """Temps pointés avec alternance forte/faible : la médiane est un temps
-    POINTÉ, le vrai tempo est ×1,5 — le repli ×2 ne répare jamais ce rapport.
+    """Dotted beats with a strong/weak alternation: the median is a DOTTED
+    beat, the true tempo is x1.5 — the x2 fold never repairs that ratio.
 
-    Cas 6/8 réel : des temps pointés à 100 BPM (1,5 noire, gaps de 0,9 s)
-    donnaient 66,7 BPM publiés pendant toute la prise.
+    Real 6/8 case: dotted beats at 100 BPM (1.5 quarters, 0.9 s gaps)
+    published 66.7 BPM for the whole take.
     """
     from v2m.core.notes import Note
 
@@ -49,9 +49,9 @@ def test_estimate_live_dotted_pulse_corrects_to_quarter():
 
 
 def test_estimate_live_flat_dotted_gaps_keep_octave_fold():
-    """Sans alternance (forces plates), pas de correction ×1,5 : les écarts
-    restent lus comme des noires et le repli d'octave ×2 s'applique tel quel
-    — limite assumée, gelée par l'épingle dédiée de test_live_grid_policy.
+    """Without an alternation (flat strengths), no x1.5 correction: the
+    gaps stay read as quarters and the x2 octave fold applies as is —
+    an accepted limit, frozen by test_live_grid_policy's dedicated pin.
     """
     from v2m.core.notes import Note
 
@@ -60,5 +60,5 @@ def test_estimate_live_flat_dotted_gaps_keep_octave_fold():
         for i in range(8)
     ]
     bpm = estimate_bpm_live(notes)
-    # 40 BPM -> repli x2 -> 80 ; jamais 60 (le tempo 1,5x)
+    # 40 BPM -> x2 fold -> 80; never 60 (the 1.5x tempo)
     assert bpm is not None and abs(bpm - 80.0) <= 2.0

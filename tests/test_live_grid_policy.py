@@ -219,13 +219,13 @@ def test_livetake_publishes_the_detected_meter(monkeypatch):
 
 
 def test_livetake_publishes_compound_meter_on_dotted_pulse(monkeypatch):
-    """Une prise sur temps pointés (6/8) est publiée avec sa mesure en direct.
+    """A take on dotted beats (6/8) is published with its meter live.
 
-    La chaîne complète : estimate_bpm_live corrige la médiane (un temps
-    pointé avec alternance forte/faible vaut 1,5 noire — le repli ×2 ne
-    répare jamais ce rapport), puis detect_meter saute l'étape accents (qui
-    lirait les phases 0/2 de la grille ternaire comme une fausse valse) et
-    conclut 6/8 sur la grille ternaire. Le métronome live lit exactement
+    The full chain: estimate_bpm_live corrects the median (a dotted beat
+    with a strong/weak alternation is 1.5 quarters — the x2 fold never
+    repairs that ratio), then detect_meter skips the accents stage (which
+    would read the ternary grid's phases 0/2 as a false waltz) and
+    concludes 6/8 on the ternary grid. The live metronome reads exactly
     `grid.meter.n_slots`.
     """
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
@@ -247,11 +247,11 @@ def test_livetake_publishes_compound_meter_on_dotted_pulse(monkeypatch):
 
 
 def test_livetake_flat_dotted_pulse_stays_default(monkeypatch):
-    """Limite assumée : sans alternance forte/faible, les écarts pointés
-    restent indistinguables de noires lents — le repli d'octave ×2 s'applique
-    (80 BPM ici, jamais les 100 du tempo composé) et la mesure reste 4/4.
-    Le discriminant timing-seul n'existe pas : des écarts uniformes
-    décrivent aussi bien « noires à 2/3 du tempo » que « temps pointés ».
+    """Accepted limit: without a strong/weak alternation, dotted gaps
+    stay indistinguishable from slow quarters — the x2 octave fold applies
+    (80 BPM here, never the 100 of the compound tempo) and the meter stays
+    4/4. A timing-only discriminator does not exist: uniform gaps describe
+    "quarters at 2/3 of the tempo" just as well as "dotted beats".
     """
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
     monkeypatch.setattr(live_session, "LivePitchStream", FlatDottedStream)

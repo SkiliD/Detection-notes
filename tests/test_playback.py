@@ -176,7 +176,7 @@ def test_replaying_replaces_the_single_stream(monkeypatch):
         time.sleep(0.005)
     assert session.playing
     assert len(streams) == 2
-    assert all(s.closed for s in streams[:-1]), "rejouer ferme le flux précédent"
+    assert all(s.closed for s in streams[:-1]), "replaying closes the previous stream"
     session.stop()
     assert not session.playing
 
@@ -202,7 +202,7 @@ def test_playback_position_advances(monkeypatch):
     session.set_sources(piano=render_notes(_notes(200), sr=22050))  # ~20 s
     assert session.play("piano")
     time.sleep(0.05)
-    assert session.playing, "la lecture doit durer assez pour être observée"
+    assert session.playing, "the playback must last long enough to be observed"
     first = session.position()
     time.sleep(0.05)
     assert session.position() > first
@@ -214,7 +214,7 @@ def test_pitch_shift_keeps_duration_and_changes_pitch():
     sr = 22050
     y = sine_note_like(220.0, 1.0, sr)
     up = pitch_shift_signal(y, 3.0, sr)
-    assert len(up) == len(y), "la durée ne doit pas bouger (synchro avec le piano)"
+    assert len(up) == len(y), "the duration must not move (sync with the piano)"
     assert not np.allclose(up, y)
     assert np.max(np.abs(up)) > 0.1
     same = pitch_shift_signal(y, 0, sr)
@@ -258,7 +258,7 @@ def test_timeline_clamps_seconds_and_samples():
 
 
 # ---------------------------------------------------------------------------
-# Un piano qui ne sonne pas mécanique (retour utilisateur : "trop robotique")
+# A piano that does not sound mechanical (user feedback: "trop robotique")
 # ---------------------------------------------------------------------------
 
 
@@ -267,11 +267,11 @@ def _one_note(midi=60, strength=0.5, start=0.0, dur=0.5):
 
 
 def test_render_follows_the_take_dynamics():
-    """La vélocité de chaque touche suit l'accent mesuré de la prise :
-    DANS un même rendu, une note forte sort plus forte qu'une faible — la
-    normalisation globale aligne le sommet du rendu mais garde les
-    rapports entre notes (une note seule est renormalisée, sans contexte,
-    ce qui ne se entend pas)."""
+    """Every key's velocity follows the take's measured accent: WITHIN one
+    render, a loud note comes out louder than a soft one — the global
+    normalization aligns the render's peak but keeps the ratios between
+    notes (a lone note is renormalized, context-free, which is not
+    audible)."""
     notes = [
         _one_note(start=0.0, dur=0.4, strength=1.0),
         _one_note(start=0.5, dur=0.4, strength=0.0),
@@ -287,22 +287,65 @@ def test_render_follows_the_take_dynamics():
 
 
 def test_render_is_deterministic_and_humanized():
-    """Deux rendus des mêmes notes sont IDENTIQUES (l'humanisation n'est
-    pas du hasard), et une note de plus d'un temps n'occupe pas toute sa
-    durée écrite (le damper lève la touche un peu tôt)."""
-    notes = [_one_note(dur=0.8)]
+    """Two renders of the same notes are IDENTICAL (humanization is not
+    randomness), and a SHORT note (< 0.35 s) does not occupy its whole
+    written duration: the damper lifts the key a little early."""
+    notes = [_one_note(dur=0.3)]
     a = render_notes(notes, sr=22050)
-    b = render_notes([_one_note(dur=0.8)], sr=22050)
+    b = render_notes([_one_note(dur=0.3)], sr=22050)
     assert np.array_equal(a, b)
     # the tail is quiet before the nominal end: the key was lifted early
-    tail = a[int(0.75 * 22050) : int(0.79 * 22050)]
+    tail = a[int(0.293 * 22050) : int(0.299 * 22050)]
     assert float(np.max(np.abs(tail))) < 0.2 * float(np.max(np.abs(a)))
 
 
+def test_a_held_note_rings_through_a_pedal_tail():
+    """The pedal (user request): a HELD note (>= 0.35 s) keeps resonating
+    after the key is lifted — the tail decays but stays audible beyond
+    the written end, then dies out (the pedal does not ring forever). A
+    short note, meanwhile, stays damped at the written end (previous
+    test).
+    """
+    from v2m.core import playback as pb
+
+    notes = [_one_note(dur=0.8)]
+    a = render_notes(notes, sr=22050)
+    dur = int(0.8 * 22050)
+    # beyond the written end (signal continues -> the render is longer now)
+    assert len(a) > dur + int(0.1 * 22050)
+    after = a[dur + int(0.03 * 22050) : dur + int(0.08 * 22050)]
+    assert float(np.max(np.abs(after))) > 0.1 * float(np.max(np.abs(a)))
+    # ...and the tail actually dies before its end (bounded pedal)
+    far = a[dur + int(pb.PEDAL_TAIL_MAX_S * 22050) - 50 : dur + int(pb.PEDAL_TAIL_MAX_S * 22050)]
+    assert float(np.max(np.abs(far))) < 0.05
+
+
+def test_velocity_brightens_the_tone():
+    """Velocity brightens the timbre (user request): at equal envelope
+    attack, a LOUD note keeps more energy in the upper partials than a
+    soft one (the partials' amplitude exponent depends on velocity).
+    Measured on the spectrum of the same instant: the 2..6 kHz / 0..1 kHz
+    energy ratio is larger for the loud note (the render is normalized:
+    the global level cannot lie).
+    """
+    loud = render_notes([_one_note(strength=1.0, dur=0.45)], sr=22050)
+    soft = render_notes([_one_note(strength=0.0, dur=0.45)], sr=22050)
+
+    def brightness(y):
+        win = y[int(0.05 * 22050) : int(0.20 * 22050)].astype(np.float64)
+        spec = np.abs(np.fft.rfft(win * np.hanning(len(win)))) ** 2
+        freqs = np.fft.rfftfreq(len(win), 1 / 22050)
+        hi = float(spec[(freqs >= 2000) & (freqs <= 6000)].sum())
+        lo = float(spec[freqs <= 1000].sum())
+        return hi / max(lo, 1e-12)
+
+    assert brightness(loud) > brightness(soft) * 1.15, (brightness(loud), brightness(soft))
+
+
 def test_render_notes_do_not_overlap_the_next_onset_too_much():
-    """Le décalage humain (une note faible part ~18 ms tard) reste sous la
-    fenêtre de collision : deux croches consécutives ne se recouvrent pas
-    au point de brouiller l'attaque de la suivante."""
+    """The human offset (a soft note starts ~18 ms late) stays under the
+    collision window: two consecutive eighths do not overlap to the point
+    of blurring the next attack."""
     notes = [_one_note(start=0.0, dur=0.3, strength=0.0), _one_note(start=0.3, dur=0.3, strength=0.0)]
     y = render_notes(notes, sr=22050)
     assert len(y) > int(0.62 * 22050)  # the shifted second note still renders

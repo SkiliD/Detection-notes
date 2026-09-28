@@ -126,7 +126,7 @@ def test_click_writer_carries_a_click_longer_than_the_block(qapp):
 
 
 # --------------------------------------------------------------------------- #
-# gui.widgets.TuningMeter : l'écart en cents
+# gui.widgets.TuningMeter: the cents offset
 # --------------------------------------------------------------------------- #
 
 
@@ -156,8 +156,8 @@ def test_live_indicator_publishes_cents(qapp):
 
 
 # --------------------------------------------------------------------------- #
-# widgets.tuning_color : une seule échelle verte/ambre/rouge pour le viseur
-# ET la touche du clavier
+# widgets.tuning_color: one green/amber/red scale for the meter
+# AND the keyboard key
 # --------------------------------------------------------------------------- #
 
 
@@ -179,7 +179,7 @@ def test_tuning_color_scale(qapp):
 
 
 # --------------------------------------------------------------------------- #
-# widgets.AccuracyHistory : justesse moyenne par note de la prise live
+# widgets.AccuracyHistory: per-note mean accuracy of the live take
 # --------------------------------------------------------------------------- #
 
 

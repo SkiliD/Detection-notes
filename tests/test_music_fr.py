@@ -4,13 +4,13 @@ import pytest
 
 
 def test_only_the_88_keys_of_a_classical_piano_are_notes():
-    """A0 (21) à C8 (108) : rien hors de ces touches n'est une note de piano."""
+    """A0 (21) to C8 (108): nothing outside these keys is a piano note."""
     assert (PIANO_MIN_MIDI, PIANO_MAX_MIDI) == (21, 108)
     assert len(range(PIANO_MIN_MIDI, PIANO_MAX_MIDI + 1)) == 88
-    assert on_piano(21) and on_piano(108)          # les deux touches extrêmes
-    assert on_piano(21.4) and on_piano(107.9)      # une hauteur entre deux touches
-    assert not on_piano(20.9) and not on_piano(108.1)   # juste dehors
-    # indécidable n'est pas une touche non plus : la garantie, pas l'à-peu-près
+    assert on_piano(21) and on_piano(108)          # both extreme keys
+    assert on_piano(21.4) and on_piano(107.9)      # a pitch between two keys
+    assert not on_piano(20.9) and not on_piano(108.1)   # just outside
+    # undecidable is not a key either: the guarantee, not an approximation
     assert not on_piano(float("nan")) and not on_piano(None) and not on_piano("so")
 
 from v2m.core.audio_io import AudioLoadError, load_file
@@ -39,7 +39,7 @@ def test_french_names_match_english_pitch_classes():
     for midi in range(21, 109):
         en = midi_to_name(midi)
         fr = midi_to_name_fr(midi)
-        # English letter matches the French initial (C/Do, D/Ré, E/Mi...)
+        # English letter matches the French initial (C/Do, D/Re, E/Mi...)
         assert en[0] in "CDEFGAB"
         assert fr[0] in "CDMFLRS"  # Do Ré Mi Fa Sol La Si initials
 

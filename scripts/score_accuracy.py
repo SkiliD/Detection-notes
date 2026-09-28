@@ -1,44 +1,42 @@
-"""Diagnostic : que fait la transcription d'une VRAIE prise, et où ça coince ?
+"""Diagnose what the transcription does to a REAL take, and where it strains.
 
-Usage :
-    python scripts/score_accuracy.py prise.wav [--truth verite.json] [--json rapport.json]
+Usage:
+    python scripts/score_accuracy.py take.wav [--truth truth.json] [--json report.json]
                                               [--no-attacks] [--compare] [--golden]
                                               [--diagnose] [--output DIR]
 
-Sur une prise réelle il n'y a pas de vérité terrain : le script imprime donc
-d'abord ce que le pipeline a trouvé (tempo, mesure, tonalité, accords, chaque
-note avec sa figure et sa position), puis les SIGNES de découpage douteux, qui
-sont ce qu'on regarde quand le résultat « sonne faux » :
+A real take has no ground truth, so the script first prints what the
+pipeline found (tempo, meter, key, chords, every note with its figure and
+position), then the SIGNS of doubtful segmentation — what you look at when
+the result "sounds wrong":
 
-- attaques orphelines     : une consonne détectée sans début de note — une
-                           note est peut-être manquée ;
-- débuts non articulés    : la note existe mais aucune attaque ne la date, le
-                           début est donc celui de la stabilisation de hauteur ;
-- fragments               : notes plus courtes que la confirmation (120 ms),
-                           typiques d'un glissando coupé en deux ;
-- comparaison attaques/géométrie : si les deux donnent le même nombre de
-                           notes, la preuve d'attaque ne sert à rien ici (ou
-                           l'enregistrement n'a pas de consonnes exploitables).
+- orphan attacks        : a consonant detected with no note start — a note
+                          may be missing;
+- unarticulated starts  : the note exists but no attack dates it, so its
+                          start is the pitch's stabilization point;
+- fragments             : notes shorter than confirmation (120 ms),
+                          typical of a glissando cut in two;
+- attacks-vs-geometry   : when both give the same note count, the attack
+                          evidence adds nothing here (or the recording has
+                          no exploitable consonants).
 
-`--truth verite.json` compare à des notes connues, au format
-`{"notes": [{"midi": 60, "start_s": 0.3, "dur_s": 0.6}, ...]}` (le même
-harnais que les tests, `tests/voicetruth.py`).
+`--truth truth.json` compares against known notes, in the format
+`{"notes": [{"midi": 60, "start_s": 0.3, "dur_s": 0.6}, ...]}` (the same
+harness as the tests, `tests/voicetruth.py`).
 
-`--compare` rejoue l'analyse une seconde fois (même fichier, même moteur,
-décodage inclus, sans exporter les artefacts) et compare les chiffres de
-segmentation — tempo, mesure, tonalité, chaque note, chaque respiration :
-toute différence est un défaut de déterminisme, et le code de sortie
-passe à 1.
+`--compare` replays the analysis a second time (same file, same engine,
+decoding included, no artifacts exported) and compares the segmentation
+numbers — tempo, meter, key, every note, every rest: any difference is a
+determinism defect, and the exit code becomes 1.
 
-`--diagnose` (audit des SEUILS, orthogonal à --compare) imprime quelles
-plages la prise a réellement exercées, pour ne jamais recalibrer un seuil
-sur une prise qui ne le teste pas : plage de hauteur courbe (f0 brut
-nettoyé) vs les bornes de lecture (65 Hz..2100 Hz) ; force des attaques
-normalisée (0..1, déciles) vs MIN_STRENGTH ; décalage systématique de
-l'accordage absorbé (cents) ; déviations de hauteurs résiduelles par
-deviation — les tranches qui décident du collage à la gamme (AMBIGUOUS_DEV_ST).
-Et le chemin LIVE rejoué en flux : latence d'affichage réelle (confirm_s),
-note en cours, et où est-ce qui se passe réellement en temps réel.
+`--diagnose` (a THRESHOLDS audit, orthogonal to --compare) prints which
+ranges the take actually exercised, so a threshold is never recalibrated
+on a take that does not test it: curve pitch range (cleaned raw f0) vs the
+reading bounds (65 Hz..2100 Hz); normalized attack strength (0..1,
+deciles) vs MIN_STRENGTH; the absorbed tuning offset (cents); residual
+pitch deviations by deviation — the bands that decide the key snap
+(AMBIGUOUS_DEV_ST). And the LIVE path replayed in stream: real display
+latency (confirm_s), the note in progress, and where real time is spent.
 """
 from __future__ import annotations
 
@@ -59,22 +57,22 @@ from v2m.core.pipeline import AnalyzeOptions, analyze_signal
 from v2m.core.report import export_result
 
 DEFAULT_AUDIO = "demo.wav"
-SKIP_PIPELINE_STAGES = ("décodage", "Terminé")
+SKIP_PIPELINE_STAGES = ("decoding", "Done")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Rapport de transcription d'une prise réelle")
-    p.add_argument("audio", nargs="?", default=DEFAULT_AUDIO, help="fichier audio à analyser")
-    p.add_argument("--truth", help="JSON de notes connues (vérité terrain)")
-    p.add_argument("--json", dest="json_out", help="écrire le rapport en JSON")
-    p.add_argument("--no-attacks", action="store_true", help="sans preuve d'attaque (géométrie seule)")
+    p = argparse.ArgumentParser(description="Transcription report for a real take")
+    p.add_argument("audio", nargs="?", default=DEFAULT_AUDIO, help="audio file to analyze")
+    p.add_argument("--truth", help="JSON of known notes (ground truth)")
+    p.add_argument("--json", dest="json_out", help="write the report as JSON")
+    p.add_argument("--no-attacks", action="store_true", help="without attack evidence (geometry only)")
     p.add_argument("--compare", action="store_true",
-                   help="rejoue l'analyse et vérifie la stabilité des chiffres de segmentation")
+                   help="replay the analysis and check the segmentation numbers' stability")
     p.add_argument("--golden", action="store_true",
-                   help="sauve l'empreinte de segmentation dans <audio>.golden.json")
+                   help="save the segmentation fingerprint to <audio>.golden.json")
     p.add_argument("--diagnose", action="store_true",
-                   help="audit des seuils : plages de hauteur, forces, déviations, chemin live")
-    p.add_argument("--output", help="dossier des artefacts exportés (défaut : temporaire)")
+                   help="thresholds audit: pitch ranges, strengths, deviations, the live path")
+    p.add_argument("--output", help="folder for the exported artifacts (default: temporary)")
     return p.parse_args(argv)
 
 
@@ -84,7 +82,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def analyze(path: str, use_attacks: bool, out_dir: Path):
-    """Analyse le fichier et renvoie (résultat, attaques détectées)."""
+    """Analyze the file and return (result, detected attacks)."""
     y = audio_io.load_file(path)
     result = analyze_signal(y, audio_io.SR, source=path, opts=AnalyzeOptions(use_attacks=use_attacks))
     found = detect_attacks(y, audio_io.SR)
@@ -93,20 +91,20 @@ def analyze(path: str, use_attacks: bool, out_dir: Path):
 
 
 def rests_line(result) -> str:
-    """Les silences écrits entre les phrases (respirations, pauses)."""
+    """The rests written between the phrases (breaths, pauses)."""
     from collections import Counter
 
     rests = getattr(result, "rests", None) or []
     if not rests:
-        return "  respirations : aucune (notes collées, ou écarts < 70 ms)"
-    counts = Counter(r.figure or "hors grille" for r in rests)
+        return "  breaths: none (glued notes, or gaps < 70 ms)"
+    counts = Counter(r.figure or "off grid" for r in rests)
     brief = ", ".join(f"{tr_figure(f)} ×{c}" for f, c in counts.items())
     times = ", ".join(f"{r.start:.2f}s ({r.duration:.2f}s)" for r in rests[:8])
-    return f"  respirations : {len(rests)} silence(s) écrit(s) — {brief}\n               {times}"
+    return f"  breaths: {len(rests)} rest(s) written — {brief}\n            {times}"
 
 
 def diagnostics(result, attacks, attacks_used: bool) -> dict:
-    """Ce qui, dans le découpage, mérite un coup d'œil."""
+    """What in the segmentation deserves a look."""
     onsets = [n.start for n in result.notes]
     articulated = sum(1 for t in onsets if attacks.near(t, ATTACK_TOL_S) is not None)
     orphans = [
@@ -140,22 +138,22 @@ def diagnostics(result, attacks, attacks_used: bool) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# --diagnose : quelles plages de seuils la prise a-t-elle exercées ?          #
+# --diagnose: which threshold ranges did the take actually exercise?          #
 # --------------------------------------------------------------------------- #
 
 
 def _deciles(values) -> list[float]:
-    """Les déciles d'une série, arrondis (vide -> [])."""
+    """A series' deciles, rounded (empty -> [])."""
     return [round(float(v), 3) for v in np.percentile(values, np.arange(0, 101, 10))] if len(values) else []
 
 
 def diagnose_thresholds(result) -> dict:
-    """Les plages réellement exercées par cette prise, seuil par seuil.
+    """The ranges this take actually exercised, threshold by threshold.
 
-    Raison d'être : recalibrer un seuil sur une prise qui ne le teste PAS
-    (plage de hauteur trop haute, aucune attaque faible, aucune déviation
-    ambiguë) est le faux pas le plus courant — le diagnostic le rend
-    visible. `result.pitch.transition` porte le masque de dérivée.
+    Reason to be: recalibrating a threshold on a take that does NOT test it
+    (too-high a pitch range, no weak attacks, no ambiguous deviation) is
+    the most common misstep — the diagnosis makes it visible.
+    `result.pitch.transition` carries the derivative mask.
     """
     from v2m.core.notes import AMBIGUOUS_DEV_ST, _measure_tuning_offset
     from v2m.core.onsets import MIN_STRENGTH as ONSET_MIN_STRENGTH
@@ -190,13 +188,18 @@ def diagnose_thresholds(result) -> dict:
 
 
 def live_diagnosis(path: str) -> dict:
-    """Le chemin temps réel, rejoué en flux : latence d'affichage réelle.
+    """The real-time path, replayed in stream: real display latency.
 
-    La latence mesurée est (premier moment où la note tenue est AFFICHÉE -
-    début de la prise) — confirm_s + le remplissage de la fenêtre de hold,
-    sur le flux de blocs réel. Renvoie aussi le nombre de notes live.
+    The measured latency is (first moment the held note is DISPLAYED -
+    take start) — confirm_s plus the hold window's fill, on the real
+    block stream. Also returns the live note count and the live/final
+    DIAGNOSIS: the contour count and the ONE policy's breakdown
+    (`core.compare` — the same net as the GUI marking and the JSON
+    block), not a local rule.
     """
+    from v2m.core.compare import breakdown
     from v2m.core.liveseg import LivePitchStream
+    from v2m.core.pipeline import analyze_signal as _analyze
 
     sr = audio_io.SR
     y = audio_io.load_file(path)
@@ -208,10 +211,16 @@ def live_diagnosis(path: str) -> dict:
         if first_on is None and stream.seg.state == "ACTIVE":
             first_on = t_end
     stream.seg.flush(len(y) / sr)
+    result = _analyze(y, sr, source=path, opts=AnalyzeOptions())
+    block = breakdown(stream.seg.notes, result.notes, result.grid)
     return {
         "notes": len(stream.seg.notes),
         "first_active_s": round(first_on, 3) if first_on is not None else None,
         "confirm_s": stream.seg.confirm_s,
+        "contours": block["contours"],
+        "off1": block["off1"],
+        "moved": block["moved"],
+        "rate": block["rate"],
     }
 
 
@@ -270,7 +279,7 @@ def report(result, diag: dict, attacks_used: bool, table: bool = True) -> str:
 
 
 def truth_accuracy(path: str, truth_path: str) -> str:
-    """Compare à des notes connues, avec le harnais des tests."""
+    """Compare against known notes, with the tests' harness."""
     root = Path(v2m.__file__).resolve().parents[2]
     if str(root / "tests") not in sys.path:
         sys.path.insert(0, str(root / "tests"))
@@ -287,10 +296,10 @@ def truth_accuracy(path: str, truth_path: str) -> str:
 
 # --------------------------------------------------------------------------- #
 def segmentation_fingerprint(result) -> dict:
-    """Les chiffres de segmentation qui doivent être stables d'une passe à l'autre.
+    """The segmentation numbers that must stay stable from one pass to the next.
 
-    Les tuples deviennent des listes : l'empreinte part aussi en JSON
-    (--golden) et doit survivre au round-trip json.dumps/json.loads.
+    Tuples become lists: the fingerprint also goes to JSON (--golden) and
+    must survive the json.dumps/json.loads round-trip.
     """
     return {
         "tempo_bpm": result.tempo.bpm if result.tempo else None,
@@ -308,12 +317,12 @@ def segmentation_fingerprint(result) -> dict:
 
 
 def golden_path(audio: str) -> Path:
-    """L'empreinte dorée d'une prise vit à côté d'elle : <audio>.golden.json."""
+    """A take's golden fingerprint lives beside it: <audio>.golden.json."""
     return Path(audio).with_suffix(".golden.json")
 
 
 def load_golden(audio: str) -> dict | None:
-    """L'empreinte enregistrée, None quand elle n'existe pas encore."""
+    """The recorded fingerprint, None when it does not exist yet."""
     path = golden_path(audio)
     if not path.exists():
         return None
@@ -321,14 +330,14 @@ def load_golden(audio: str) -> dict | None:
 
 
 def replay_fingerprint(path: str, use_attacks: bool) -> dict:
-    """Seconde passe complète (re-décodage compris, aucun artefact écrit)."""
+    """A full second pass (re-decoding included, no artifact written)."""
     y = audio_io.load_file(path)
     result = analyze_signal(y, audio_io.SR, source=path, opts=AnalyzeOptions(use_attacks=use_attacks))
     return segmentation_fingerprint(result)
 
 
 def compare_fingerprints(first: dict, second: dict) -> list[str]:
-    """Les différences entre deux passes, en lignes lisibles (vide = stable)."""
+    """The differences between two passes, as readable lines (empty = stable)."""
     lines = []
     for field in ("tempo_bpm", "meter", "key"):
         if first[field] != second[field]:
@@ -346,7 +355,7 @@ def compare_fingerprints(first: dict, second: dict) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not Path(args.audio).exists():
-        print(f"Fichier introuvable : {args.audio}")
+        print(f"File not found: {args.audio}")
         return 2
     out_dir = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix="v2m_score_"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -360,8 +369,8 @@ def main(argv: list[str] | None = None) -> int:
         d = diagnose_thresholds(result)
         d["live"] = live_diagnosis(args.audio)
         print("")
-        print("Diagnostic des seuils")
-        print("----------------------")
+        print("Thresholds diagnosis")
+        print("--------------------")
         pr = d["pitch_range_hz"]
         bounds = d["reading_bounds_hz"]
         print(
@@ -381,6 +390,10 @@ def main(argv: list[str] | None = None) -> int:
             f"  chemin live      : {lv['notes']} notes, confirm_s={lv['confirm_s']}, "
             f"première note active à {lv['first_active_s']} s"
         )
+        print(
+            f"  live/final       : contours {lv['contours']} "
+            f"(±1: {lv['off1']}, déplacées: {lv['moved']}), taux {lv['rate']*100:.0f}%"
+        )
 
     stable = True
     if args.compare:
@@ -388,30 +401,30 @@ def main(argv: list[str] | None = None) -> int:
         diffs = compare_fingerprints(segmentation_fingerprint(result), replay)
         stable = not diffs
         print("")
-        print("Stabilité (analyse rejouée)")
-        print("---------------------------")
-        print("  segmentation identique sur les deux passes" if stable else "\n".join(diffs))
+        print("Stability (replayed analysis)")
+        print("-----------------------------")
+        print("  segmentation identical on both passes" if stable else "\n".join(diffs))
 
     if args.golden:
         golden = load_golden(args.audio)
         current = segmentation_fingerprint(result)
         if golden is None:
-            # première visite : l'empreinte D'AUJOURD'HUI devient la référence
+            # first visit: TODAY's fingerprint becomes the reference
             golden_path(args.audio).write_text(json.dumps(current, indent=2), encoding="utf-8")
             print("")
-            print(f"Empreinte dorée créée : {golden_path(args.audio)}")
+            print(f"Golden fingerprint created: {golden_path(args.audio)}")
         else:
             diffs = compare_fingerprints(golden, current)
             stable &= not diffs
             print("")
-            print("Fidélité (comparée à l'empreinte dorée)")
-            print("---------------------------------------")
-            print("  segmentation identique à la référence" if not diffs else "\n".join(diffs))
+            print("Fidelity (against the golden fingerprint)")
+            print("-----------------------------------------")
+            print("  segmentation identical to the reference" if not diffs else "\n".join(diffs))
 
     if args.truth:
         print("")
-        print("Vérité terrain")
-        print("--------------")
+        print("Ground truth")
+        print("------------")
         print(truth_accuracy(args.audio, args.truth))
 
     payload = {
@@ -434,10 +447,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"\nRapport JSON : {args.json_out}")
-    print(f"Artefacts    : {out_dir}")
-    # le code de sortie rend la dérive visible pour CI : empreinte dorée ou
-    # double passe instable => 1, sinon 0.
+        print(f"\nJSON report: {args.json_out}")
+    print(f"Artifacts    : {out_dir}")
+    # the exit code makes drift visible to CI: an unstable golden fingerprint
+    # or double pass => 1, else 0.
     return 0 if stable else 1
 
 

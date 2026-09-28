@@ -1,4 +1,4 @@
-"""Tests du segmenteur temps réel (hystérésis, attaques, transitions)."""
+"""Real-time segmenter tests (hysteresis, attacks, transitions)."""
 
 import numpy as np
 import pytest
@@ -39,13 +39,13 @@ def test_two_separate_notes():
 
 
 def test_attack_strength_lands_on_the_closed_note():
-    """La force de l'attaque voyage avec le flag et finit sur la note.
+    """The attack strength travels with the flag and lands on the note.
 
-    Régression : `LiveNote` n'avait pas de champ `strength`, donc
-    `detect_meter` (étape accents 3/4 vs 4/4) levait AttributeError sur la
-    première prise live de six notes — et le motif du métronome restait 4/4.
-    La force (0..1, normalisée sur l'attaque la plus forte de la prise)
-    est l'équivalent vivant de `Note.strength` hors ligne.
+    Regression: `LiveNote` had no `strength` field, so `detect_meter`
+    (the 3/4 vs 4/4 accents stage) raised AttributeError on the first
+    live take of six notes — and the metronome pattern stayed 4/4.
+    The strength (0..1, normalized on the take's strongest attack) is
+    the live counterpart of the offline `Note.strength`.
     """
     seg = LiveNoteSegmenter()
     seg.push(0.0, _hz(69), attack=True, strength=1.0)
@@ -68,17 +68,17 @@ def test_attack_strength_lands_on_the_closed_note():
 
 
 def test_staged_attack_keeps_its_strength():
-    """Une attaque sur frame muette garde sa force jusqu'à la note.
+    """An attack on a mute frame keeps its strength until the note.
 
-    Régression : l'attaque était stage (son temps), mais la force voyait en
-    paramètre du frame voisé suivant — où elle valait déjà 0.0. Sur une vraie
-    prise chantée (consonnes sur frames muettes), tous les downbeats lisaient
-    0.0 et la détection de mesure perdait ses accents.
+    Regression: the attack was staged (its time), but the strength was
+    read as the parameter of the next voiced frame — where it already
+    read 0.0. On a real sung take (consonants on mute frames), every
+    downbeat read 0.0 and meter detection lost its accents.
     """
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(64), 0.0, 0.40)
-    seg.push(0.41, float("nan"), attack=True, strength=1.0)  # consonne, muet
-    _feed(seg, _hz(64), 0.45, 0.40)                          # la note re-attaquée
+    seg.push(0.41, float("nan"), attack=True, strength=1.0)  # consonant, mute
+    _feed(seg, _hz(64), 0.45, 0.40)                          # the re-attacked note
     seg.flush(0.90)
     assert len(seg.notes) == 2
     assert seg.notes[1].articulated
@@ -86,10 +86,10 @@ def test_staged_attack_keeps_its_strength():
 
 
 def test_short_blip_ignored():
-    """Un parasite de 40 ms ne crée pas de note."""
+    """A 40 ms blip does not become a note."""
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.40)
-    _feed(seg, _hz(81), 0.40, 0.04)  # parasite
+    _feed(seg, _hz(81), 0.40, 0.04)  # blip
     _feed(seg, _hz(69), 0.44, 0.30)
     seg.flush(0.80)
     assert len(seg.notes) == 1
@@ -97,15 +97,15 @@ def test_short_blip_ignored():
 
 
 def test_repetition_same_pitch_stays_two_notes():
-    """Reprendre la même note (aa-aa) sans attaque vue: DEUX notes.
+    """Repeating the same note (aa-aa) with no attack seen: TWO notes.
 
-    Régression: le merge du flush recollait deux notes pleine longueur
-    séparées d'un vrai silence (60 ms) dès que l'attaque n'avait pas été
-    détectée — chaque répétition douce finissait en une note unique.
+    Regression: the flush merge glued two full-length notes separated
+    by a real silence (60 ms) whenever the attack had not been
+    detected — every soft repetition ended up as a single note.
     """
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.30)
-    _feed(seg, float("nan"), 0.30, 0.06)   # re-prise de la même note
+    _feed(seg, float("nan"), 0.30, 0.06)   # same note taken again
     _feed(seg, _hz(69), 0.36, 0.30)
     seg.flush(0.70)
     assert len(seg.notes) == 2
@@ -113,7 +113,7 @@ def test_repetition_same_pitch_stays_two_notes():
 
 
 def test_repetition_after_longer_gap_stays_two_notes():
-    """Un silence d'une longueur de note entre deux répétitions est une phrase."""
+    """A silence of a note's length between two repetitions is a phrase."""
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.30)
     _feed(seg, float("nan"), 0.30, 0.25)
@@ -123,17 +123,17 @@ def test_repetition_after_longer_gap_stays_two_notes():
 
 
 def test_out_of_piano_notes_are_never_kept():
-    """Un piano n'a que 88 touches (A0..C8) : une hauteur en dehors n'entre ni
-    dans la prise ni dans le preview — l'erreur d'octave reste visible, la note
-    n'existe pas."""
+    """A piano only has 88 keys (A0..C8): an out-of-range pitch enters
+    neither the take nor the preview — the octave error stays visible, the
+    note does not exist."""
     from v2m.core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI
 
     seg = LiveNoteSegmenter()
-    _feed(seg, _hz(PIANO_MIN_MIDI - 3), 0.0, 0.30)   # sous A0
+    _feed(seg, _hz(PIANO_MIN_MIDI - 3), 0.0, 0.30)   # below A0
     _feed(seg, float("nan"), 0.30, 0.10)
-    _feed(seg, _hz(PIANO_MAX_MIDI + 5), 0.40, 0.30)  # au-dessus de C8
+    _feed(seg, _hz(PIANO_MAX_MIDI + 5), 0.40, 0.30)  # above C8
     _feed(seg, float("nan"), 0.70, 0.10)
-    _feed(seg, _hz(PIANO_MIN_MIDI), 0.80, 0.30)      # A0, la touche extrême
+    _feed(seg, _hz(PIANO_MIN_MIDI), 0.80, 0.30)      # A0, the extreme key
     seg.flush(1.15)
     assert [n.midi for n in seg.notes] == [PIANO_MIN_MIDI]
 
@@ -143,16 +143,16 @@ def test_out_of_piano_notes_are_never_kept():
 
 
 def test_active_note_shows_the_note_being_sung():
-    """Pendant qu'une note est tenue, le preview la décrit sans la stocker."""
+    """While a note is held, the preview describes it without storing it."""
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.20)
-    assert seg.notes == []  # rien n'est stocké avant la fin de la note
+    assert seg.notes == []  # nothing is stored before the note ends
     prev = seg.active_note(0.25)
     assert prev is not None
     assert prev.midi == 69
     assert prev.start == pytest.approx(0.0, abs=0.05)
     assert prev.end == pytest.approx(0.25)
-    # toujours pas stockée : le preview est jetable
+    # still not stored: the preview is disposable
     assert seg.notes == []
 
 
@@ -163,11 +163,11 @@ def test_active_note_none_when_idle():
     assert seg.active_note(0.25) is None
     _feed(seg, _hz(60), 0.30, 0.30)
     seg.flush(0.65)
-    assert seg.active_note(0.70) is None  # note closed -> plus rien en cours
+    assert seg.active_note(0.70) is None  # note closed -> nothing in progress
 
 
 def test_active_note_end_never_before_start():
-    """Un tick d'affichage en retard ne doit pas produire une barre inversée."""
+    """A late display tick must not produce an inverted bar."""
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.50, 0.20)
     prev = seg.active_note(0.10)
@@ -182,7 +182,7 @@ def test_nan_ignored():
 
 
 # --------------------------------------------------------------------------- #
-# Attaques et transitions (voir notes.py pour les mêmes règles hors ligne)
+# Attacks and transitions (see notes.py for the same offline rules)
 # --------------------------------------------------------------------------- #
 
 
@@ -196,7 +196,7 @@ def _feed_glide(
     step: float = 0.02,
     attack_first: bool = False,
 ):
-    """Portamento de `start` vers `target` pendant `glide_s`, puis tenue."""
+    """Portamento from `start` to `target` over `glide_s`, then held."""
     n = int(glide_s / step)
     for i in range(n):
         w = (i + 1) / n
@@ -210,15 +210,15 @@ def _feed_glide(
 
 
 def test_a_glide_does_not_become_a_note():
-    """Un portamento ne doit être confirmé qu'à l'arrivée, une seule fois.
+    """A portamento must be confirmed once, at its arrival only.
 
-    Régression mesurée : avec une fenêtre de confirmation de 80 ms (deux
-    trames), un pas de l'échelle passait pour une note tenue et un glissando
-    de 60 vers 62 fabriquait des notes à 61 et 63.
+    Measured regression: with an 80 ms confirmation window (two
+    frames), a scale step read as a held note and a 60->62 glissando
+    manufactured notes at 61 and 63.
 
-    Limite assumée : un portamento PLUS LENT que ~3 demi-tons par seconde
-    (0,6 s pour 2 demi-tons) est transcrit en deux notes, puisqu'aucune
-    fenêtre de 140 ms ne permet alors de distinguer la glisse de la tenue.
+    Accepted limit: a portamento SLOWER than ~3 semitones per second
+    (0.6 s for 2 semitones) transcribes as two notes, since no 140 ms
+    window can then tell the glide from the hold.
     """
     seg = LiveNoteSegmenter()
     t = _feed_glide(seg, 0.0, 0.12, 0.6, 60, 62)
@@ -227,7 +227,7 @@ def test_a_glide_does_not_become_a_note():
 
 
 def test_attack_dates_the_onset_of_a_note():
-    """Avec l'attaque, la note commence au portamento — pas à son arrivée."""
+    """With the attack, the note starts at the portamento — not at its arrival."""
     without = LiveNoteSegmenter()
     t = _feed_glide(without, 0.0, 0.4, 0.4, 60, 67)
     without.flush(t + 0.2)
@@ -238,14 +238,14 @@ def test_attack_dates_the_onset_of_a_note():
 
     assert [n.midi for n in with_attack.notes] == [67]
     assert with_attack.notes[0].start == pytest.approx(0.0, abs=0.03)
-    # sans preuve d'attaque la note ne peut être datée qu'à l'arrivée de la
-    # hauteur : c'est le repli documenté du temps réel
+    # with no attack evidence the note can only be dated at the pitch's
+    # arrival: that is the documented real-time fallback
     assert [n.midi for n in without.notes] == [67]
     assert without.notes[0].start > 0.35
 
 
 def test_re_attack_splits_a_held_note():
-    """Même hauteur relancée plus fort : deux notes, pas une tenue."""
+    """Same pitch re-struck louder: two notes, not one hold."""
     seg = LiveNoteSegmenter()
     t = 0.0
     while t < 0.4:
@@ -261,13 +261,13 @@ def test_re_attack_splits_a_held_note():
 
 
 def test_repeated_same_pitch_through_the_full_chain():
-    """« Ta-ta-ta-ta » sur un même Mi doit donner QUATRE notes (~0,25 s).
+    """Four sung "ta" on one E must give FOUR notes (~0.25 s each).
 
-    Régression mesurée : le tracker de niveau ne revoyait qu'une attaque sur
-    quatre (la baseline restait au niveau des notes précédentes), et les
-    attaques tombées sur une frame muette étaient avalées — le merge du flush
-    recollait alors tout en une note de 1,1 s. Chaîne complète (blocs 1024,
-    comme le micro)."""
+    Measured regression: the level tracker returned only one attack in
+    four (the baseline stayed at the previous notes' level), and the
+    attacks landing on mute frames were swallowed — the flush merge
+    then glued everything into one 1.1 s note. Full chain (1024-sample
+    blocks, like the mic)."""
     from voicetruth import SungNote, synthesize
     from v2m.core.liveseg import LivePitchStream
 
@@ -280,41 +280,41 @@ def test_repeated_same_pitch_through_the_full_chain():
     stream.seg.flush(len(y) / 22_050)
     notes = stream.seg.notes
     assert [n.midi for n in notes] == [64, 64, 64, 64]
-    assert all(n.duration < 0.45 for n in notes)  # ni tenue unique ni fusion
+    assert all(n.duration < 0.45 for n in notes)  # neither one hold nor a merge
 
 
 def test_split_attack_survives_a_pending_mute_run():
-    """L'attaque d'une répétition splitée survit au reset PENDING-sur-mute.
+    """A split repetition's attack survives the mute PENDING reset.
 
-    Une split même hauteur (consonne en rafale) ouvre la répétition PENDING
-    avec `pending_attack` = la coupure ; si le burst s'étend sur les frames
-    suivantes, elles sont MUETTES et le reset PENDING-sur-mute effaçait
-    l'attaque sans la mettre en attente — la répétition repartait datée à
-    sa confirmation (60 ms de trou mesuré entre les deux moitiés) et sans
-    preuve d'articulation, donc recollable par le merge du flush.
+    A same-pitch split (burst consonant) opens the PENDING repetition
+    with `pending_attack` = the cut; when the burst extends over the
+    following frames, they are MUTE and the mute PENDING reset erased
+    the attack without staging it — the repetition then restarted dated
+    at its confirmation (a measured 60 ms hole between the two halves)
+    and with no articulation evidence, so the flush merge could glue it.
     """
     seg = LiveNoteSegmenter()
-    _feed(seg, _hz(64), 0.0, 0.40)              # note tenue (confirmée ~0.10)
-    seg.push(0.41, float("nan"), attack=True)   # burst : la tenue est en rupture
+    _feed(seg, _hz(64), 0.0, 0.40)              # held note (confirmed ~0.10)
+    seg.push(0.41, float("nan"), attack=True)   # burst: the hold is broken
     seg.push(0.42, float("nan"))                # (silence < MIN_GAP_HOLD_S)
-    seg.push(0.43, _hz(64), attack=True)        # frame voisée : la split coupe ici
-    seg.push(0.44, float("nan"))                # la queue du burst : PENDING muet
+    seg.push(0.43, _hz(64), attack=True)        # voiced frame: the split cuts here
+    seg.push(0.44, float("nan"))                # the burst's tail: PENDING mute
     seg.push(0.45, float("nan"))
-    _feed(seg, _hz(64), 0.46, 0.40)             # la voyelle de la répétition
+    _feed(seg, _hz(64), 0.46, 0.40)             # the repetition's vowel
     seg.flush(0.90)
     assert [n.midi for n in seg.notes] == [64, 64]
     assert seg.notes[1].articulated
     assert seg.notes[1].start == pytest.approx(0.40, abs=0.02)
-    assert seg.notes[1].start >= seg.notes[0].end - 0.02  # pas de trou
+    assert seg.notes[1].start >= seg.notes[0].end - 0.02  # no hole
 
 
 def test_staged_attack_dates_the_new_note():
-    """Une attaque vue sur une frame muette (consonne sans voix) doit dater
-    la note suivante : sinon `flush` fusionne la répétition comme un blip."""
+    """An attack seen on a mute frame (an unvoiced consonant) must date
+    the next note: otherwise `flush` merges the repetition as a blip."""
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(64), 0.0, 0.40)
-    seg.push(0.41, float("nan"), attack=True)   # consonne sur frame muette
-    _feed(seg, _hz(64), 0.45, 0.40)      # la note re-attaquée
+    seg.push(0.41, float("nan"), attack=True)   # consonant on a mute frame
+    _feed(seg, _hz(64), 0.45, 0.40)      # the re-attacked note
     seg.flush(0.90)
     assert len(seg.notes) == 2
     assert seg.notes[1].articulated
@@ -322,7 +322,7 @@ def test_staged_attack_dates_the_new_note():
 
 
 def test_a_fresh_note_is_not_split_by_a_late_attack():
-    """Une attaque parasite juste après l'onset ne coupe pas la note"""
+    """A stray attack right after the onset does not cut the note"""
     seg = LiveNoteSegmenter()
     t = 0.0
     while t < 0.5:

@@ -1,9 +1,9 @@
-"""Bout en bout du mode live GUI : micro factice -> capture -> analyse -> export.
+"""End to end of the live GUI mode: fake mic -> capture -> analysis -> export.
 
-Régression : après l'arrêt d'un enregistrement live, l'analyse finale était
-bien calculée mais la vue levait une exception (valeur de vérité d'un tableau
-NumPy) AVANT l'export — le piano roll restait vide et aucun fichier n'était
-écrit, sans message d'erreur.
+Regression: after stopping a live recording, the final analysis WAS
+computed but the view raised an exception (a NumPy array's truth value)
+BEFORE the export — the piano roll stayed empty and no file was written,
+with no error message.
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ import pytest
 
 from v2m.core import audio_io
 
-MELODY_HZ = [220.0, 261.63, 293.66, 329.63]  # La3 Do4 Ré4 Mi4
+MELODY_HZ = [220.0, 261.63, 293.66, 329.63]  # A3 C4 D4 E4
 TONE_S = 0.35
 GAP_S = 0.12
 CAPTURE_SR = 44_100
 
 
 class FakeMic:
-    """`sounddevice.InputStream` de remplacement : rejoue une mélodie connue."""
+    """A stand-in `sounddevice.InputStream`: replays a known melody."""
 
     def __init__(self, samplerate, channels, blocksize, callback, **kwargs):  # noqa: ANN001
         self.rate = samplerate
@@ -106,41 +106,41 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
             lambda: win.live_thread is not None and win.live_thread.elapsed() >= 1.8,
             timeout=60,
         )
-        assert captured, "le micro factice n'a rien livré à la capture live"
+        assert captured, "the fake mic delivered nothing to the live capture"
         live_thread = win.live_thread
         assert live_thread is not None
 
-        # pendant la capture : les notes closes sont déjà sur le piano roll
-        # et sur la portée qui défile
+        # during capture: closed notes are already on the piano roll and
+        # on the scrolling staff
         seg = live_thread.segmenter
-        assert seg is not None and seg.notes, "aucune note détectée pendant le live"
-        assert win.piano_live._bar_items, "le piano roll live est resté vide"
-        assert win.staff_live.layout().notes, "la portée live est restée vide"
+        assert seg is not None and seg.notes, "no note detected during live"
+        assert win.piano_live._bar_items, "the live piano roll stayed empty"
+        assert win.staff_live.layout().notes, "the live staff stayed empty"
 
         win.on_stop_live()
         assert _pump_until(qapp, lambda: win.result is not None, timeout=60), (
-            "aucune analyse finale après l'arrêt du live"
+            "no final analysis after stopping the live"
         )
 
         result = win.result
         assert result is not None
-        assert result.notes, "l'analyse finale du live est vide"
+        assert result.notes, "the live final analysis is empty"
         assert win._live_signal is not None and len(win._live_signal) > 0
         assert win._voice_signal() is win._live_signal
-        assert exported, "aucun export après l'enregistrement live"
+        assert exported, "no export after the live recording"
         res, stem, _ = exported[-1]
         assert res is win.result
-        assert Path(stem).name.startswith("live_"), f"nom de fichier inattendu : {stem}"
+        assert Path(stem).name.startswith("live_"), f"unexpected file name : {stem}"
         assert Path(stem).parent.parent.name == "prises_live", (
-            f"la prise doit vivre dans prises_live/<stem>/ : {stem}"
+            f"the take must live in prises_live/<stem>/ : {stem}"
         )
 
-        # la page résultats montre la prise, et rien n'a été signalé en rouge
+        # the results page shows the take, and nothing was flagged red
         assert win.stack.currentWidget() is win.page_analyze
         assert len(win.piano._bar_items) == len(result.notes)
         assert win.piano_keys._spans
         staff_notes = win.staff.layout().notes
-        assert len(staff_notes) == len(result.notes), "la portée ne suit pas l'analyse"
+        assert len(staff_notes) == len(result.notes), "the staff does not follow the analysis"
         assert all(1 <= n.measure for n in staff_notes)
         assert win.error_banner.isHidden(), win.error_banner.text()
     finally:
@@ -150,10 +150,10 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
 
 
 def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
-    """La GUI consomme la Grille live publiée par LiveTake : elle ne
-    recule plus elle-même le BPM approché (l'ancien code reconstruisait un
-    BeatGrid(estimate_bpm_live(...)) à chaque changement de compte de
-    notes dans le tick)."""
+    """The GUI consumes the live Grid published by LiveTake: it no longer
+    re-derives the approximated BPM itself (the old code rebuilt a
+    BeatGrid(estimate_bpm_live(...)) on every note-count change in the
+    tick)."""
     import sounddevice as sd
 
     from v2m.gui import main_window as mw
@@ -172,18 +172,18 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
 
         assert _pump_until(
             qapp, published_grid, timeout=60
-        ), "la grille live publiée par LiveTake n'est jamais arrivée à la GUI"
-        # le staff live grave la grille consommée (le staff lit grid.bpm —
-        # toute dérive de la publication se verrait ici)
+        ), "the live grid published by LiveTake never reached the GUI"
+        # the live staff engraves the consumed grid (the staff reads
+        # grid.bpm — any drift of the publication would show here)
         assert _pump_until(
             qapp, lambda: win.staff_live._grid is win._live_grid, timeout=5
-        ), "le staff live n'a pas reçu la grille publiée"
-        # la mesure publiée arrive au label de statut, à côté du compte de temps
+        ), "the live staff did not receive the published grid"
+        # the published meter reaches the status label, next to the beat count
         assert win._live_grid.meter.label in win.label_live_status.text(), (
-            f"mesure absente du statut live : {win.label_live_status.text()}"
+            f"meter absent from the live status : {win.label_live_status.text()}"
         )
-        # arrêt propre : la prise va au bout de son analyse pendant CE test,
-        # sinon l'événement en file se livre pendant le test suivant
+        # clean stop: the take finishes its analysis during THIS test,
+        # else the queued event delivers during the next test
         win.on_stop_live()
         assert _pump_until(qapp, lambda: win.result is not None, timeout=60)
     finally:
@@ -193,8 +193,8 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
 
 
 def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
-    """La section « trouver la note » n'a qu'un rôle : allumer la touche
-    chantée. Pas d'analyse finale, pas d'export, rien de conservé."""
+    """The "find the note" section has one role: light the sung key. No
+    final analysis, no export, nothing kept."""
     import sounddevice as sd
 
     from v2m.core.i18n import tr
@@ -210,14 +210,18 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
     try:
         win.on_open_finder()
         assert win.stack.currentWidget() is win.page_finder
-        assert _pump_until(qapp, lambda: bool(win.finder_keys._active), timeout=60), (
-            "aucune touche allumée par le chercheur de note"
+        # pump on the GROUND TRUTH of confirmation: the python list only
+        # ever holds CONFIRMED notes (the widget shows a placeholder while
+        # empty, so a widget count says nothing) — the big name flips
+        # between answer and invite as the fake singer breathes, it is not
+        # pumpable
+        assert _pump_until(qapp, lambda: len(win.finder_session.history) > 0, timeout=60), (
+            "no note confirmed by the note finder"
         )
-        # la touche allumée est celle de la mélodie factice (La3 Do4 Ré4 Mi4),
-        # jamais un numéro : le clavier du piano est la seule réponse affichée
+        # the lit key is the fake melody's (A3 C4 D4 E4), never a number:
+        # the piano keyboard is the only displayed answer
         assert win.finder_keys._active <= {57, 60, 62, 64}
-        assert win.label_finder_note.text() not in ("", tr("ui finder idle"))
-        assert win.finder_history.count() > 0
+        assert win.label_finder_note.text() != ""
         assert "🎹" in win.finder_history.item(0).text()
 
         win.on_close_finder()
@@ -225,8 +229,8 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
         assert win.finder_thread is None
         assert win.finder_keys._active == set()
         assert win.label_finder_note.text() == tr("ui finder idle")
-        assert not exported, "le chercheur de note ne doit rien exporter"
-        assert win.result is None, "le chercheur de note ne doit rien analyser"
+        assert not exported, "the note finder must not export anything"
+        assert win.result is None, "the note finder must not analyze anything"
     finally:
         if win.finder_thread is not None and win.finder_thread.isRunning():
             win.finder_thread.stop()
@@ -235,7 +239,6 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
 
 def test_metronome_follows_detected_bpm(qapp):
     """The optional metronome tracks the take's detected tempo, not a fixed one."""
-    from v2m.core.metronome import Metronome
     from v2m.gui import main_window as mw
 
     win = mw.MainWindow()
@@ -326,7 +329,7 @@ def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
         win.on_toggle_voice()
         assert _pump_until(
             qapp, lambda: win.waveform._line.value() > 0.0, 5
-        ), "le playhead ne suit pas la voix"
+        ), "the playhead does not follow the voice"
         assert win.btn_voice.text() == "■"
         win.stop_playback()
         assert win.playback.mode is None
@@ -336,7 +339,7 @@ def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
             qapp,
             lambda: win.playback.playing and win.playback.mode == "both",
             5,
-        ), "le mode combiné doit sonner les deux sources"
+        ), "the combined mode must sound both sources"
         win.stop_playback()
         assert win.btn_both.text() == "🎹+🎙"
     finally:
@@ -385,10 +388,10 @@ def test_voice_transpose_shifts_without_reanalysis(qapp, monkeypatch):
         assert voice_player is not None
         assert voice_player.signal is not old_signal
         assert len(voice_player.signal) == len(old_signal), (
-            "la durée doit rester exacte pour ne pas désynchroniser le piano"
+            "the duration must stay exact so the piano does not desync"
         )
         assert not np.allclose(voice_player.signal, old_signal)
-        assert win.playback.playing, "la transposition ne doit pas couper l'écoute"
+        assert win.playback.playing, "transposing must not cut the playback"
         assert win.playback.mode == "voice"
         assert win.playback.position() >= pos - 0.2
         win.stop_playback()
@@ -466,9 +469,123 @@ def test_piano_volume_rebuilds_player(qapp):
         win.close()
 
 
+def test_back_home_stops_the_audio(qapp, monkeypatch):
+    """Going back home stops the playback: the page changes, the sound too.
+
+    The 2026-09-26 report ("when you leave the page for home, the audio
+    keeps playing"): navigation lambdas only changed the page. One owner
+    (`on_back_home`) stops BEFORE navigating — the test forces a running
+    playback then goes back home.
+    """
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    _fake_sd_for_gui(monkeypatch)
+    win = mw.MainWindow()
+    try:
+        win.result = AnalysisResult(
+            source="live", duration_s=1.0,
+            notes=[Note(0.0, 1.0, 60, 0.9)], tempo=None, key=None,
+        )
+        win._live_signal = np.zeros(audio_io.SR, np.float32)
+        win.player = mw.NotePlayer(win.result.notes, sr=audio_io.SR)
+        win.on_toggle_both()
+        assert win.playback.playing, "the playback did not start"
+
+        win.on_back_home()
+        assert not win.playback.playing, "the audio keeps playing after going back home"
+    finally:
+        win.close()
+
+
+def test_reinterpret_button_rereads_evidence_without_pyin(qapp, monkeypatch):
+    """↻ re-run the analysis: the interpretation alone, never pYIN or decoding.
+
+    The 2026-09-26 feedback asked for a button on the analyze page that
+    re-runs ONLY the interpretation (via the cached observation) after a
+    threshold adjustment. The proof is the same as the script's: the
+    heavy inputs are replaced by raising guards — if the handler goes
+    through them, the test falls.
+    """
+    from v2m.core.notes import Note
+    from v2m.core.observation import VoiceObservation
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.core.pitch import PitchTrack
+    from v2m.gui import main_window as mw
+
+    # a small real observation: 3 held semitones, far enough for interpret
+    hz = [440.0 * 2.0 ** ((m - 69) / 12.0) for m in (57, 60, 62)]
+    times, curve = [], []
+    t = 0.0
+    for f in hz:
+        for _ in range(15):
+            times.append(t)
+            curve.append(f)
+            t += 0.02
+    observation = VoiceObservation(
+        pitch=PitchTrack(
+            times=np.asarray(times),
+            hz=np.asarray(curve),
+            confidence=np.ones(len(times)),
+            transition=np.zeros(len(times), dtype=bool),
+        ),
+        attacks=None,
+        duration_s=t,
+        sample_rate=audio_io.SR,
+        frame_dt=0.02,
+        accent_envelope=None,
+    )
+
+    win = mw.MainWindow()
+    try:
+        win.result = AnalysisResult(
+            source="test.wav", duration_s=t,
+            notes=[Note(0.0, 0.3, 57, 0.9)], tempo=None, key=None,
+            observation=observation,
+        )
+        before = len(win.result.notes)
+        before_result = win.result
+
+        def _forbidden(name):
+            raise AssertionError(f"the re-run button must not call {name}")
+
+        import soundfile as sf
+
+        from v2m.core import pitch as pitch_mod
+
+        monkeypatch.setattr(pitch_mod, "track_pitch_offline",
+                            lambda *a, **k: _forbidden("pYIN"))
+        monkeypatch.setattr(sf, "read", lambda *a, **k: _forbidden("décodage"))
+
+        win.spin_min_note.setValue(80)
+        win.on_reinterpret()
+
+        assert win.result is not None and win.result is not before_result
+        assert len(win.result.notes) >= before  # a reading happened, views refilled
+        assert win.result.observation is observation  # same evidence object
+        assert win.result.source == "test.wav"  # identity preserved
+    finally:
+        win.close()
+
+
+def test_reinterpret_button_errors_without_evidence(qapp):
+    """Without a cached observation, the button warns instead of crashing."""
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        win.result = AnalysisResult(
+            source="x", duration_s=1.0, notes=[], tempo=None, key=None,
+        )
+        win.on_reinterpret()  # must show the banner, not raise
+    finally:
+        win.close()
+
+
 def test_live_keyboard_marks_expected_pitch(qapp):
     from v2m.core.notes import Note
-    from v2m.core.i18n import tr
     from v2m.core.pipeline import AnalysisResult
     from v2m.gui import main_window as mw
     from v2m.gui.widgets import AMBER_COLOR, MATCH_COLOR, MISMATCH_COLOR

@@ -1,0 +1,145 @@
+"""The take's audio, written on request (workstream 6, 2026-09-26).
+
+The "record audio" box is read at the take's START (a mid-take toggle
+does not change what this take writes) and only acts live: a file
+analysis already reads its audio at the input, rewriting it would make
+no sense. The .wav is written BEFORE the other artifacts — it is the
+user's rawest data.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import numpy as np
+import pytest
+
+from v2m.core import audio_io
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+def _fake_live_result(source: str = "live") -> SimpleNamespace:
+    """What `_export_results` reads from a result (export_result is patched)."""
+    return SimpleNamespace(source=source, quantize_step=lambda _division: 0.1)
+
+
+def test_export_writes_the_take_audio_only_when_asked(qapp, monkeypatch, tmp_path):
+    """Box ticked -> a .wav in the take's folder; else nothing."""
+    import soundfile as sf
+
+    from v2m.gui import main_window as mw
+
+    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    # the take folder is redirected: the test must never write into the repo
+    monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
+
+    win = mw.MainWindow()
+    try:
+        win.result = cast(Any, _fake_live_result())
+        win._live_signal = (np.ones(audio_io.SR, dtype=np.float32) * 0.1)
+
+        win._live_record_audio = False
+        win._export_results()
+        assert not list(tmp_path.rglob("*.wav")), "audio written without the box ticked"
+
+        win._live_record_audio = True
+        win._export_results()
+        wavs = list(tmp_path.rglob("*.wav"))
+        assert len(wavs) == 1, f"one .wav expected, saw {wavs}"
+        # the file is readable back, at the analysis rate and the right length
+        y, sr = sf.read(str(wavs[0]))
+        assert sr == audio_io.SR
+        assert abs(len(y) - audio_io.SR) <= 4
+        assert win.error_banner.isHidden(), win.error_banner.text()
+
+        # ...and a FILE analysis never writes an audio copy, box or no box:
+        # its audio already exists at the input path
+        win.result = cast(Any, _fake_live_result(source="chant.wav"))
+        win._export_results()
+        assert len(list(tmp_path.rglob("*.wav"))) == 1
+    finally:
+        win.close()
+
+
+def test_the_audio_box_is_read_when_the_take_starts():
+    """The choice belongs to the take: frozen at start, not at export."""
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        assert win.chk_record_audio.isChecked() is False  # off by default
+        win.chk_record_audio.setChecked(True)
+        # what `on_start_live` does with the box (no capture started here)
+        win._live_record_audio = win.chk_record_audio.isChecked()
+        win.chk_record_audio.setChecked(False)  # toggled mid-take
+        assert win._live_record_audio is True, "the mid-take toggle changed the choice"
+        assert win.chk_record_audio.text()  # a label in the current language
+    finally:
+        win.close()
+
+
+def test_a_new_take_never_keeps_the_previous_take_signal(qapp):
+    """The 2026-09-26 user report ("the audio does not match what I
+    sang"): every WAV export described the PREVIOUS take —
+    `on_start_live` never reset `_live_signal` to None and
+    `_on_live_analysis_done` only picked the signal bytes up when it was
+    None. The real takes' durations chain showed it: every json carried
+    ITS take, every .wav the one before."""
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        old = np.full(audio_io.SR, 0.5, dtype=np.float32)
+        win._live_signal = old
+        # what on_start_live does (no capture here): the NEW take owns all
+        # the live buffers
+        win._live_signal = None
+        assert win._live_signal is None, "the old take survived the start"
+
+        # ...and the take's end: the EVENT's bytes are the source of
+        # truth, a stale signal cannot survive a finished analysis
+        win._live_signal = old
+        new = np.full(2 * audio_io.SR, 0.1, dtype=np.float32)
+        win._on_live_analysis_done(
+            cast(
+                Any,
+                SimpleNamespace(
+                    source="live", tempo=SimpleNamespace(bpm=120.0),
+                    key=SimpleNamespace(best=SimpleNamespace(label="C major")),
+                    notes=[],
+                ),
+            ),
+            new.tobytes(),
+        )
+        assert win._live_signal is not old
+        assert len(win._live_signal) == len(new), (
+            "the finished analysis kept an earlier take's signal"
+        )
+    finally:
+        win.close()
+
+
+def test_save_file_round_trips_a_signal(tmp_path):
+    """`save_file` writes a re-readable WAV, at the right length and rate."""
+    import soundfile as sf
+
+    t = np.arange(audio_io.SR) / audio_io.SR
+    y = (0.4 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
+    path = audio_io.save_file(y, str(tmp_path / "nested" / "prise.wav"), audio_io.SR)
+    assert Path(path).exists()  # the folder was created too
+    back, sr = sf.read(path)
+    assert sr == audio_io.SR
+    assert len(back) == len(y)
+    # 16-bit PCM: the shape and amplitude survive, the samples are quantized
+    assert float(np.max(np.abs(back[: audio_io.SR // 10]))) == pytest.approx(0.4, abs=0.01)

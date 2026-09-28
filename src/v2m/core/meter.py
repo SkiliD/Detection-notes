@@ -52,6 +52,14 @@ MIN_DOWNBEATS = 2               # accents needed per hypothesis
 ACCENT_CONTRAST = 0.15          # required strength gap between 3/4 and 4/4
 ALTERNATE_SHARE = 0.75          # period-2 strong/weak agreement: dotted pulse or march
 MINORITY_SHARE = 0.30           # the weaker label must still be a real party
+# A real alternation CHANGES label at almost every step (strong-weak-strong);
+# two RUNS (a loud phrase followed by a soft one) agree at lag 2 everywhere
+# while changing label only at the run boundary. Measured family: the four
+# 2026-09-27 takes of one melody — the three healthy ones change 5-8 times
+# per ~16 steps, the one that faked x1.5 (234 BPM) changed ONCE
+# (111111000000000). Below this share of lag-1 changes, the "alternation"
+# is runs: no dotted reading.
+MIN_CHANGE_SHARE = 0.25
 
 
 def _grid_offset(t: float, slot_s: float) -> float:
@@ -89,7 +97,16 @@ def reads_dotted_pulse(notes) -> bool:
     # reading. A real alternation is near 50/50 — the weaker label must
     # be a real party of the pulse.
     minority = min(labels.count(1.0), labels.count(0.0)) / len(labels)
-    return minority >= MINORITY_SHARE
+    if minority < MINORITY_SHARE:
+        return False
+    # the lag-2 agreement above also self-validates two RUNS of constant
+    # level (a loud phrase then a soft one): their labels flip only at the
+    # run boundary, a real alternation flips at almost every step. The
+    # 2026-09-27 regression measured the family: `111111000000000` — one
+    # run boundary on 14 steps — scored 11/13 at lag 2 and faked x1.5
+    # (156 -> 234 BPM) on a take whose three siblings read ~156 directly.
+    changes = sum(1 for a, b in zip(labels[1:], labels) if a != b)
+    return changes / (len(labels) - 1) >= MIN_CHANGE_SHARE
 
 
 def dotted_pulse_tempo(notes, bpm: float) -> float:

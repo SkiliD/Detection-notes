@@ -1,4 +1,4 @@
-"""Fixtures : signaux audio synthétiques, langue sandboxée, budget de la suite."""
+"""Fixtures: synthetic audio signals, sandboxed language, suite budget."""
 
 import time
 
@@ -12,15 +12,16 @@ SR = 22_050
 
 @pytest.fixture(scope="session", autouse=True)
 def _sandbox_language_file(tmp_path_factory):
-    """La suite ne lit ni n'écrit le ~/.v2m_lang de l'utilisateur.
+    """The suite neither reads nor writes the user's ~/.v2m_lang.
 
-    Régression : un `--lang en` manuel (ou le choix persisté d'un utilisateur
-    anglophone) rendait la suite NON reproductible — `cli.main` sans --lang
-    et MainWindow appellent `get_language()`, qui relisait ce fichier au
-    milieu du run et basculait tout le process en anglais : les tests qui
-    attendent du français (`match="décoder"`, les libellés d'étage de
-    `Terminé`) échouaient selon l'état ambiant. On force aussi le français
-    au démarrage : l'état de départ est le même partout, à chaque run.
+    Regression: a manual `--lang en` (or an anglophone user's persisted
+    choice) made the suite NON-reproducible — `cli.main` without --lang
+    and MainWindow both call `get_language()`, which re-read that file
+    mid-run and flipped the whole process to English: the tests that
+    expect French (the `match="décoder"` asserts, the `tr("progress
+    done")` stage labels) failed depending on ambient state. We also
+    force French at startup: the starting state is the same everywhere,
+    on every run.
     """
     original = i18n.LANG_FILE
     i18n.LANG_FILE = tmp_path_factory.mktemp("lang") / "lang"
@@ -29,33 +30,53 @@ def _sandbox_language_file(tmp_path_factory):
     i18n.LANG_FILE = original
 
 
-# Contrat de coût (AGENTS.md) : la suite complète doit rester sous ce
-# budget — un test lent ajouté au-delà doit être une décision EXPLICITE
-# (mesurer, abaisser le budget avec une raison, ou marquer le test slow).
-# Recalibré 2026-09-24 sur la vitesse mesurée du jour : suite complète
-# 51.3 s (483 tests), marge d'environnement ×1.85 => 95 s. La procédure
-# de calibration vit dans AGENTS.md ("Calibration du budget suite") : un
-# budget qui dérape est d'abord une VITESSE de machine à comparer, pas un
-# test à supprimer.
-SUITE_BUDGET_S = 95.0
+# Cost contract (AGENTS.md): the full suite must stay under this
+# budget — a slow test added beyond it must be an EXPLICIT decision
+# (measure, lower the budget with a reason, or mark the test slow).
+# Recalibrated 2026-09-24 on the day's measured speed: full suite
+# 51.3 s (483 tests), environment margin x1.85 => 95 s.
+# Recalibrated 2026-09-27: the suite counts 633 tests (+ new live/final,
+# coherence, replay measures) and the machine's speed of the day is very
+# variable (the same suite measures 90 to 115 s under load) — nominal
+# ~62 s x1.85 => 115 s. The calibration procedure lives in AGENTS.md
+# ("Calibration du budget suite"): a runaway budget is first a machine
+# SPEED to compare, not a test to delete.
+# Recalibrated 2026-09-27 (EXPLICIT decision, same day): +26 tests (the
+# 4 follow-up features: replay, explain, trends) including THREE
+# real-time replays marked slow (~30 s: the 1x real clock IS the
+# assertion); full suite measured 88.6 s on two concordant runs,
+# 658 tests, x1.85 => 165 s.
+# Recalibrated again on 2026-09-27 (health curve, regression, cache):
+# 677 tests, five real-time replays in total (the accelerated cache adds
+# two, needed to prove the cache does NOT change the reading);
+# suite measured 101.7 s on two concordant runs x1.85 => 190 s.
+# Recalibrated one last time on 2026-09-27 (user feedback: anti-starving
+# guards, per-moment-of-day view, retention, weekly PDF, --changed):
+# 696 tests, suite measured 106.5 s on two concordant runs
+# x1.85 => 197 s.
+# Recalibrated 2026-09-28 (comments/docstrings translated to English —
+# no runtime effect): 721 tests, suite measured 109.3 s
+# x1.85 => ~202 s, rounded to 205 s.
+SUITE_BUDGET_S = 205.0
 
-# Le début du coût : ce module se charge pendant la COLLECTION, avant le
-# premier test (un hook pytest_sessionstart ici ne serait pas encore
-# enregistré : les conftests se chargent après sessionstart).
+# The start of the cost: this module loads during COLLECTION, before the
+# first test (a pytest_sessionstart hook here would not be registered
+# yet: conftests load after sessionstart).
 _SUITE_STARTED_AT = time.perf_counter()
 
 
 def suite_cost_verdict(elapsed_s: float, budget_s: float = SUITE_BUDGET_S) -> bool:
-    """La décision seule, testable sans attendre la fin d'une suite réelle."""
+    """The decision alone, testable without waiting for a real suite."""
     return elapsed_s > budget_s
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Affiche le coût total ; fait échouer une suite VERTE trop lente.
+    """Prints the total cost; makes a too-slow GREEN suite fail.
 
-    `wrap_session` lit `session.exitstatus` APRÈS ce hook : muter l'attribut
-    change le code de sortie, sans écraser un échec/une interruption déjà
-    code (1/2/3 restent ce qu'ils sont — seul un run vert dérape en 1).
+    `wrap_session` reads `session.exitstatus` AFTER this hook: mutating
+    the attribute changes the exit code, without overwriting an already
+    recorded failure/interrupt (1/2/3 stay what they are — only a green
+    run drifts to 1).
     """
     total = time.perf_counter() - _SUITE_STARTED_AT
     line = f"suite cost: {total:.1f} s (budget {SUITE_BUDGET_S:.0f} s)"
@@ -71,11 +92,11 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def sine_note(hz: float, dur_s: float, sr: int = SR, amp: float = 0.5) -> np.ndarray:
-    """Sinusoïde avec enveloppe ADSR simplifiée (évite les clics)."""
+    """Sine wave with a simplified ADSR envelope (avoids clicks)."""
     n = int(dur_s * sr)
     t = np.arange(n) / sr
     y = amp * np.sin(2 * np.pi * hz * t)
-    # enveloppe : 10 ms fondu entrée/sortie
+    # envelope: 10 ms fade in/out
     fade = int(0.01 * sr)
     env = np.ones(n)
     env[:fade] = np.linspace(0, 1, fade)

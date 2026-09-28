@@ -1,8 +1,8 @@
-"""La fenêtre suit la langue courante — y compris hors des widgets.
+"""The window follows the current language — including outside the widgets.
 
-Régression : `QFileDialog.getOpenFileName` recevait un titre et un filtre
-codés en dur en français ; `tr()` ne les voyait pas, donc la boîte de
-sélection restait française même en anglais.
+Regression: `QFileDialog.getOpenFileName` received a title and a filter
+hardcoded in French; `tr()` never saw them, so the selection dialog
+stayed French even in English.
 """
 
 from __future__ import annotations
@@ -63,16 +63,16 @@ def test_file_dialog_speaks_the_current_language(qapp, monkeypatch):
 
 
 def test_both_languages_define_the_same_keys():
-    """Une clé ajoutée d'un seul côté retomberait sur la clé (donc en anglais)."""
+    """A key added on one side only would fall back to the key (i.e. English)."""
     assert set(i18n.STRINGS["fr"]) == set(i18n.STRINGS["en"])
 
 
 def test_results_panel_translates_key_label_and_figures(qapp):
-    """Le panneau affiche des étiquettes traduites, pas le stockage canonique.
+    """The panel shows translated labels, not the canonical storage.
 
-    Régression : `set_results` posait `res.key.best.label` ('C major') et les
-    figures ('noire') en brut — l'anglais fuyait dans une UI française et le
-    français dans une UI anglaise, alors que la portée traduit déjà via
+    Regression: `set_results` placed `res.key.best.label` ('C major') and
+    the figures ('noire') raw — English leaked into a French UI and
+    French into an English UI, while the staff already translates via
     `tr_key_label`.
     """
     from types import SimpleNamespace
@@ -106,5 +106,39 @@ def test_results_panel_translates_key_label_and_figures(qapp):
         panel.set_results(res)
         assert panel._values["key key"].text() == "C major"
         assert panel._values["key figures"].text() == "quarter ×1"
+    finally:
+        panel.deleteLater()
+
+
+def test_results_panel_shows_the_tuning_offset_with_advice(qapp):
+    """The global tuning offset displays with an intonation advice (user
+    request): in tune <= 10 c, to watch <= 25 c, else a "détendez"
+    advice; the adjective follows the sign (sharp/flat). Without an
+    offset, the line stays at '—'."""
+    from types import SimpleNamespace
+
+    from v2m.gui.widgets import ResultsPanel
+
+    res = SimpleNamespace(
+        source="take.wav", duration_s=1.0, tempo=None, meter=None,
+        key=None, chord=None, notes=[],
+        tuning_offset_cents=-14.0,
+    )
+    panel = ResultsPanel()
+    try:
+        set_language("fr")
+        panel.set_results(res)
+        txt = panel._values["key tuning offset"].text()
+        assert "-14.0 c" in txt and "bas" in txt, txt
+        # in tune: no injunction, just the encouragement
+        panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": 5.0}))
+        assert "juste" in panel._values["key tuning offset"].text()
+        # clearly flat: the "détendez" advice
+        panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": 31.0}))
+        assert "détendez" in panel._values["key tuning offset"].text()
+        # a take without an offset measure reads 0.0 (the absorbed offset
+        # default) — the line stays informative, never empty
+        panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": None}))
+        assert "+0.0 c" in panel._values["key tuning offset"].text()
     finally:
         panel.deleteLater()

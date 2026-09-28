@@ -1,5 +1,6 @@
-"""Tests pipeline complet + rapports (bout en bout)."""
+"""Full pipeline + reports tests (end to end)."""
 
+import csv
 import json
 import types
 from pathlib import Path
@@ -7,14 +8,19 @@ from pathlib import Path
 import mido
 import numpy as np
 import soundfile as sf
-
 from conftest import SR, silence, sine_note
+
 from v2m.core.pipeline import analyze_signal
-from v2m.core.report import export_result, live_export_dir, live_take_name
+from v2m.core.report import ARTIFACT_EXTENSIONS, export_result
+from v2m.core.takes import (
+    live_export_dir,
+    live_take_name,
+    parse_take_name,
+)
 
 
 def _melody() -> np.ndarray:
-    """Mélodie simple : A3, C4, E4, G4 (arpège de La mineur)."""
+    """Simple melody: A3, C4, E4, G4 (an A-minor arpeggio)."""
     parts = []
     for hz in (220.0, 261.63, 329.63, 392.0):
         parts.append(sine_note(hz, 0.5))
@@ -46,7 +52,7 @@ def test_export_uses_the_analysis_grid_without_changing_the_artifacts(tmp_path):
 
 
 def test_export_result_one_interface(tmp_path):
-    """Une seule interface écrit les quatre artefacts + le dict de rapport."""
+    """One interface writes the four artifacts + the report dict."""
     y = _melody()
     res = analyze_signal(y, SR, source="synthetic")
 
@@ -77,9 +83,29 @@ def test_live_take_name_is_unique_and_recognisable():
     assert n1 == n2  # same second = same take, distinct only across seconds
 
 
+def test_the_take_name_grammar_round_trips_through_its_owner():
+    """Whoever writes take names can re-read them — one grammar.
+
+    `parse_take_name` is the reader of what `live_take_name` writes:
+    grouping them by date (coherence follow-up) does not re-encode the
+    format. A name that is not a take returns None instead of being
+    guessed.
+    """
+    import time as _time
+
+    stamp = parse_take_name(live_take_name())
+    assert stamp is not None
+    date, clock = stamp
+    assert date == _time.strftime("%Y%m%d") and len(clock) == 6
+    # the passed path is reduced to its name (a folder may precede)
+    assert parse_take_name(Path("prises_live") / live_take_name()) == stamp
+    for not_a_take in ("chant", "live_", "live_2026_000000",
+                       "live_20260926_00063", "prise2"):
+        assert parse_take_name(not_a_take) is None, not_a_take
+
+
 def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch):
-    """Le chemin CLI `v2m live` finit dans le sous-dossier dédié, comme la GUI."""
-    import v2m.live as live_mod
+    """The CLI path `v2m live` ends in the dedicated sub-folder, like the GUI."""
     from v2m.live import LiveSession
 
     monkeypatch.chdir(tmp_path)  # the take lands under tmp, not the repo root
@@ -100,25 +126,48 @@ def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch):
     take_dir = tmp_path / "prises_live" / session.out_stem
     assert Path(returned).name == f"{session.out_stem}.mid"
     assert Path(returned).exists()
-    for ext in (".mid", ".musicxml", ".json", ".csv"):
-        assert (take_dir / f"{session.out_stem}{ext}").exists(), f"{ext} manquant"
+    for ext in ARTIFACT_EXTENSIONS:
+        assert (take_dir / f"{session.out_stem}{ext}").exists(), f"{ext} missing"
 
 
 def test_live_exports_are_isolated_per_take(tmp_path):
-    """Un live écrit dans `prises_live/<stem>/`, à l'abri des autres prises."""
+    """A live writes into `prises_live/<stem>/`, sheltered from other takes."""
     res = analyze_signal(_melody(), SR, source="live")
     stem = live_take_name()
     export_result(res, live_export_dir(stem) / stem)
     take_dir = live_export_dir(stem)
     assert take_dir.is_dir()
     assert take_dir.parent.name == "prises_live"
-    assert sorted(p.name for p in take_dir.glob(f"{stem}.*")) == [
-        f"{stem}.csv", f"{stem}.json", f"{stem}.mid", f"{stem}.musicxml",
+    # the constant IS the folder contract: the disk must obey it
+    assert sorted(p.name for p in take_dir.glob(f"{stem}.*")) == sorted(
+        f"{stem}{ext}" for ext in ARTIFACT_EXTENSIONS
+    )
+
+
+def test_coherence_csv_next_to_the_take(tmp_path):
+    """The coherence block also ships as CSV: swallowed phrases followed
+    from one session to the next in a spreadsheet, without re-reading the
+    JSON."""
+    res = analyze_signal(_melody(), SR, source="synthetic")
+    stem = tmp_path / "prise"
+    export_result(res, stem)
+    with open(tmp_path / "prise.coherence.csv", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    assert rows[0] == [
+        "start_s", "duration_s", "midi", "inner_range_st",
+        "secondary_plateau_s", "secondary_plateau_start_s",
+        "secondary_plateau_midi", "secondary_plateau_offset_st",
     ]
+    # clean melody: one row per suspect, header alone when none
+    rep = json.loads(open(tmp_path / "prise.json", encoding="utf-8").read())
+    assert len(rows) == 1 + len(rep["coherence"]["suspects"])
+    for row, s in zip(rows[1:], rep["coherence"]["suspects"], strict=True):
+        assert float(row[0]) == s["start_s"]
+        assert int(row[2]) == s["midi"]
 
 
 def test_wav_file_roundtrip(tmp_path):
-    """E2E : écrit un WAV, l'analyse via le chemin fichier."""
+    """E2E: writes a WAV, analyzes it through the file path."""
     from v2m.core.audio_io import load_file
 
     wav_path = str(tmp_path / "melody.wav")
@@ -129,13 +178,13 @@ def test_wav_file_roundtrip(tmp_path):
 
 
 def test_threshold_policy_has_one_owner():
-    """Les seuils d'analyse ont UNE politique : pipeline FILE_CONF / LIVE_CONF.
+    """The analysis thresholds have ONE policy: pipeline FILE_CONF / LIVE_CONF.
 
-    La régression à refuser : un défaut réécrit localement (la GUI
-    hardcodait son propre 0.6, le CLI et LiveTake les leurs) — changer la
-    politique deviendrait une chasse aux copies. min_note_s appartient à
-    notes.py (le domaine), bpm_range à tempo.py (le repli est son métier) :
-    le CLI et le dataclass les lisent, personne ne les réécrit.
+    The regression to refuse: a default rewritten locally (the GUI
+    hardcoded its own 0.6, the CLI and LiveTake theirs) — changing the
+    policy would become a copy hunt. min_note_s belongs to notes.py (the
+    domain), bpm_range to tempo.py (the fallback is its trade): the CLI
+    and the dataclass read them, nobody rewrites them.
     """
     from v2m import cli
     from v2m.core.live_session import LiveTake

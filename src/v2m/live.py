@@ -7,7 +7,9 @@ import time
 from .core.i18n import note_display_pair, tr, tr_chord_label, tr_figure, tr_key_label
 from .core.live_session import LiveEvent, LiveTake
 from .core.pipeline import LIVE_CONF
-from .core.report import export_result, live_export_dir, live_take_name
+from .core.report import export_result
+from .core.takes import ARTIFACTS as ARTIFACT_EXTENSIONS
+from .core.takes import live_export_dir, live_take_name
 
 
 class LiveSession:
@@ -71,8 +73,7 @@ class LiveSession:
         if res.chord:
             print(f"{tr('key chord label')} : {tr_chord_label(res.chord.best.label)}")
         print(f"{tr('key notes label')} : {len(res.notes)}")
-        print(
-            f"{tr('key export label')} : {take_dir / self.out_stem}.mid, {take_dir / self.out_stem}.musicxml, "
-            f"{take_dir / self.out_stem}.json, {take_dir / self.out_stem}.csv"
-        )
+        stem_path = take_dir / self.out_stem
+        listed = ", ".join(f"{stem_path}{ext}" for ext in ARTIFACT_EXTENSIONS)
+        print(f"{tr('key export label')} : {listed}")
         return str(take_dir / f"{self.out_stem}.mid")

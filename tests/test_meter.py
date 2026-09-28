@@ -1,5 +1,5 @@
-"""Tests meter.py : détection simple vs composée (6/8), et positions rendues
-par la Grille (grid.py) que la détection alimente."""
+"""meter.py tests: simple vs compound (6/8) detection, and positions rendered
+by the Grid (grid.py) that the detection feeds."""
 
 from v2m.core.grid import DEFAULT_METER, BeatGrid, Meter
 from v2m.core.meter import detect_meter
@@ -14,14 +14,14 @@ def _notes_from_starts(starts, dur=BEAT * 0.8, midi=60):
 
 
 def test_binary_grid_no_conclusion():
-    """Grille binaire (attaques sur les temps et double-croches) : 2/4, 3/4
-    et 4/4 sont indiscernables sans accents -> None (4/4 par défaut)."""
+    """Binary grid (attacks on beats and sixteenths): 2/4, 3/4 and 4/4 are
+    indistinguishable without accents -> None (4/4 by default)."""
     starts = [i * BEAT for i in range(8)] + [i * BEAT + 0.375 for i in range(8)]
     assert detect_meter(_notes_from_starts(starts), BPM) is None
 
 
 def test_detect_6_8_by_offbeats():
-    """6/8 : attaques sur les temps pointés 1 et 2 (croches 1 et 4)."""
+    """6/8: attacks on dotted beats 1 and 2 (eighths 1 and 4)."""
     eighth = 60.0 / BPM / 2
     starts = [m * 1.5 + e for m in range(3) for e in (0.0, 3 * eighth)]
     meter = detect_meter(_notes_from_starts(starts), BPM)
@@ -30,28 +30,28 @@ def test_detect_6_8_by_offbeats():
 
 
 def test_6_8_beats_fall_between_binary_slots():
-    """Le cas qui casse un rendu 4/4 : le 2e temps pointé du 6/8 tombe sur
-    le « et » binaire (0,75 noire) — indétectable d'une grille simple."""
+    """The case that breaks a 4/4 rendering: the 6/8's 2nd dotted beat falls
+    on the binary "and" (0.75 quarter) — undetectable from a simple grid."""
     eighth = 60.0 / BPM / 2
-    second_slot = 3 * eighth  # 0,75 s = 1,5 noire
+    second_slot = 3 * eighth  # 0.75 s = 1.5 quarters
     assert abs((second_slot / (60.0 / BPM)) - 1.5) < 1e-9
 
 
 def test_binary_only_returns_none():
-    """Grille strictement binaire (temps et croches) : rien sur les temps
-    pointés ternaires -> aucune conclusion."""
+    """Strictly binary grid (beats and eighths): nothing on the ternary
+    dotted beats -> no conclusion."""
     eighth = BEAT / 2
     starts = [i * BEAT for i in range(8)] + [i * BEAT + eighth for i in range(8)]
     assert detect_meter(_notes_from_starts(starts), BPM) is None
 
 
 def test_a_binary_4_4_line_is_not_6_8():
-    """Régression mesurée : une ligne en 4/4 parfaitement régulière sortait
-    en 6/8, ce qui décale toutes les barres de mesure.
+    """Measured regression: a perfectly regular 4/4 line came out as 6/8,
+    which shifts every bar line.
 
-    Ses attaques tombent pourtant souvent sur la grille ternaire (0,71 sur
-    le motif de référence) — c'est pourquoi l'alignement seul ne décide pas :
-    la grille simple doit être nettement moins bien expliquée (0,86).
+    Its attacks often land on the ternary grid (0.71 on the reference
+    motif) — that is why alignment alone does not decide: the simple grid
+    must be clearly less well explained (0.86).
     """
     starts = [i * BEAT + h * BEAT / 2 for i in range(4) for h in (0, 1)]
     meter = detect_meter(_notes_from_starts(starts), BPM)
@@ -87,7 +87,7 @@ def test_note_positions_compound():
 
 
 def test_compound_meter_length():
-    """6/8 = 6 croches = 3 noires = 1,5 s à 120 BPM ; 2 temps pointés affichés."""
+    """6/8 = 6 eighths = 3 quarters = 1.5 s at 120 BPM; 2 dotted beats displayed."""
     meter = Meter(6, 8)
     assert meter.measure_quarters == 3.0
     assert BeatGrid(BPM, meter).measure_seconds == 1.5
@@ -97,46 +97,71 @@ def test_compound_meter_length():
 
 
 def test_reads_dotted_pulse():
-    """Le stress composé est une alternance forte/faible de période 2.
+    """Compound stress is a strong/weak alternation of period 2.
 
-    Le discriminant timing-seul est impossible : des écarts uniformes
-    décrivent aussi bien « noires à 2/3 du tempo » que « temps pointés ».
-    C'est l'alternance qui tranche — d'où la force d'attaque (live comme
-    hors ligne) en entrée de la lecture temps pointés.
+    A timing-only discriminator is impossible: uniform gaps describe
+    "quarters at 2/3 of the tempo" just as well as "dotted beats".
+    The alternation decides — hence the attack strength (live and
+    offline alike) feeding the dotted-beat reading.
     """
     from v2m.core.meter import reads_dotted_pulse
 
-    # alternance forte/faible stricte : signature du stress composé
+    # strict strong/weak alternation: the compound-stress signature
     dotted = _notes_from_starts([i * 1.5 for i in range(9)])
     for i, n in enumerate(dotted):
         n.strength = 0.9 if i % 2 == 0 else 0.2
     assert reads_dotted_pulse(dotted)
 
-    # un temps plat (toutes forces égales) n'alterne pas : rien à conclure
+    # a flat beat (all strengths equal) does not alternate: nothing to conclude
     flat = _notes_from_starts([i * 0.5 for i in range(12)])
     for n in flat:
         n.strength = 0.5
     assert not reads_dotted_pulse(flat)
 
-    # moins de 4 notes : pas de période observable
+    # fewer than 4 notes: no observable period
     few = _notes_from_starts([0.0, 0.5, 1.0])
     for i, n in enumerate(few):
         n.strength = 0.9 if i % 2 == 0 else 0.2
     assert not reads_dotted_pulse(few)
 
 
-def test_detect_meter_6_8_from_dotted_pulse():
-    """Une prise sur temps pointés EST publiée en 6/8 quand le stress
-    alterne (fort/faible) — la signature du stress composé.
+def test_two_runs_of_constant_level_never_read_dotted():
+    """The 2026-09-27 regression (take 204633, fake 156 -> 234 BPM).
 
-    C'est le miroir live de `test_detect_6_8_by_offbeats` : à 100 BPM,
-    les médianes vivaient comme des noires d'un 67-BPM (le repli ×2 ne
-    répare jamais le rapport ×1,5) et la mesure composée n'était jamais
-    publiée. detect_meter saute maintenant l'étape accents (qui lirait
-    les phases 0/2 de la grille ternaire comme une valse) pour aller
-    directement à la grille ternaire.
+    Two RUNS of constant level (a loud phrase, a soft one) validate each
+    other at lag 2: `111111000000000` scores 11/13 on ALTERNATE_SHARE and
+    passes MINORITY_SHARE — but a true alternation CHANGES label at
+    almost every step, runs only at their boundary (measured: 1 change in
+    14 against 5-8 in ~16 for the three sister takes of the same melody).
+    The change-rate guard refuses the family without touching the true
+    alternation.
     """
-    starts = [i * 0.9 for i in range(10)]  # temps pointés à 100 BPM
+    from v2m.core.meter import reads_dotted_pulse
+
+    runs = _notes_from_starts([i * 0.5 for i in range(15)])
+    for i, n in enumerate(runs):
+        n.strength = 0.9 if i < 6 else 0.1  # 111111000000000
+    assert not reads_dotted_pulse(runs)
+
+    # the healthy alternation at the SAME note count still reads
+    alternating = _notes_from_starts([i * 0.5 for i in range(15)])
+    for i, n in enumerate(alternating):
+        n.strength = 0.9 if i % 2 == 0 else 0.1
+    assert reads_dotted_pulse(alternating)
+
+
+def test_detect_meter_6_8_from_dotted_pulse():
+    """A take on dotted beats IS published as 6/8 when the stress
+    alternates (strong/weak) — the compound-stress signature.
+
+    It is the live mirror of `test_detect_6_8_by_offbeats`: at 100 BPM,
+    the medians lived as quarters of a 67-BPM (the x2 fold never repairs
+    the x1.5 ratio) and the compound meter was never published.
+    detect_meter now skips the accents stage (which would read the
+    ternary grid's phases 0/2 as a waltz) to go straight to the ternary
+    grid.
+    """
+    starts = [i * 0.9 for i in range(10)]  # dotted beats at 100 BPM
     notes = _notes_from_starts(starts, dur=0.75)
     for i, n in enumerate(notes):
         n.strength = 0.9 if i % 2 == 0 else 0.2

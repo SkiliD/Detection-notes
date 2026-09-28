@@ -12,6 +12,7 @@ from .audio_io import LiveCapture
 from .figures import label_notes
 from .grid import BeatGrid
 from .i18n import tr
+from .keys import detect_key, snap_to_key
 from .liveseg import LiveNote, LiveNoteSegmenter, LivePitchStream
 from .meter import detect_meter
 from .pipeline import LIVE_CONF, AnalysisResult, AnalyzeOptions, analyze_signal
@@ -57,10 +58,14 @@ class LiveTake:
         min_conf: float = LIVE_CONF,
         sr: int = audio_io.SR,
         on_event: Callable[[LiveEvent], None] | None = None,
+        stream_factory: "audio_io.StreamFactory | None" = None,
     ) -> None:
         self.min_conf = min_conf
         self.sr = sr
         self.on_event = on_event
+        # None = the real microphone; a replay injects its own stream opener
+        # (the injection, not a global patch, is what keeps a GUI replay safe)
+        self.stream_factory = stream_factory
         self.capture: LiveCapture | None = None
         self.stream: LivePitchStream | None = None
         self._signal: np.ndarray | None = None
@@ -69,6 +74,7 @@ class LiveTake:
         self._state = "idle"
         self._error_emitted = False
         self._failure: Exception | None = None
+        self._snapped = 0  # live notes the key-aware snap retuned (see _apply_grid_policy)
 
     @property
     def state(self) -> str:
@@ -116,7 +122,10 @@ class LiveTake:
             return
         if self._state == "stopped":
             raise RuntimeError(tr("err take stopped"))
-        self.capture = LiveCapture(on_block=self._on_block, sr=self.sr)
+        self._snapped = 0  # a NEW take starts with its own snap history
+        self.capture = LiveCapture(
+            on_block=self._on_block, sr=self.sr, stream_factory=self.stream_factory
+        )
         self.capture.start()
         self._state = "recording"
 
@@ -160,9 +169,27 @@ class LiveTake:
             grid = BeatGrid(bpm).with_meter(detect_meter(notes, bpm))
             label_notes(notes, grid)
             self._grid = grid
+        # the key-aware snap, applied to the CONFIRMED notes as they close:
+        # the live twin of pipeline's snap_to_key. The offline pass absorbs
+        # the global tuning offset BEFORE rounding, the live segmenter rounds
+        # its running median raw — the same plateau read by two roundings is
+        # the dominant family of live/final diffs (the ±1 labels measured on
+        # the real takes). Snapping live toward the key's degree, as soon as
+        # the evidence (the take's own notes so far) can read one, closes
+        # that gap where the singer watches it — the counter and the final
+        # JSON then tell the same story. LiveNote carries its residual
+        # deviation as `dev`, the snap's dev_attr twin of Note.deviation.
+        if notes:
+            key = detect_key(notes)
+            self._snapped += snap_to_key(notes, key.best, dev_attr="dev")
         self._emit(
             LiveEvent("note_closed", time_s=now_s, note=notes[-1], grid=self._grid)
         )
+
+    @property
+    def snapped_notes(self) -> int:
+        """How many live notes the key-aware pull has retuned so far."""
+        return self._snapped
 
     def stop(self) -> np.ndarray:
         """Stop once, drain captured blocks, flush segmentation, keep signal."""
@@ -186,7 +213,10 @@ class LiveTake:
 
         Idempotent in both directions: a successful analysis is reused, and
         a failure re-raises its error WITHOUT re-emitting the event (the
-        adapter already showed it once).
+        adapter already showed it once). The result carries the take's OWN
+        live/final decomposition (from the segmenter's confirmed notes,
+        through the ONE matching policy): the JSON block, the results-panel
+        explainer and the per-take archive read the same dict.
         """
         if self._result is not None:
             return self._result, self.signal
@@ -204,6 +234,21 @@ class LiveTake:
             )
         except Exception as exc:
             self._fail(exc)
+        try:
+            from .compare import breakdown
+
+            result.live_vs_final = breakdown(
+                self.segmenter.notes if self.segmenter else [],
+                result.notes,
+                result.grid,
+            )
+        except Exception:
+            # the attach itself can fail (a result that cannot even carry the
+            # attribute): the nicety must not cost the take in ANY case
+            try:
+                result.live_vs_final = None
+            except Exception:
+                pass
         self._result = result
         self._emit(LiveEvent("finalized", signal=signal, result=result))
         return result, signal

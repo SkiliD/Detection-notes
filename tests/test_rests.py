@@ -1,13 +1,13 @@
-"""Tests rests : respirations entre phrases et figures de silence.
+"""Rests tests: breaths between phrases and rest figures.
 
-`rests.py` n'avait pas de test direct (il était couvert indirectement par la
-justesse vocale, la Portée et le MusicXML). Ce fichier-ci fixe son contrat :
-ce qu'un écart devient, et sous quel nom.
+`rests.py` had no direct test (it was covered indirectly by the vocal
+accuracy, the Staff and the MusicXML). This file pins its contract: what
+a gap becomes, and under which name.
 
-Garde-fous déjà portés par le code, et testés ici parce qu'ils sont le
-contrat du module : notes désordonnées ou qui se chevauchent (le curseur ne
-recule jamais), écart sous le seuil de couture, fin de prise qui n'est pas un
-silence, tempo absent (pas de figure devinée).
+Guards already carried by the code, tested here because they are the
+module's contract: unordered or overlapping notes (the cursor never goes
+back), a gap under the seam threshold, a take's end that is not a rest,
+an absent tempo (no guessed figure).
 """
 
 from v2m.core.grid import BeatGrid
@@ -25,8 +25,8 @@ def _note(midi, start, dur_s, figure=None):
 
 # ------------------------------------------------------------------- figures
 def test_classify_rest_speaks_rest_not_note():
-    """Le classifieur est celui des notes, le lexique est celui des silences :
-    1 temps est une « noire » chantée, un « soupir » écrit."""
+    """The classifier is the notes' one, the lexicon the rests': a 1-beat
+    gap is a sung "noire", a written "soupir"."""
     assert classify_rest(1.0) == "soupir"
     assert classify_rest(2.0) == "demi-pause"
     assert classify_rest(4.0) == "pause"
@@ -34,9 +34,9 @@ def test_classify_rest_speaks_rest_not_note():
 
 
 def test_classify_rest_never_labels_a_triplet():
-    """Mesuré sur chant.wav : une respiration de 1,17 temps sortait en
-    « triolet de blanche » (13,5 % d'erreur) devant la noire (16,9 %), ce qui
-    gravait un silence absurde. Un silence n'est jamais sous un crochet."""
+    """Measured on chant.wav: a 1.17-beat breath came out as "triolet de
+    blanche" (13.5% error) ahead of the quarter (16.9%), engraving an
+    absurd silence. A rest is never under a bracket."""
     for beats in (0.33, 0.67, 1.17, 1.33, 2.67):
         fig = classify_rest(beats)
         assert fig is None or "triolet" not in fig, (beats, fig)
@@ -48,8 +48,8 @@ def test_classify_rest_rejects_a_non_positive_duration():
 
 
 def test_rest_figures_are_translatable():
-    """Figures stockées en français (convention du cœur), traduites à
-    l'affichage : « demi-pause » ne doit pas sortir en « demi-whole rest »."""
+    """Figures stored in French (the core's convention), translated for
+    display: "demi-pause" must not come out as "demi-whole rest"."""
     from v2m.core.i18n import set_language, tr_figure
 
     set_language("en")
@@ -60,7 +60,7 @@ def test_rest_figures_are_translatable():
         set_language("fr")
 
 
-# ----------------------------------------------------------------- détection
+# ----------------------------------------------------------------- detection
 def test_lead_in_and_breaths_both_become_rests():
     notes = [_note(60, 0.41, 0.2), _note(62, 1.0, 0.2)]
     rests = detect_rests(notes, GRID)
@@ -70,7 +70,7 @@ def test_lead_in_and_breaths_both_become_rests():
 
 
 def test_the_tail_of_the_take_is_not_a_rest():
-    """Une prise s'arrête où l'ingénieur a coupé, pas où la chanson finit."""
+    """A take stops where the engineer cut, not where the song ends."""
     rests = detect_rests([_note(60, 0.0, 0.5), _note(62, 1.0, 0.5)], GRID)
     assert max(r.end for r in rests) <= 1.0
 
@@ -82,8 +82,8 @@ def test_lead_in_can_be_excluded():
 
 
 def test_a_seam_is_not_a_breath():
-    """Sous le seuil, l'écart est une couture de segmentation (le
-    remplisseur d'interpolation travaille dans cette zone)."""
+    """Under the threshold, the gap is a segmentation seam (the
+    interpolation filler works in that zone)."""
     notes = [_note(60, 0.0, 0.5), _note(62, 0.53, 0.5)]
     assert detect_rests(notes, GRID, include_lead_in=False) == []
     assert MIN_REST_S > 0.03
@@ -92,7 +92,7 @@ def test_a_seam_is_not_a_breath():
 def test_unordered_and_overlapping_notes_never_go_backwards():
     notes = [
         _note(62, 1.0, 0.5),
-        _note(60, 0.0, 0.8),   # chevauche le suivant
+        _note(60, 0.0, 0.8),   # overlaps the next one
         _note(64, 0.4, 0.4),
         _note(65, 2.0, 0.4),
     ]
@@ -110,14 +110,14 @@ def test_figure_follows_the_grid_tempo():
 
 
 def test_without_a_grid_the_rests_stay_unlabeled():
-    """Sans Grille on ne devine pas de figure : la Portée grave d'après la
-    durée réelle, ce qui est honnête."""
+    """Without a Grid no figure is guessed: the Staff engraves from the
+    real duration, which is honest."""
     notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]
     rests = detect_rests(notes)
     assert rests and all(r.figure is None for r in rests)
 
 
-# -------------------------------------------------------- Portée et MusicXML
+# -------------------------------------------------------- Staff and MusicXML
 def test_layout_engraves_a_labeled_breath_in_the_gap():
     notes = [_note(60, 0.0, 0.5, figure="noire"), _note(62, 1.0, 0.5, figure="noire")]
     rests = [Rest(start=0.5, end=1.0, figure="soupir")]
@@ -127,8 +127,8 @@ def test_layout_engraves_a_labeled_breath_in_the_gap():
 
 
 def test_a_missing_tempo_never_raises_mid_engraving():
-    """Garde-fou : la mise en page et l'export divisent tous deux par le tempo,
-    un tempo absent ne doit pas faire lever une analyse déjà terminée."""
+    """Guard: layout and export both divide by the tempo, an absent tempo
+    must not make a finished analysis raise."""
     from v2m.core.musicxml import build_score_xml
 
     notes = [_note(60, 0.0, 0.5, figure="noire"), _note(62, 1.0, 0.5, figure="noire")]
@@ -140,9 +140,9 @@ def test_a_missing_tempo_never_raises_mid_engraving():
 
 
 def test_musicxml_writes_the_written_duration_not_a_wider_label():
-    """Un <type> qui contredit la <duration> rend le fichier bancal : c'est la
-    durée qui remplit la mesure, donc une demi-pause détectée dans un temps
-    écrit reste une figure d'un temps."""
+    """A <type> contradicting the <duration> makes the file flimsy: the
+    duration is what fills the measure, so a half rest detected inside a
+    written beat stays a one-beat figure."""
     from v2m.core.musicxml import build_score_xml
 
     notes = [_note(60, 0.0, 0.5), _note(62, 1.0, 0.5)]
@@ -153,8 +153,8 @@ def test_musicxml_writes_the_written_duration_not_a_wider_label():
 
 
 def test_musicxml_fuses_a_silent_run_into_a_real_figure():
-    """Une respiration de deux temps s'écrit en UNE demi-pause de silence, pas
-    en deux noires de remplissage."""
+    """A two-beat breath is written as ONE half rest, not two filler
+    quarters."""
     from v2m.core.musicxml import build_score_xml
 
     notes = [_note(60, 0.0, 0.5), _note(62, 1.5, 0.5)]

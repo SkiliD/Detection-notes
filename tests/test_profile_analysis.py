@@ -1,14 +1,14 @@
-"""Le diagnostic de profilage doit rester branché sur le vrai pipeline.
+"""The profiling diagnostic must stay wired to the real pipeline.
 
-Le script ne réimplémente pas les étapes : il les lit dans le callback
-`progress` d'`analyze_signal`. Ce test compare donc les libellés RÉELLEMENT
-publiés par le pipeline à ceux que le script affiche — si une étape est
-renommée ou ajoutée, le tableau suit (et le test le vérifie), sans qu'aucune
-liste ne soit à maintenir ici.
+The script does not re-implement the stages: it reads them from the
+`progress` callback of `analyze_signal`. This test therefore compares
+the labels the pipeline ACTUALLY publishes to what the script shows —
+if a stage is renamed or added, the table follows (and the test checks
+it), with no list to maintain here.
 
-Un seul appel au script couvre le cas riche (moyenne + cProfile + JSON) :
-chaque exécution paie l'interpréteur et la compilation numba, la suite reste
-à quelques secondes.
+A single script call covers the rich case (mean + cProfile + JSON):
+every run pays the interpreter and the numba compilation, so the suite
+keeps to a few seconds.
 """
 
 from __future__ import annotations
@@ -50,15 +50,17 @@ def _run(*args: str) -> subprocess.CompletedProcess:
 
 
 def _pipeline_stages(wav: str) -> list[str]:
-    """Étapes annoncées par le pipeline sur ce fichier, closing callback exclu.
+    """The stages the pipeline announces on this file, closing callback dropped.
 
-    Le dernier appel (fraction 1.0, « Terminé ») ne fait que fermer la
-    dernière étape : le chronomètre le laisse tomber, d'où `[:-1]`.
+    The last call (fraction 1.0, "Done") only closes the last stage: the
+    timer drops it, hence `[:-1]`.
     """
     labels: list[str] = []
     y, _ = sf.read(wav, dtype="float32")
+    from v2m.core.i18n import tr
+
     analyze_signal(y, ANALYSIS_SR, progress=lambda f, m: labels.append(m))
-    assert labels[-1] == "Terminé"
+    assert labels[-1] == tr("progress done")  # the closing callback, any language
     return labels[:-1]
 
 
@@ -69,39 +71,48 @@ def test_table_json_and_profiler(tmp_path):
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
 
-    # tableau des étapes : toutes celles du pipeline, une ligne chacune
-    assert "Étape" in out and "TOTAL" in out and "Étape la plus lourde" in out
-    assert "décodage du fichier" in out
-    assert "export (4 artefacts" in out
-    assert "passage à blanc" in out, "le warm-up par défaut doit être annoncé"
-    assert "moyenne sur 2 exécutions" in out
-    # chaque étape occupe UNE ligne du tableau — la ligne récapitulative
-    # « Étape la plus lourde : <label> » répète un libellé à dessein, elle
-    # ne compte pas comme une seconde étape (flake de timing sinon : selon
-    # la machine, n'importe quelle étape peut être la plus lourde).
+    # stage table: every one of the pipeline's, one row each
+    assert "Stage" in out and "TOTAL" in out and "Heaviest stage" in out
+    assert "file decoding" in out
+    assert "export (5 artifacts" in out
+    assert "warm-up" in out, "the default warm-up must be announced"
+    assert "mean over 2 runs" in out
+    # each stage occupies ONE table row — the TOTAL row
+    # "Heaviest stage : <label>" repeats a label on purpose, it
+    # must not count as a second stage (timing flake otherwise: depending
+    # on the machine, any stage can be the heaviest).
     body_lines = [
         line for line in out.splitlines() if not line.startswith("Étape la plus lourde")
     ]
     for label in _pipeline_stages(wav):
         assert sum(label in line for line in body_lines) == 1, (
-            f"étape absente ou dupliquée : {label}"
+            f"stage missing or duplicated : {label}"
         )
-    assert "Terminé" not in out  # closing callback: never a row
-    assert "20%" in out  # les fractions viennent du callback, pas d'une copie
+    assert "Done" not in out  # closing callback: never a row
+    assert "20%" in out  # the fractions come from the callback, not a copy
 
-    # cProfile : code du projet d'un côté, bibliothèques de l'autre
-    assert "Code du projet" in out and "Bibliothèques" in out
+    # cProfile: project code on one side, libraries on the other
+    assert "Project code" in out and "Libraries" in out
 
+    # per-stage memory peak (tracemalloc, Python allocations): the column
+    # is in the table, the total in the JSON — the profile covers CPU
+    # AND memory
+    assert "Mem peak" in out and "Mem peak" in out
     data = json.loads(report.read_text(encoding="utf-8"))
     assert data["runs"] == 2
     assert data["audio_s"] == pytest.approx(1.5, abs=0.05)
     assert data["n_notes"] >= 3
     assert data["total_s"] > 0
+    assert data["peak_mib"] > 0
     stages = data["stages"]
-    assert stages[0]["label"] == "décodage du fichier"
-    # >= 0 : une étape quasi gratuite (détection des respirations) peut
-    # mesurer sous la résolution d'écriture du JSON — 0.0 est légitime.
+    assert stages[0]["label"] == "file decoding"
+    # >= 0: a nearly free stage (rest detection) may
+    # measure under the JSON's write resolution — 0.0 is legitimate.
     assert all(row["seconds"] >= 0 for row in stages)
+    # the decoding, outside the trace, carries a null peak; the analyzed
+    # stages (pYIN at least) carry a positive one
+    assert stages[0]["peak_mib"] == 0.0
+    assert any(row["peak_mib"] > 0 for row in stages[1:-1])
     assert sum(row["share_pct"] for row in stages) == pytest.approx(100.0, abs=0.5)
     assert any(row["fraction"] is not None for row in stages)
     assert data["profile"] and isinstance(data["profile"][0]["project_code"], bool)

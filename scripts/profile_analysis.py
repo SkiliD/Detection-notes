@@ -1,19 +1,26 @@
-"""Diagnostic : où passe le temps d'une analyse ?
+"""Diagnose where an analysis's time goes.
 
-Usage :
+Usage:
     python scripts/profile_analysis.py [audio.wav] [--repeat N] [--profile]
-                                       [--top N] [--json mesures.json] [--output DIR]
+                                       [--top N] [--json measures.json] [--output DIR]
 
-Le tableau des étapes est construit à partir du callback `progress`
-d'`analyze_signal` : le pipeline annonce déjà chaque frontière d'étape, donc
-le script chronomètre le VRAI pipeline au lieu de le réimplémenter (une
-nouvelle étape apparaît ici toute seule). La colonne « temps réel » divise la
-durée de l'étape par celle de l'audio : 0,07× signifie 14× plus rapide que la
-lecture — c'est la métrique qui compte pour une longue prise.
+The stage table is built from `analyze_signal`'s `progress` callback: the
+pipeline already announces every stage boundary, so the script times the
+REAL pipeline instead of re-implementing it (a new stage shows up here on
+its own). The "real time" column divides the stage duration by the audio's:
+0.07x means 14x faster than listening — the metric that matters for a long
+take.
 
-`--profile` ajoute un tableau cProfile (temps propre) : il mesure une
-exécution PROFILÉE, à comparer entre fonctions uniquement, pas avec le
-tableau ci-dessus.
+Each stage also carries its MEMORY PEAK (tracemalloc, Python allocations):
+the profile covers CPU and memory — a fast stage that allocates big (pYIN
+on a long take) shows up. The measured reference: 66 MB total peak on a
+68 s take; a peak that doubles without the take's duration doubling is a
+leak to hunt. tracemalloc traces PYTHON allocations only (numpy buffers
+count, librosa's C labels partially): it is a comparative order of
+magnitude, not an RSS.
+
+`--profile` adds a cProfile table (own time): it measures a PROFILED run,
+to compare between functions only, not with the table above.
 """
 from __future__ import annotations
 
@@ -24,6 +31,7 @@ import pstats
 import sys
 import tempfile
 import time
+import tracemalloc
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,6 +54,7 @@ class Stage:
     label: str
     fraction: float | None  # progress fraction, None for non-pipeline steps
     seconds: float
+    peak_mib: float = 0.0   # tracemalloc peak of Python allocations, in MiB
 
     @property
     def start_text(self) -> str:
@@ -53,23 +62,38 @@ class Stage:
 
 
 class StageTimer:
-    """Turn `progress(fraction, message)` into per-stage wall-clock timings.
+    """Turn `progress(fraction, message)` into per-stage timings + memory.
 
     The pipeline reports a stage BEFORE running it, so the time between two
     callbacks is the duration of the stage announced by the first one. The
-    closing callback (1.0, "Terminé") ends the last real stage and opens one
+    closing callback (1.0, "Done") ends the last real stage and opens one
     that nothing follows: `close()` drops it.
+
+    Each stage also measures its tracemalloc PEAK (Python allocations only,
+    see the module docstring): the trace runs for the WHOLE analysis and
+    each stage reports the peak reached during its own span. The counter is
+    RESET at each stage boundary — a stage's peak is its own allocations,
+    not a running total, so the table answers "which stage allocates the
+    most" and the TOTAL row answers "how much at once".
     """
 
-    def __init__(self) -> None:
+    def __init__(self, with_memory: bool = True) -> None:
         self.stages: list[Stage] = []
         self._pending: tuple[str, float, float] | None = None
+        self.with_memory = with_memory
 
     def __call__(self, fraction: float, message: str) -> None:
         now = time.perf_counter()
         if self._pending is not None:
             label, frac, started = self._pending
-            self.stages.append(Stage(label, frac, now - started))
+            peak = (
+                tracemalloc.get_traced_memory()[1] / (1024 * 1024)
+                if self.with_memory
+                else 0.0
+            )
+            self.stages.append(Stage(label, frac, now - started, peak))
+            if self.with_memory:
+                tracemalloc.reset_peak()
         self._pending = (message, float(fraction), now)
 
     def close(self) -> list[Stage]:
@@ -98,6 +122,7 @@ class Measurement:
     rows: list[Stage] = field(default_factory=list)
     total_s: float = 0.0
     audio_s: float = 0.0
+    peak_mib: float = 0.0   # whole-analysis tracemalloc peak (Python allocs)
     sr: int = audio_io.SR
     n_notes: int = 0
     bpm: float | None = None
@@ -111,10 +136,18 @@ def measure(
 ) -> Measurement:
     """Analyze then export an already decoded signal, timing every step."""
     m = Measurement(path_name=str(path), opts=opts)
-    m.rows.append(Stage("décodage du fichier", None, load_s))
+    m.rows.append(Stage("file decoding", None, load_s))
     m.audio_s = len(y) / audio_io.SR
 
-    timer = StageTimer()
+    # tracemalloc wraps the WHOLE measured run (analysis + export): the
+    # decode above already paid its allocations. Each stage reports its own
+    # span's peak (reset at every stage boundary); the TOTAL row carries the
+    # whole run's peak. The trace overhead on timing is a few percent,
+    # accepted for the memory column.
+    with_memory = True
+    timer = StageTimer(with_memory=with_memory)
+    if with_memory:
+        tracemalloc.start()
     t0 = time.perf_counter()
     res = analyze_signal(y, audio_io.SR, source=str(path), opts=opts, progress=timer)
     analyze_s = time.perf_counter() - t0
@@ -123,7 +156,15 @@ def measure(
     t1 = time.perf_counter()
     export_result(res, out_dir / path.stem, with_pitch_curve=True)
     export_s = time.perf_counter() - t1
-    m.rows.append(Stage("export (4 artefacts, écriture disque)", None, export_s))
+    export_peak = (
+        tracemalloc.get_traced_memory()[1] / (1024 * 1024) if with_memory else 0.0
+    )
+    m.rows.append(
+        Stage("export (5 artifacts, disk write)", None, export_s, export_peak)
+    )
+    if with_memory:
+        tracemalloc.stop()
+    m.peak_mib = max((r.peak_mib for r in m.rows), default=0.0)
 
     m.total_s = load_s + analyze_s + export_s
     m.n_notes = len(res.notes)
@@ -186,76 +227,83 @@ def average(runs: list[Measurement]) -> Measurement:
         return runs[0]
     total: dict[str, float] = {}
     counts: dict[str, int] = {}
+    peaks: dict[str, float] = {}
     for measurement in runs:
         for row in measurement.rows:
             total[row.label] = total.get(row.label, 0.0) + row.seconds
             counts[row.label] = counts.get(row.label, 0) + 1
+            peaks[row.label] = max(peaks.get(row.label, 0.0), row.peak_mib)
     fractions = {row.label: row.fraction for row in runs[0].rows}
     m = runs[-1]  # keeps the detected notes and the profile of the last run
     m.rows = [
-        Stage(label, fractions.get(label), seconds / counts[label])
+        Stage(label, fractions.get(label), seconds / counts[label], peaks.get(label, 0.0))
         for label, seconds in total.items()
     ]
     m.total_s = sum(r.total_s for r in runs) / len(runs)
+    m.peak_mib = max(r.peak_mib for r in runs)
     return m
 
 
 def print_table(m: Measurement, runs: int, profile_top: int) -> None:
     print(
-        f"\nFichier    : {m.path_name} — {m.audio_s:.2f} s, "
-        f"{m.sr} Hz ({m.audio_s * m.sr / 1000:.0f} k échantillons)"
+        f"\nFile      : {m.path_name} — {m.audio_s:.2f} s, "
+        f"{m.sr} Hz ({m.audio_s * m.sr / 1000:.0f}k samples)"
     )
     print(
-        f"Détections : {m.n_notes} notes · "
+        f"Detected  : {m.n_notes} notes · "
         f"{'—' if m.bpm is None else f'{m.bpm:.2f} BPM'} · {m.key} · {m.meter}"
     )
     print(
-        f"Réglages   : min_conf={m.opts.min_conf:.2f} · "
+        f"Options   : min_conf={m.opts.min_conf:.2f} · "
         f"min_note={m.opts.min_note_s * 1000:.0f} ms · semitones={m.opts.semitones:.2f}"
-        + (f" · moyenne sur {runs} exécutions" if runs > 1 else "")
-        + (" · passage à blanc 2 s écarté (imports/JIT)" if m.warmup else "")
+        + (f" · mean over {runs} runs" if runs > 1 else "")
+        + (" · 2 s warm-up discarded (imports/JIT)" if m.warmup else "")
     )
 
     print(
-        f"\n{'Étape':<{LABEL_WIDTH}} {'Début':>5} {'Durée':>9} {'Part':>7} {'Temps réel':>10}"
+        f"\n{'Stage':<{LABEL_WIDTH}} {'Start':>5} {'Time':>9} {'Share':>7} {'Real time':>10} {'Mem peak':>9}"
     )
-    print("-" * TABLE_WIDTH)
+    print("-" * (TABLE_WIDTH + 10))
     for row in m.rows:
         print(
             f"{_clip(row.label, LABEL_WIDTH):<{LABEL_WIDTH}} {row.start_text:>5} "
             f"{row.seconds:>8.3f}s {_share(row.seconds, m.total_s):>6.1f}% "
-            f"{_realtime(row.seconds, m.audio_s):>9.3f}×"
+            f"{_realtime(row.seconds, m.audio_s):>9.3f}× {row.peak_mib:>7.1f}M"
         )
-    print("-" * TABLE_WIDTH)
+    print("-" * (TABLE_WIDTH + 10))
     print(
         f"{'TOTAL':<{LABEL_WIDTH}} {'':>5} {m.total_s:>8.3f}s {100.0:>6.1f}% "
-        f"{_realtime(m.total_s, m.audio_s):>9.3f}×"
+        f"{_realtime(m.total_s, m.audio_s):>9.3f}× {m.peak_mib:>7.1f}M"
     )
     print(
-        "\n« temps réel » = durée de l'étape / durée de l'audio "
-        "(0,07× = 14x plus rapide que la lecture)."
+        "\n'Real time' = stage duration / audio duration "
+        "(0.07x = 14x faster than listening)."
+    )
+    print(
+        "'Mem peak' = the stage's tracemalloc peak (Python allocations, MiB) — "
+        "a comparative order of magnitude, not an RSS."
     )
 
     heaviest = max(m.rows, key=lambda r: r.seconds)
     print(
-        f"Étape la plus lourde : {heaviest.label} — {heaviest.seconds:.3f} s "
+        f"Heaviest stage: {heaviest.label} — {heaviest.seconds:.3f} s "
         f"({_share(heaviest.seconds, m.total_s):.1f}%)"
     )
 
     if m.profile:
         total = sum(row.self_s for row in m.profile) or 1.0
         print(
-            "\ncProfile, dernière exécution — comparer ces fonctions entre elles, "
-            "pas avec le tableau ci-dessus (« Part » = part du profil complet)."
+            "\ncProfile, last run — compare these functions against each other, "
+            "not with the table above ('Share' = share of the whole profile)."
         )
         for title, rows in (
-            ("Code du projet", [r for r in m.profile if r.own]),
-            ("Bibliothèques", [r for r in m.profile if not r.own]),
+            ("Project code", [r for r in m.profile if r.own]),
+            ("Libraries", [r for r in m.profile if not r.own]),
         ):
             if not rows:
                 continue
-            print(f"\n{title} — top {min(profile_top, len(rows))} par temps propre")
-            print(f"{'Propre':>9} {'Part':>7} {'Cumulé':>9}  Fonction")
+            print(f"\n{title} — top {min(profile_top, len(rows))} by own time")
+            print(f"{'Own':>9} {'Share':>7} {'Cumul':>9}  Function")
             for row in rows[:profile_top]:
                 print(
                     f"{row.self_s:>8.3f}s {_share(row.self_s, total):>6.1f}% "
@@ -292,9 +340,11 @@ def as_json(m: Measurement, runs: int) -> dict:
                 "fraction": row.fraction,
                 "seconds": round(row.seconds, 4),
                 "share_pct": round(_share(row.seconds, m.total_s), 2),
+                "peak_mib": round(row.peak_mib, 2),
             }
             for row in m.rows
         ],
+        "peak_mib": round(m.peak_mib, 2),
         "profile": [
             {
                 "function": row.name,
@@ -308,7 +358,7 @@ def as_json(m: Measurement, runs: int) -> dict:
 
 
 def _force_utf8_stdout() -> None:
-    """Survive a Windows cp1252 console (é, ×, labels français...).
+    """Survive a Windows cp1252 console (accents, symbols...).
 
     Without this the script dies with UnicodeEncodeError after doing all
     the measuring work; the test runs it with a UTF-8 pipe, the user's
@@ -325,20 +375,20 @@ def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdout()
     parser = argparse.ArgumentParser(
         prog="profile_analysis.py",
-        description="Chronomètre chaque étape de l'analyse (tempo, pYIN, segmentation, "
+        description="Times every analysis stage (tempo, pYIN, segmentation, "
         "tonalité, accords, export) et affiche un tableau.",
     )
-    parser.add_argument("audio", nargs="?", default=DEFAULT_AUDIO, help="Fichier audio (défaut : demo.wav)")
-    parser.add_argument("--repeat", type=int, default=1, help="Exécutions à moyenner (défaut : 1)")
+    parser.add_argument("audio", nargs="?", default=DEFAULT_AUDIO, help="Audio file (default: demo.wav)")
+    parser.add_argument("--repeat", type=int, default=1, help="Runs to average (default: 1)")
     parser.add_argument(
         "--no-warmup",
         action="store_true",
-        help="Ne pas écarter un passage à blanc de 2 s (imports + compilation numba)",
+        help="Do not discard a 2 s warm-up (imports + numba compilation)",
     )
-    parser.add_argument("--profile", action="store_true", help="Ajouter le tableau cProfile (temps propre)")
-    parser.add_argument("--top", type=int, default=12, help="Lignes du tableau cProfile (défaut : 12)")
-    parser.add_argument("--json", help="Écrire les mesures dans ce fichier JSON")
-    parser.add_argument("--output", help="Garder les artefacts exportés dans ce dossier (sinon : dossier temporaire)")
+    parser.add_argument("--profile", action="store_true", help="Add the cProfile table (own time)")
+    parser.add_argument("--top", type=int, default=12, help="cProfile table rows (default: 12)")
+    parser.add_argument("--json", help="Write the measurements to this JSON file")
+    parser.add_argument("--output", help="Keep the exported artifacts in this folder (else: temporary)")
     args = parser.parse_args(argv)
 
     path = Path(args.audio)

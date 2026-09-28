@@ -1,19 +1,21 @@
-"""La CLI parle la langue demandée — rendu réel vérifié, pas espéré.
+"""The CLI speaks the requested language — the rendered output is verified,
+not hoped for.
 
-Deux contrats, deux langues :
+Two contracts, two languages:
 
-1. **Le résumé d'`analyze` est affiché, pas recopié tel quel** : l'étiquette
-   de tonalité ('C major') et les noms de figures ('noire') sont stockés
-   CANONIQUES et traduits au bord du rendu (`tr_key_label` / `tr_figure`).
-   Une sortie française ne porte aucun mot anglais de l'analyse, une
-   sortie anglaise aucune figure française — et l'étiquette `Mesure`/`Meter`
-   s'aligne sur les autres du résumé (colonne deux-points stable).
+1. **The `analyze` summary is displayed, not copied verbatim**: the key
+   label ('C major') and the figure names ('noire') are stored
+   CANONICAL and translated at the rendering edge (`tr_key_label` /
+   `tr_figure`). A French output carries no English analysis word, an
+   English output no French figure — and the `Mesure`/`Meter` label
+   aligns with the summary's others (stable colon column).
 
-2. **Chaque message d'erreur migré vers `tr()` sort dans LA langue
-   demandée** : le message est comparé mot pour mot à la table i18n de la
-   langue courante. Un littéral codé en dur ('PDF ignored:'), un message
-   qui lit la mauvaise table ou une clé oubliée font échouer ce test —
-   c'est la dent du principe « tout message utilisateur passe par tr() ».
+2. **Every error message migrated to `tr()` comes out in THE requested
+   language**: the message is compared word for word against the i18n
+   table of the current language. A hardcoded literal ('PDF ignored:'),
+   a message reading the wrong table or a forgotten key fail this test
+   — it is the teeth of the "every user message goes through tr()"
+   principle.
 """
 
 from __future__ import annotations
@@ -67,10 +69,10 @@ def _expected(lang: str, key: str, **fields) -> str:
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_summary_speaks_the_selected_language(lang, tmp_path, monkeypatch, capsys):
-    """Le résumé complet (progrès + clés + figures) est dans la langue demandée."""
+    """The full summary (progress + keys + figures) is in the requested language."""
     code = cli.main(["--lang", lang, "analyze", _wav(tmp_path), "-o", str(tmp_path / "out")])
     out, err = capsys.readouterr()
-    assert code == 0, f"l'analyse a échoué : {err}"
+    assert code == 0, f"the analysis failed : {err}"
 
     lines = out.splitlines()
     tempo_line = next(l for l in lines if l.startswith("Tempo"))
@@ -85,10 +87,10 @@ def test_summary_speaks_the_selected_language(lang, tmp_path, monkeypatch, capsy
         assert "Analyse de" in out and "Détection du tempo" in out
         assert "Tonalité" in key_line and "candidat" in out
         # canonical French figures stay French in French mode
-        assert FR_FIGURE_RE.search(fig_line), f"figures FR absentes : {fig_line!r}"
-        assert not EN_FIGURE_RE.search(fig_line), f"figures anglaises en FR : {fig_line!r}"
-        assert not re.search(r"\b(major|minor)\b", out), f"tonalité non traduite : {out}"
-        assert "Detecting" not in out, "progression anglaise en FR"
+        assert FR_FIGURE_RE.search(fig_line), f"FR figures missing : {fig_line!r}"
+        assert not EN_FIGURE_RE.search(fig_line), f"English figures in FR : {fig_line!r}"
+        assert not re.search(r"\b(major|minor)\b", out), f"key not translated : {out}"
+        assert "Detecting" not in out, "English progress in FR"
         assert "not detected" not in out
     else:
         assert "Analyzing" in out and "Detecting tempo" in out
@@ -96,16 +98,16 @@ def test_summary_speaks_the_selected_language(lang, tmp_path, monkeypatch, capsy
         assert EN_FIGURE_RE.search(fig_line), f"figures not translated: {fig_line!r}"
         assert not FR_FIGURE_RE.search(fig_line), f"French figures in EN: {fig_line!r}"
         assert re.search(r"\b(major|minor)\b", key_line), "key label lost in EN"
-        assert not re.search(r"\bTonalité\b", out), "libellé FR en EN"
+        assert not re.search(r"\bTonalité\b", out), "FR label in EN"
         # word boundary: "candidat" is a substring of "candidate"
-        assert not re.search(r"\bcandidat\b", out), "candidat FR en EN"
-        assert "Détection" not in out, "progression française en EN"
+        assert not re.search(r"\bcandidat\b", out), "FR candidat in EN"
+        assert "Détection" not in out, "French progress in EN"
         assert "non détectée" not in out
 
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_input_validation_speaks_the_selected_language(lang, tmp_path, capsys):
-    """Les erreurs d'entrée du CLI sortent telles quelles, dans la langue."""
+    """The CLI's input errors come out as they are, in the language."""
     wav = _wav(tmp_path)
 
     assert cli.main(["--lang", lang, "analyze", "nope.wav"]) == 1
@@ -126,11 +128,12 @@ def test_input_validation_speaks_the_selected_language(lang, tmp_path, capsys):
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_every_migrated_error_message_follows_the_language(lang, tmp_path, monkeypatch):
-    """Chaque site migré vers tr() rend EXACTEMENT la clé i18n de `lang`.
+    """Every site migrated to tr() renders EXACTLY `lang`'s i18n key.
 
-    Chaque déclenchement est le vrai chemin du code (levée, callback,
-    sortie CLI) — seul le contexte externe (outil absent, micro absent) est
-    simulé. Un message codé en dur ou lu dans l'autre table diverge ici.
+    Each trigger is the code's real path (raise, callback, CLI exit) —
+    only the external context (missing tool, missing mic) is simulated.
+    A hardcoded message, or one read from the other table, diverges
+    here.
     """
     set_language(lang)
     hint = _expected(lang, "err pdf install hint")

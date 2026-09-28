@@ -1,21 +1,21 @@
-"""Justesse de la transcription : chaque note chantée doit être retrouvée.
+"""Transcription accuracy: every sung note must be found back.
 
-Le harnais `voicetruth` synthétise une voix dont on connaît toutes les notes
-(portamentos, consonnes, vibrato, bruit) et compare ce que la chaîne détecte à
-cette vérité. Ces tests fixent les seuils de non-régression :
+The `voicetruth` harness synthesizes a voice whose every note is known
+(portamentos, consonants, vibrato, noise) and compares what the chain
+detects against that truth. These tests pin the non-regression thresholds:
 
-- la segmentation HORS LIGNE est exacte sur les 19 cas — avant la détection
-  d'attaques et les règles de transition, un glissando de 90 ms transformait
-  6 notes chantées en 10, et une tenue avec vibrato comptait 19 « attaques » ;
-- la preuve d'attaque ne dégrade jamais la géométrie seule ;
-- aucune note n'est inventée À L'INTÉRIEUR d'une note chantée, le défaut qui
-  rendait la partition illogique ;
-- le chemin temps réel, sans regard en arrière, retrouve exactement les
-  phrases articulées.
+- OFFLINE segmentation is exact on all 19 cases — before the attack
+  detection and the transition rules, a 90 ms glissando turned 6 sung
+  notes into 10, and a held note with vibrato counted 19 "attacks";
+- the attack evidence never degrades geometry alone;
+- no note is invented INSIDE a sung note, the defect that made the score
+  illogical;
+- the real-time path, with no look-ahead, finds the articulated phrases
+  exactly.
 
-Limites connues du temps réel (documentées dans AGENTS.md, non testées ici) :
-les doubles-croches (120 ms) sont fusionnées, et un portamento très long
-(250 ms) décale l'attaque de la note d'arrivée.
+Known real-time limits (documented in AGENTS.md, not tested here):
+semiquavers (120 ms) are merged, and a very long portamento (250 ms)
+shifts the arrival note's attack.
 """
 
 from functools import lru_cache
@@ -33,7 +33,8 @@ from voicetruth import (
     sequence,
     synthesize,
 )
-from v2m.core.liveseg import LivePitchStream
+from v2m.core.liveseg import LiveNoteSegmenter, LivePitchStream
+from v2m.core.music import midi_to_hz
 from v2m.core.notes import Note
 from v2m.core.pipeline import analyze_signal
 
@@ -42,7 +43,7 @@ GAMME = [60, 62, 64, 65, 67, 69, 71, 72]
 BLOCK = 1024
 GATE = 0.008
 
-# nom -> (notes chantées, réglages du synthétiseur)
+# name -> (sung notes, synthesizer settings)
 CASES: dict[str, tuple[list[SungNote], dict]] = {
     "consonnes": (sequence(MIDIS, dur_s=0.6, start_s=0.2), dict(glide_s=0.09, consonant_s=0.05)),
     "legato": (sequence(MIDIS, dur_s=0.6, start_s=0.2), dict(glide_s=0.09, consonant_s=0.0)),
@@ -117,11 +118,27 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         sequence([69, 69, 69, 69], dur_s=0.30, gap_s=0.15, start_s=0.2),
         dict(consonant_s=0, glide_s=0, noise=0.02),
     ),
+    # 2026-09-25, "repeated same note read as one hold": the harness's
+    # consonant at FULL strength (1.4) produced 3 notes out of 4 live —
+    # the attack landed on the burst's garbage frame, the split refused it
+    # and consumed it. The case freezes the repair (re-staging the attack
+    # the split refused).
+    "répétition ta-ta": (
+        sequence([64, 64, 64, 64], dur_s=0.50, gap_s=0.05, start_s=0.2),
+        dict(consonant_s=0.05, consonant_amp=1.4, glide_s=0),
+    ),
+    # ...and the seam WITHOUT consonant or silence is one hold only if the
+    # singer does not close the glottis: with the modeled closure (~30 ms,
+    # level notch), the 4 re-emissions read.
+    "répétition collée + fermeture": (
+        sequence([64, 64, 64, 64], dur_s=0.50, start_s=0.2),
+        dict(consonant_s=0, glide_s=0.09, closure_s=0.03),
+    ),
 }
 
-# le temps réel retrouve exactement ces phrases-là (2026-09-25 : les trois
-# nouveaux cas de vérité — glissando descendant, vibrato profond, soprano —
-# y entrent ; ils passaient déjà à l'arrivée, la chaîne live les tient)
+# the real-time path finds exactly these phrases (2026-09-25: the three
+# new truth cases — descending glissando, deep vibrato, soprano — join;
+# they already passed at their arrival, the live chain holds them)
 LIVE_CASES = [
     "consonnes",
     "legato",
@@ -136,15 +153,17 @@ LIVE_CASES = [
     "saut d'octave",
     "répétition",
     "répétition aa-aa",
+    "répétition ta-ta",
+    "répétition collée + fermeture",
     "glissando descendant",
     "vibrato profond",
     "soprano gamme",
 ]
 LIVE_TOL_S = 0.20
 
-# le temps réel n'a pas de regard en arrière : ces cas extrêmes (doubles
-# croches de 120 ms, portamento de 250 ms, note de 150 ms précédée d'un
-# portamento) sont fusionnés ou décalés — jamais faux en hauteur.
+# real time has no look-ahead: these extreme cases (120 ms semiquavers,
+# a 250 ms portamento, a 150 ms note preceded by a portamento) are merged
+# or shifted — never wrong in pitch.
 LIVE_KNOWN_LIMITS = {"doubles", "glissando long", "note courte"}
 
 
@@ -172,7 +191,7 @@ def _live(name: str) -> Accuracy:
 
 
 # --------------------------------------------------------------------------- #
-# Le harnais lui-même
+# The harness itself
 # --------------------------------------------------------------------------- #
 
 
@@ -184,7 +203,7 @@ def test_the_harness_catches_a_lost_note():
 
 
 def test_the_harness_catches_a_note_in_the_middle_of_another():
-    """Le défaut d'origine : une micro-note coincée dans une note chantée."""
+    """The original defect: a micro-note wedged inside a sung note."""
     truth, _ = CASES["tenue vibrato"]
     detected = [
         Note(start=truth[0].start_s, end=truth[0].start_s + truth[0].dur_s, midi=truth[0].midi, confidence=1.0),
@@ -196,7 +215,7 @@ def test_the_harness_catches_a_note_in_the_middle_of_another():
 
 
 # --------------------------------------------------------------------------- #
-# Hors ligne
+# Offline
 # --------------------------------------------------------------------------- #
 
 
@@ -220,9 +239,9 @@ def test_attack_evidence_never_makes_it_worse(name: str):
     ["legato", "consonnes", "glissando long", "saut d'octave", "répétition", "répétition aa-aa"],
 )
 def test_geometry_alone_is_still_strict(name: str):
-    """Sans preuve d'attaque, la règle géométrique du glissando doit suffire
-    partout où elle est sans ambiguïté (le pipeline fournit toujours des
-    attaques, mais un appelant peut ne pas en avoir)."""
+    """Without attack evidence, the glissando's geometric rule must suffice
+    everywhere it is unambiguous (the pipeline always supplies
+    attacks, but a caller may not have them)."""
     acc = _offline(name, False)
     assert acc.exact, acc.line()
 
@@ -230,34 +249,34 @@ def test_geometry_alone_is_still_strict(name: str):
 def test_onsets_and_pitches_are_close():
     for name in ("consonnes", "gamme liée", "croches", "voix grave"):
         acc = _offline(name, True)
-        # la note détectée démarre sur la consonne, pas sur la stabilisation
+        # the detected note starts on the consonant, not the stabilization
         assert acc.worst_start_ms <= 80.0, (name, acc.line())
         assert acc.worst_pitch_st == 0.0, (name, acc.line())
 
 
 def test_high_octave_reaches_the_pitch_ceiling():
-    """Les notes AU-DESSUS de l'ancien plafond de lecture (C6) restent justes.
+    """Notes ABOVE the old reading ceiling (C6) stay accurate.
 
-    L'ancien FMAX (1050 Hz) tombait EXACTEMENT sur le C6 chanté : pYIN n'avait
-    aucune marge au-dessus et repliait la soprano une octave plus bas (mesuré :
-    un 84 chanté lu 72, une ligne 79-88 lue 67-76). Un C7 de marge lit ces
-    notes sans rien changer en dessous (chant.wav/demo.wav inchangés).
+    The old FMAX (1050 Hz) sat EXACTLY on the sung C6: pYIN had no room
+    above and folded the soprano an octave down (measured: a sung 84 read
+    72, a 79-88 line read 67-76). A C7 of headroom reads those notes
+    without changing anything below (chant.wav/demo.wav unchanged).
     """
     from v2m.core.pitch import FMAX
 
-    assert FMAX > 440.0 * 2 ** ((84 - 69) / 12)  # au-dessus du C6 chanté
+    assert FMAX > 440.0 * 2 ** ((84 - 69) / 12)  # above the sung C6
     for name in ("saut octave haut", "soprano gamme"):
         acc = _offline(name, True)
         assert acc.exact, (name, acc.line())
 
 
 def test_descending_glide_leaves_no_duplicate():
-    """Un glissando DESCENDANT se lit comme celui qui monte : la note de départ
-    se termine au passage de main (la consonne de l'arrivée y appartient) et
-    aucune fragment dupliqué ne survit. Deux pièges, tous deux mesurés : la
-    ré-attaque de l'arrivée coupait la note étirée à sa propre rampe (le
-    doublon), et la borne stricte de _split_between_at_attack rejetait
-    l'attaque tombée SUR la frontière (l'arrivée démarrait 150 ms tard).
+    """A DESCENDING glissando reads like the ascending one: the starting
+    note ends at the hand-over (the arrival's consonant belongs to it) and
+    no duplicated fragment survives. Two traps, both measured: the
+    arrival's re-attack cut the stretched note at its own ramp (the
+    duplicate), and _split_between_at_attack's strict bound rejected the
+    attack falling ON the boundary (the arrival started 150 ms late).
     """
     acc = _offline("glissando descendant", True)
     assert acc.exact, acc.line()
@@ -269,28 +288,28 @@ def test_descending_glide_leaves_no_duplicate():
 
 
 def test_arrival_pitch_reads_the_plateau_not_the_ramp():
-    """La hauteur d'une note arrivant en glissando se lit sur son PLATEAU,
-    pas sur la médiane de la rampe qui y mène (mesuré : 62 lu 61, 67 lu 66,
-    72 lu 71 quand la condition du forced_pitch était inversée — 25 tests
-    rouges). La règle : médiane de queue si l'arrivée s'est posée.
+    """A note arriving by glissando reads its PLATEAU, not the median of the
+    ramp leading there (measured: 62 read 61, 67 read 66, 72 read 71 when
+    the forced_pitch condition stood inverted — 25 red tests). The rule:
+    tail median when the arrival settled.
     """
-    # le corpus gèle déjà la lecture juste ; ce cas pique la mécanique : une
-    # ligne legato dont les notes 2/3/5 arrivent par portamento de 90 ms
+    # the corpus already freezes the correct reading; this case pokes the
+    # mechanism: a legato line whose notes 2/3/5 arrive by a 90 ms portamento
     acc = _offline("legato", True)
     assert acc.exact and acc.worst_pitch_st == 0.0, acc.line()
 
 
 def test_deep_vibrato_and_trill_stay_exact():
-    """Vibrato profond (±0,6 st) et trille rapide restent exacts : le vibrato
-    ne se fragmente pas (le median 9 trames suit la oscillation) et un trille
-    de 350 ms ne se fusionne pas."""
+    """Deep vibrato (±0.6 st) and a fast trill stay exact: vibrato does not
+    fragment (the 9-frame median follows the oscillation) and a 350 ms
+    trill does not merge."""
     for name in ("vibrato profond", "trille"):
         acc = _offline(name, True)
         assert acc.exact, (name, acc.line())
 
 
 # --------------------------------------------------------------------------- #
-# Temps réel
+# Real time
 # --------------------------------------------------------------------------- #
 
 
@@ -304,13 +323,13 @@ def test_live_chain_reads_the_sung_phrase(name: str):
 def test_live_chain_never_invents_notes_inside_a_sung_note():
     for name in CASES:
         if name in LIVE_KNOWN_LIMITS:
-            continue  # voir test_live_limits_are_bounded
+            continue  # see test_live_limits_are_bounded
         assert _live(name).intruders == 0, name
 
 
 def test_live_limits_are_bounded():
-    """Caractérise les limites assumées du temps réel, pour qu'elles restent
-    bornées : une note perdue ou fusionnée, jamais une hauteur inventée."""
+    """Characterizes the real-time path's accepted limits so they stay
+    bounded: a lost or merged note, never an invented pitch."""
     for name in LIVE_KNOWN_LIMITS:
         truth, _ = CASES[name]
         stream = LivePitchStream(SR, gate_rms=GATE)
@@ -324,27 +343,27 @@ def test_live_limits_are_bounded():
 
 
 # --------------------------------------------------------------------------- #
-# Respirations : phrases articulées -> silences dans le modèle
+# Breaths: articulated phrases -> rests in the model
 # --------------------------------------------------------------------------- #
 
 
 def test_dotted_pulse_take_publishes_6_8_offline():
-    """Un vrai signal sur temps pointés obtient son 6/8 HORS LIGNE, comme en
-    direct — le tempo est corrigé du temps pointé vers la noire (×1,5) par
-    la même preuve d'alternance (meter.dotted_pulse_tempo), appliquée après
-    le raffinage. Temps pointés à 90 BPM : noire à 135, repli d'octave dans
-    le range ; les forces alternent (note forte de temps pointé, faible de
-    contretemps) pour armer la preuve d'alternance.
+    """A real dotted-pulse signal gets its 6/8 OFFLINE, like live — the
+    tempo is corrected from dotted beat to quarter (x1.5) by the same
+    alternation evidence (meter.dotted_pulse_tempo), applied after the
+    refinement. Dotted beats at 90 BPM: the quarter at 135, octave fold in
+    range; the strengths alternate (strong dotted beat, weak offbeat) to
+    arm the alternation evidence.
     """
-    quarter = 60.0 / 135.0            # noire attendue à 135 BPM
-    dotted = 1.5 * quarter            # le temps pointé chanté
+    quarter = 60.0 / 135.0            # the expected quarter at 135 BPM
+    dotted = 1.5 * quarter            # the sung dotted beat
     notes = []
-    for i in range(9):                # 9 temps pointés = 4.5 mesures 6/8
+    for i in range(9):                # 9 dotted beats = 4.5 bars of 6/8
         notes.append(SungNote(60 + (i % 3), start_s=i * dotted,
                               dur_s=dotted * 0.85,
                               amp=(1.0 if i % 2 == 0 else 0.45)))
-    # articulation par attaque de niveau : les bursts de consonne ne sont
-    # pas scalés par note, leur loudness constante brouillerait la force
+    # level-attack articulation: the consonant bursts are not scaled per
+    # note, their constant loudness would blur the strength
     y = synthesize(notes, consonant_s=0)
     res = analyze_signal(y, SR)
     assert res.meter is not None and res.meter.label == "6/8"
@@ -352,10 +371,11 @@ def test_dotted_pulse_take_publishes_6_8_offline():
 
 
 def test_breaths_between_phrases_become_rests():
-    """« Détaché » = 6 notes en 6 phrases ; chaque respiration doit devenir
-    un silence (l'intro incluse) et aucune ne peut chevaucher une note.
-    Les figures sont soit None (gap trop court pour une figure à ce tempo,
-    la portée l'engrave quand même d'après sa durée), soit du catalogue."""
+    """The CASES["détaché"] truth: 6 notes in 6 phrases; every breath must
+    become a rest (the
+    intro included) and none may overlap a note. The figures are either None
+    (gap too short for a figure at this tempo — the staff engraves it from
+    its duration anyway) or from the catalogue."""
     y = _signal("détaché")
     pipeline = analyze_signal(y, SR)
     rests = pipeline.rests or []
@@ -364,7 +384,7 @@ def test_breaths_between_phrases_become_rests():
     catalog |= {f"{f} pointée" for f in catalog}
     for r in rests:
         assert r.figure is None or r.figure in catalog, r.figure
-    # aucune respiration ne chevauche une note
+    # no breath overlaps a note
     notes = pipeline.notes
     for r in rests:
         for n in notes:
@@ -372,8 +392,8 @@ def test_breaths_between_phrases_become_rests():
 
 
 def test_long_breath_is_labeled_a_quarter_rest():
-    """Une vraie respiration (0,6 s à 80 BPM = 0,8 temps) doit être étiquetée
-    « soupir » — c'est la figure qu'un éditeur grave entre deux phrases."""
+    """A real breath (0.6 s at 80 BPM = 0.8 beats) must be labeled a quarter
+    rest — the figure an editor engraves between two phrases."""
     y = synthesize(sequence([60, 62, 64], dur_s=0.6, gap_s=0.6, start_s=0.2),
                    glide_s=0.09, consonant_s=0.05)
     rests = analyze_signal(y, SR).rests or []
@@ -382,8 +402,8 @@ def test_long_breath_is_labeled_a_quarter_rest():
 
 
 def test_rearticulated_note_on_same_pitch_is_split():
-    """Deux « la » séparés par 150 ms de silence : une note unique trahirait
-    une attaque avalée — la chaîne doit les séparer (comportement live)."""
+    """Two "la"s separated by 150 ms of silence: one note would betray a
+    swallowed attack — the chain must separate them (live behavior)."""
     from voicetruth import synthesize as _syn
 
     truth = [
@@ -397,16 +417,15 @@ def test_rearticulated_note_on_same_pitch_is_split():
 
 
 # --------------------------------------------------------------------------- #
-# Erreurs humaines : souffle, voix douce, timing négligent
+# Human errors: breath, soft voice, careless timing
 # --------------------------------------------------------------------------- #
 
 
 def test_a_breathy_voice_does_not_sprout_extra_notes():
-    """Une voix SOUFFLÉE (beaucoup d'air) ne doit pas se couvrir de
-    micro-notes : mesuré, les ondulations du souffle produisaient jusqu'à 12
-    fragments à l'intérieur des notes chantées. Le plancher relatif de force
-    des attaques (MIN_STRENGTH) rejette le bruit (≤ 0,06) et garde les
-    consonnes (≥ 0,86)."""
+    """A BREATHY voice (much air) must not cover itself in micro-notes:
+    measured, the breath's undulations produced up to 12 fragments inside
+    the sung notes. The attacks' relative strength floor (MIN_STRENGTH)
+    rejects the noise (<= 0.06) and keeps the consonants (>= 0.86)."""
     truth = sequence(MIDIS, dur_s=0.6, start_s=0.2)
     for noise in (0.05, 0.08, 0.10):
         y = synthesize(truth, glide_s=0.09, consonant_s=0.05, noise=noise)
@@ -415,30 +434,29 @@ def test_a_breathy_voice_does_not_sprout_extra_notes():
 
 
 def test_breaths_never_become_notes():
-    """Les respirations ne deviennent JAMAIS des notes, sous aucune forme :
-    ni une reprise d'air dans le gap d'une ligne liée (le souffle 90 ms
-    précède chaque réattaque), ni une respiration isolée dans un silence
-    long (qui doit rester un SILENCE, pas une note de bruit), ni le
-    souffle continu d'une tenue longue. Mesuré : un souffle 3× plus fort
-    que le contrat ci-dessus (0,10 absolu) fragmente réellement une tenue —
-    c'est hors contrat, le harnais le documente plutôt que de le subir."""
-    # 1) ligne liée : le chanteur reprend l'air entre deux notes liées
+    """Breaths NEVER become notes, in any form: neither an air intake in a
+    legato gap (the 90 ms breath precedes each re-attack), nor an isolated
+    breath in a long silence (which must stay a REST, not a noise note),
+    nor the continuous breath of a long hold. Measured: a breath 3x stronger
+    than the contract above (0.10 absolute) really fragments a hold — that
+    is off-contract, the harness documents it rather than suffering it."""
+    # 1) legato line: the singer takes air between two legato notes
     truth = sequence([60, 64, 67, 72], dur_s=0.5, gap_s=0.15, start_s=0.2)
     y = synthesize(truth, SR, glide_s=0.09, consonant_s=0.0)
-    for n in truth[1:]:  # le souffle précède chaque réattaque
+    for n in truth[1:]:  # the breath precedes each re-attack
         add_breath(y, n.start_s - 0.06)
     acc = measure(detect_notes(y, SR), truth)
-    assert acc.exact, f"ligne liée + reprises d'air: {acc.line()}"
+    assert acc.exact, f"legato + air intakes: {acc.line()}"
 
-    # 2) respiration isolée dans un silence long : silence, pas note
+    # 2) isolated breath in a long silence: a rest, not a note
     truth2 = [SungNote(60, 0.2, 0.5), SungNote(67, 1.4, 0.5)]
     y2 = synthesize(truth2, SR, glide_s=0.0, consonant_s=0.0)
     add_breath(y2, 0.8, dur_s=0.15, amp=0.3, seed=9)
     acc2 = measure(detect_notes(y2, SR), truth2)
-    assert acc2.exact, f"souffle isolé: {acc2.line()}"
+    assert acc2.exact, f"isolated breath: {acc2.line()}"
 
-    # 3) souffle continu du harnais (0,10 = le contrat gelé) sur des tenues
-    #    LONGUES : jamais de micro-note à l'intérieur
+    # 3) the harness's continuous breath (0.10 = the frozen contract) on
+    #    LONG holds: never a micro-note inside
     for dur in (1.0, 2.4):
         truth3 = [SungNote(60, 0.2, dur), SungNote(67, 0.2 + dur + 0.3, 1.0)]
         y3 = synthesize(truth3, SR, glide_s=0.0, consonant_s=0.05, noise=0.10)
@@ -447,16 +465,16 @@ def test_breaths_never_become_notes():
 
 
 def test_a_quiet_voice_is_still_transcribed():
-    """Chanter DOUCEMENT (amp 0,05) ne doit ni perdre les notes ni tomber
-    sous les seuils de silence."""
+    """Singing SOFTLY (amp 0.05) must neither lose the notes nor fall under
+    the silence gates."""
     truth = sequence(MIDIS, dur_s=0.6, start_s=0.2)
     y = synthesize(truth, glide_s=0.09, consonant_s=0.05, amp=0.05)
     assert measure(detect_notes(y, SR), truth).exact
 
 
 def test_careless_timing_is_still_transcribed():
-    """Durées et respirations IRRÉGULIÈRES (chanson Humaine) : 5/5 notes.
-    Aucun des deux chemins ne suppose un tempo régulier."""
+    """IRREGULAR durations and breaths (human song): 5/5 notes. Neither
+    path assumes a regular tempo."""
     truth = [
         SungNote(60, 0.20, 0.35), SungNote(62, 0.70, 0.70),
         SungNote(64, 1.55, 0.28), SungNote(65, 1.95, 0.55),
@@ -466,11 +484,88 @@ def test_careless_timing_is_still_transcribed():
     assert measure(detect_notes(y, SR), truth).exact
 
 
+# ---------------------------------------------------------------------------
+# 2026-09-25 repairs: "repeated same note read as one hold"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("depth", [0.30, 0.40, 0.50, 0.60])
+def test_a_tremolo_never_becomes_several_notes(depth: float):
+    """An amplitude tremolo is ONE held note, not a series of notes.
+
+    Every ±30..60 % AM cycle read as an "attack" (a rise > 1.5x the floor)
+    and the hold covered itself in 7-10 fragments. Two guards: a level
+    attack requires a DEEP DIP before it (a real re-attack is preceded by a
+    near-silence, a tremolo never falls under ~0.4x) — and every attack
+    consumes its dip (a mark left by the note start must not license the
+    next cycle).
+    """
+    truth = [SungNote(64, 0.2, 1.7)]
+    y = synthesize(truth, glide_s=0, consonant_s=0.05, tremolo_depth=depth)
+    stream = LivePitchStream(SR, gate_rms=GATE)
+    for i in range(0, len(y) - BLOCK, BLOCK):
+        stream.feed(y[i : i + BLOCK], (i + BLOCK) / SR)
+    stream.seg.flush(len(y) / SR)
+    acc = measure(stream.seg.notes, truth, tol_s=LIVE_TOL_S)
+    assert acc.exact, f"tremolo ±{int(depth*100)}%: {acc.line()}"
+
+
+def test_live_attacks_carry_their_accent_evidence():
+    """The attack strength lives on articulated notes — even at the take's
+    start. Three measured leaks, all repaired: (1) the attack landing on
+    mute frames in the IDLE state was dropped (no staging there); (2) the
+    normalization read the re-armed floor, which every gap resets to zero —
+    "risen from silence" at every note, strengths all 0 or all 1; the
+    measure is now the level against the recent PEAK (bounded 0..1, keeps
+    the take's contrast); (3) the strength did not cross the same-note
+    split path.
+    """
+    truth = [SungNote(m, 0.2 + i * 0.7, 0.55, amp=1.0 if i % 2 == 0 else 0.4)
+             for i, m in enumerate([60, 62, 60, 62, 60, 62])]
+    y = synthesize(truth, glide_s=0, consonant_s=0)
+    stream = LivePitchStream(SR, gate_rms=GATE)
+    for i in range(0, len(y) - BLOCK, BLOCK):
+        stream.feed(y[i : i + BLOCK], (i + BLOCK) / SR)
+    stream.seg.flush(len(y) / SR)
+    acc = measure(stream.seg.notes, truth, tol_s=LIVE_TOL_S)
+    assert acc.exact, acc.line()
+    strengths = [n.strength for n in stream.seg.notes]
+    # the take's contrast reads: strong >= 0.3, weak <= 0.6, and at least
+    # three attacks actually seen (the legato ones have none)
+    assert any(s >= 0.3 for s in strengths), strengths
+    strong = [s for n, s in zip(stream.seg.notes, strengths) if n.midi == 60]
+    weak = [s for n, s in zip(stream.seg.notes, strengths) if n.midi == 62]
+    assert sum(strong) / len(strong) > sum(weak) / len(weak), (strong, weak)
+
+
+def test_live_stale_attack_does_not_date_a_note_early():
+    """A pre-phrase breath's attack does not pull the next note's start: a
+    staged attack beyond STAGE_MAX_S is abandoned (the consonant precedes
+    its vowel by <= 100 ms, measured 12-46 ms; the breath may precede the
+    phrase by 0.2 s).
+    """
+    from v2m.core.liveseg import STAGE_MAX_S
+
+    assert STAGE_MAX_S <= 0.10
+    seg = LiveNoteSegmenter()
+    seg.push(0.0, float("nan"), attack=True, strength=0.9)  # an orphan attack
+    # the voice arrives AFTER the staging horizon: the stale attack is
+    # abandoned — the note starts at the voice (0.15), not the breath (0.0).
+    t = 0.15
+    while t < 0.50:
+        seg.push(t, float(midi_to_hz(69)))
+        t += 0.01
+    seg.flush(0.55)
+    assert len(seg.notes) == 1
+    assert seg.notes[0].start == pytest.approx(0.15, abs=0.05), seg.notes[0].start
+    assert seg.notes[0].strength == 0.0  # the stale attack dated nothing
+
+
 def test_live_confirmation_latency_stays_under_120ms():
-    """La confirmation live a été abaissée (140 -> 100 -> 90 ms) pour
-    l'affichage : la robustesse doit tenir — vibrato, legato, croches,
-    répétitions. Le plancher mesuré est 0.09 : en dessous (0.06-0.08), le
-    cas « bruit et vibrato » échoue sporadiquement selon la graine.
+    """Live confirmation was lowered (140 -> 100 -> 90 ms) for display: the
+    robustness must hold — vibrato, legato, eighths, repetitions. The
+    measured floor is 0.09: below it (0.06-0.08), the "noise and vibrato"
+    case fails sporadically by seed.
     """
     stream = LivePitchStream(SR, gate_rms=GATE)
     assert stream.seg.confirm_s == pytest.approx(0.09)
@@ -480,17 +575,17 @@ def test_live_confirmation_latency_stays_under_120ms():
 
 
 # ---------------------------------------------------------------------------
-# Dérive sur la VRAIE prise : l'empreinte dorée rejouée à chaque run
+# Drift on the REAL take: the golden fingerprint replayed at every run
 # ---------------------------------------------------------------------------
 
 
 def test_real_take_segmentation_does_not_drift():
-    """Filet automatique contre la dérive de segmentation sur chant.wav :
-    le fingerprint (--compare du diagnostic) est rejoué ICI, à chaque run
-    de la suite, contre l'empreinte enregistrée à côté de la prise
-    (<audio>.golden.json). Toute différence (tempo, mesure, tonalité,
-    chaque note, chaque respiration) fait échouer CE test — plus besoin de
-    penser à lancer le script. La prise est gitignorée : skip absente.
+    """An automatic net against segmentation drift on chant.wav: the
+    fingerprint (--compare of the diagnostic) is replayed HERE, at every
+    suite run, against the fingerprint recorded beside the take
+    (<audio>.golden.json). Any difference (tempo, meter, key, every note,
+    every rest) fails THIS test — no need to remember to run the script.
+    The take is gitignored: skipped when absent.
     """
     from v2m.core import audio_io
     from v2m.core.pipeline import AnalyzeOptions, analyze_signal
@@ -502,13 +597,13 @@ def test_real_take_segmentation_does_not_drift():
 
     audio = Path(__file__).resolve().parents[1] / "chant.wav"
     if not audio.exists():
-        pytest.skip("chant.wav absent (gitignore, régénérable) — dérive non rejouée")
+        pytest.skip("chant.wav absent (gitignored, regenerable) — drift not replayed")
     golden = load_golden(str(audio))
     if golden is None:
-        pytest.skip("aucune empreinte dorée pour chant.wav — lancer le script --golden une fois")
+        pytest.skip("no golden fingerprint for chant.wav — run the script --golden once")
     res = analyze_signal(
         audio_io.load_file(str(audio)), audio_io.SR,
         source=str(audio), opts=AnalyzeOptions(),
     )
     diffs = compare_fingerprints(golden, segmentation_fingerprint(res))
-    assert not diffs, "dérive de segmentation sur chant.wav :\n" + "\n".join(diffs)
+    assert not diffs, "segmentation drift on chant.wav:\n" + "\n".join(diffs)

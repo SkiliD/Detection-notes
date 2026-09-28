@@ -1,38 +1,37 @@
-"""Les règles de session ont des DENTS : elles sont épinglées, pas espérées.
+"""The session rules have TEETH: they are pinned, not hoped for.
 
-Deux contrats qui jusqu'ici ne vivaient que dans AGENTS.md :
+Two contracts that so far lived only in AGENTS.md:
 
-1. **Le repo ne versionne AUCUN artefact généré** (l'en-tête du .gitignore :
-   « ignorer tout ce qui n'est pas une source »). Les seuls JSON versionnés
-   sont les références figées de tests. Un artefact commité par accident
-   (out.mid, live_20260923_….json) est exactement la régression que ce test
-   refuse — la revue de .gitignore à chaque nouveau chemin de sortie ne
-   suffit pas quand elle dépend de la mémoire.
+1. **The repo tracks NO generated artifact** (the .gitignore header:
+   "ignore everything that is not a source"). The only versioned JSONs
+   are the tests' frozen references. An artifact committed by accident
+   (out.mid, live_20260923_….json) is exactly the regression this test
+   refuses — reviewing .gitignore at every new output path is not enough
+   when it depends on memory.
 
-2. **La docstring de module de `meter.py` est le contrat de detect_meter** :
-   elle nomme les étages dans leur ordre. Un étage ajouté au code sans
-   être documenté (ou documenté sous un nom qui n'existe plus) fait
-   échouer ce test — la doc ne peut plus pourrir derrière le code.
+2. **`meter.py`'s module docstring IS the detect_meter contract**: it
+   names the stages in their order. A stage added to the code without
+   being documented (or documented under a name that no longer exists)
+   fails this test — the doc can no longer rot behind the code.
 
-3. **« Aucune chaîne FR en dur dans le code »** : tout littéral français
-   (lettre accentuée) dans `src/v2m` doit vivre dans la table i18n ou être
-   du vocabulaire canonique (figures, solfège). Un `RuntimeError("...")`
-   français hors `tr()` est exactement la dérive que la garde refuse.
+3. **"No hard-coded FR string in the code"**: every French literal (an
+   accented letter) in `src/v2m` must live in the i18n table or be    canonical vocabulary (figures, sol-fa). A French `RuntimeError("...")`
+   outside `tr()` is exactly the drift the guard refuses.
 
-4. **La même frontière pour les mots français SANS accent** ('echec',
-   'trouve', 'fichier'…) : un message FR sans lettre accentuée passerait
-   la garde 3 invisible. Les exemptions sont explicites, par
-   (fichier, littéral) — un identifiant interne déclare sa raison ici.
+4. **The same border for French words WITHOUT accents** ('echec',
+   'trouve', 'fichier'…): an FR message without an accented letter would
+   pass guard 3 invisibly. Exemptions are explicit, per (file, literal)
+   — an internal identifier declares its reason here.
 
-5. **La suite coûte au plus 90 s** : le suivi est imprimé à chaque fin de
-   run (`suite cost: …`) et un run VERT au-delà du budget échoue. Un test
-   lent ajouté devient ainsi une décision explicite, pas une dérive
-   silencieuse de la boucle de dev.
+5. **The suite costs at most 90 s**: the tracking is printed at every run
+   end (`suite cost: …`) and a GREEN run over budget fails. A slow test
+   added becomes an explicit decision, not a silent drift of the dev
+   loop.
 
-6. **Toute clé littérale passée à `tr()` existe dans les DEUX tables**
-   fr/en : le fallback runtime (`.get(key, key)`) rend la clé brute à
-   l'utilisateur au lieu de lever, donc une faute de frappe dans une clé
-   ne peut être vue que statiquement — ici, sur src/ et scripts/.
+6. **Every literal key passed to `tr()` exists in BOTH tables** fr/en:
+   the runtime fallback (`.get(key, key)`) renders the raw key to the
+   user instead of raising, so a typo in a key can only be seen
+   statically — here, on src/ and scripts/.
 """
 
 from __future__ import annotations
@@ -46,10 +45,10 @@ from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Lettres accentuées françaises — un littéral de CODE (hors docstrings) qui
-# en porte une hors i18n.py est un message utilisateur qui n'a pas suivi
-# `tr()`. Docstrings et vocabulaire canonique (figures « pointée », solfège
-# « Ré »...) sont exemptés par design : ils sont intenables en anglais.
+# French accented letters — a CODE literal (docstrings excluded) carrying
+# one outside i18n.py is a user message that did not go through `tr()`.
+# Docstrings and canonical vocabulary (figure "pointée", sol-fa "Ré"...)
+# are exempted by design: they are untenable in English.
 FRENCH_LETTERS = set("àâäéèêëîïôöùûüçœÀÂÄÉÈÊËÎÏÔÖÙÛÜÇŒ")
 CANONICAL = ("pointée", "trente-deuxième", "seizième de soupir", "Ré", "Ré#", "Do", "La")
 CANONICAL_RE = tuple(re.escape(w) + r"\b" for w in CANONICAL)
@@ -63,41 +62,41 @@ def _tracked() -> list[str]:
 
 
 def test_repo_tracks_no_generated_artifacts():
-    """Aucun artefact généré versionné : sources + configs + référence figée."""
+    """No generated artifact tracked: sources + configs + frozen reference."""
     tracked = _tracked()
     offenders = [f for f in tracked if f.endswith((".mid", ".musicxml", ".csv", ".pdf", ".wav"))]
-    # JSON : seules les références figées des tests ont le droit de cité
+    # JSON: only the tests' frozen references have standing
     offenders += [
         f for f in tracked if f.endswith(".json") and not f.startswith("tests/reference/")
     ]
-    assert not offenders, f"artefacts générés versionnés : {offenders}"
+    assert not offenders, f"generated artifacts tracked : {offenders}"
 
 
 def test_meter_docstring_names_its_stages():
-    """Chaque étage que detect_meter appelle est nommé dans la docstring de module."""
+    """Every stage detect_meter calls is named in the module docstring."""
     source = (REPO / "src" / "v2m" / "core" / "meter.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     module_doc = ast.get_docstring(tree) or ""
     detect = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "detect_meter")
 
-    # les étages réels : les fonctions _detect_* que detect_meter appelle
+    # the real stages: the _detect_* functions detect_meter calls
     called = {
         n.func.id
         for n in ast.walk(detect)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id.startswith("_detect")
     }
-    assert called, "detect_meter n'appelle aucun étage ? (structure changée ?)"
+    assert called, "detect_meter calls no stage? (structure changed?)"
     undocumented = {stage for stage in called if stage not in module_doc}
     assert not undocumented, (
-        f"étages non documentés dans la docstring de module de meter.py : {sorted(undocumented)} — "
-        "le contrat d'ordre vit dans cette docstring : documente l'étage ou ne l'ajoute pas."
+        f"stages not documented in meter.py's module docstring : {sorted(undocumented)} — "
+        "the order contract lives in that docstring: document the stage or do not add it."
     )
 
 
 def _iter_code_literals(source: str) -> list[tuple[int, str]]:
-    """Tous les littéraux de CODE d'une source (hors docstrings)."""
+    """All CODE literals of a source (docstrings excluded)."""
     tree = ast.parse(source)
-    # les docstrings sont le PREMIER statement (Constant) de module/classe/fonction
+    # docstrings are the FIRST statement (Constant) of a module/class/function
     docs: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -112,7 +111,7 @@ def _iter_code_literals(source: str) -> list[tuple[int, str]]:
 
 
 def _code_literals_with_french_letters(path: Path) -> list[tuple[int, str]]:
-    """Littéraux de CODE (hors docstrings) portant une lettre accentuée."""
+    """CODE literals (docstrings excluded) carrying an accented letter."""
     return [
         (lineno, text)
         for lineno, text in _iter_code_literals(path.read_text(encoding="utf-8"))
@@ -121,12 +120,12 @@ def _code_literals_with_french_letters(path: Path) -> list[tuple[int, str]]:
 
 
 def test_no_french_literals_outside_i18n():
-    """Aucune chaîne FR en dur hors i18n.py : la règle de session a sa dent AST.
+    """No hard-coded FR string outside i18n.py: the session rule has its AST tooth.
 
-    La docstring de module de i18n.py porte déjà la frontière (c'est la
-    table elle-même) ; le garde exclut les docstrings (en anglais) et le
-    vocabulaire canonique intenable (figures, solfège) — la règle visée
-    est le MESSAGE utilisateur qui aurait dû passer par `tr()`.
+    i18n.py's module docstring already carries the border (it IS the
+    table); the guard excludes docstrings (English) and the untenable
+    canonical vocabulary (figures, sol-fa) — the target is the user
+    MESSAGE that should have gone through `tr()`.
     """
     offenders: list[str] = []
     for path in sorted((REPO / "src" / "v2m").rglob("*.py")):
@@ -137,17 +136,17 @@ def test_no_french_literals_outside_i18n():
                 continue
             offenders.append(f"{path}:{lineno}: {text!r}")
     assert not offenders, (
-        "chaînes FR en dur hors i18n.py — passe par tr() (clé dans la table fr/en) :\n  "
+        "hard-coded FR strings outside i18n.py — go through tr() (key in the fr/en table):\n  "
         + "\n  ".join(offenders)
     )
 
 
-# --- garde 4 : mots français courants SANS accent ---------------------------
-# 'echec de l'analyse', 'fichier non trouve' : aucun ü, ç, é ici, la garde 3
-# ne voit RIEN — pourtant ce sont des messages français qui n'ont pas suivi
-# tr(). On replie les accents des DEUX côtés pour que 'trouvé' et 'trouve'
-# tombent sous la même règle, et on borne chaque mot (\b) pour ne pas
-# avaler 'west', 'manifest', 'latest' (l'anglais a aussi des 'est').
+# --- guard 4: common French words WITHOUT accents ---------------------------
+# 'echec de l'analyse', 'fichier non trouve': no accented letters here, guard 3 sees
+# NOTHING — yet those are French messages that did not go through tr().
+# Accents are folded on BOTH sides so 'trouvé' and 'trouve' fall under the
+# same rule, and each word is bounded (\b) so 'west', 'manifest', 'latest'
+# are not swallowed (English has 'est' too).
 FRENCH_WORDS = (
     "est", "trouve", "echec", "fichier", "dossier", "introuvable",
     "indisponible", "delai", "duree", "analyse",
@@ -159,16 +158,16 @@ ACCENT_FOLD = str.maketrans({
     "ç": "c", "œ": "e",
 })
 
-# Exemptions EXPLICITES, par (fichier relatif à src/v2m, littéral) : un mot
-# Un mot FR sans accent légitime dans le code se déclare ICI avec sa raison.
-# Portée volontairement étroite : le même littéral ailleurs reste un offender.
-# (Vide aujourd'hui : le dernier habitant — le slot 'duree' de widgets.py —
-# a disparu quand SLOT_KEYS est devenu la liste des clés tr() elles-mêmes.)
+# EXPLICIT exemptions, per (file relative to src/v2m, literal): a legit
+# unaccented FR word in the code declares ITSELF here with its reason.
+# Narrow scope on purpose: the same literal elsewhere stays an offender.
+# (Empty today: the last tenant — widgets.py's 'duree' slot — disappeared
+# when SLOT_KEYS became the tr() keys themselves.)
 EXEMPT_LITERALS = {}
 
 
 def _unaccented_french_hits(rel: str, source: str) -> list[tuple[int, str]]:
-    """Littéraux de `source` portant un mot FR sans accent, hors exemptions."""
+    """Literals of `source` carrying an unaccented FR word, exemptions excluded."""
     hits: list[tuple[int, str]] = []
     for lineno, text in _iter_code_literals(source):
         if (rel, text) in EXEMPT_LITERALS:
@@ -179,13 +178,12 @@ def _unaccented_french_hits(rel: str, source: str) -> list[tuple[int, str]]:
 
 
 def test_no_unaccented_french_literals_outside_i18n():
-    """Aucun mot français sans accent hors i18n.py — la garde 3 a une dent 2.
+    """No unaccented French word outside i18n.py — guard 3 has a tooth 2.
 
-    Les exemptions vivent dans EXEMPT_LITERALS avec leur raison ; les
-    docstrings (anglais) et le vocabulaire canonique restent hors garde
-    comme pour la garde 3. La cible est le MESSAGE utilisateur qui aurait
-    dû passer par `tr()` sans avoir besoin d'un accent pour se faire
-    remarquer.
+    The exemptions live in EXEMPT_LITERALS with their reason; docstrings
+    (English) and canonical vocabulary stay outside the guard as for
+    guard 3. The target is the user MESSAGE that should have gone through
+    `tr()` without needing an accent to be noticed.
     """
     offenders: list[str] = []
     for path in sorted((REPO / "src" / "v2m").rglob("*.py")):
@@ -197,26 +195,26 @@ def test_no_unaccented_french_literals_outside_i18n():
         ):
             offenders.append(f"{path}:{lineno}: {text!r}")
     assert not offenders, (
-        "mots FR sans accent hors i18n.py — passe par tr(), ou déclare "
-        "l'exception dans EXEMPT_LITERALS avec sa raison :\n  "
+        "unaccented FR words outside i18n.py — go through tr(), or declare "
+        "the exception in EXEMPT_LITERALS with its reason:\n  "
         + "\n  ".join(offenders)
     )
 
 
 def test_unaccented_french_guard_bites():
-    """La garde 4 a des DENTS : elle mord un vrai offender, et seulement lui."""
+    """Guard 4 has TEETH: it bites a real offender, and only it."""
     bad = 'raise RuntimeError("echec de l\'analyse: fichier non trouve")\n'
-    assert _unaccented_french_hits("cli.py", bad), "le garde ne mord pas ?"
-    # l'exemption est SCOPÉE au fichier : déclarée chez widgets.py, elle ne
-    # blanchit pas le même littéral ailleurs (exemption synthétique — le slot
-    # 'duree' réel n'existe plus)
-    EXEMPT_LITERALS[("gui/widgets.py", "duree")] = "raison de test"
+    assert _unaccented_french_hits("cli.py", bad), "the guard does not bite?"
+    # the exemption is SCOPED to the file: declared on widgets.py, it does
+    # not whiten the same literal elsewhere (synthetic exemption — the real
+    # 'duree' slot no longer exists)
+    EXEMPT_LITERALS[("gui/widgets.py", "duree")] = "test reason"
     try:
         assert not _unaccented_french_hits("gui/widgets.py", 'k = "duree"\n')
         assert _unaccented_french_hits("cli.py", 'k = "duree"\n')
     finally:
         del EXEMPT_LITERALS[("gui/widgets.py", "duree")]
-    # un mot anglais qui CONTIENT un mot français ne compte pas
+    # an English word CONTAINING a French word does not count
     assert not _unaccented_french_hits("cli.py", 'msg = "the latest manifest"\n')
 
 
@@ -229,13 +227,13 @@ class _StubReporter:
 
 
 def _stub_session(exitstatus: int, reporter):
-    """La seule surface que le hook de fin de session lit."""
+    """The only surface the session-finish hook reads."""
     pm = SimpleNamespace(get_plugin=lambda name: reporter)
     return SimpleNamespace(exitstatus=exitstatus, config=SimpleNamespace(pluginmanager=pm))
 
 
 def test_suite_cost_over_budget_fails_a_green_run(monkeypatch):
-    """Le budget de la suite a une dent : run vert trop lent -> exit 1."""
+    """The suite budget has a tooth: a too-slow green run -> exit 1."""
     import conftest
 
     reporter = _StubReporter()
@@ -245,15 +243,15 @@ def test_suite_cost_over_budget_fails_a_green_run(monkeypatch):
         time.perf_counter() - conftest.SUITE_BUDGET_S - 1,
     )
     conftest.pytest_sessionfinish(session, exitstatus=0)
-    assert session.exitstatus == 1, "un run vert au-delà du budget doit échouer"
+    assert session.exitstatus == 1, "a green run over budget must fail"
     assert any("suite cost" in line and "OVER BUDGET" in line for line in reporter.lines)
 
 
 def test_suite_cost_keeps_failure_codes_and_reports_green_runs(monkeypatch):
-    """Le suivi ne masque rien : un exit 1/3 existant reste tel quel."""
+    """The tracking masks nothing: an existing exit 1/3 stays as is."""
     import conftest
 
-    # sous le budget : le run vert reste vert, le coût est quand même imprimé
+    # under budget: the green run stays green, the cost is still printed
     reporter = _StubReporter()
     session = _stub_session(0, reporter)
     monkeypatch.setattr(conftest, "_SUITE_STARTED_AT", time.perf_counter())
@@ -261,7 +259,7 @@ def test_suite_cost_keeps_failure_codes_and_reports_green_runs(monkeypatch):
     assert session.exitstatus == 0
     assert any("suite cost" in line and "OVER BUDGET" not in line for line in reporter.lines)
 
-    # au-delà du budget mais déjà en échec / interrompu : les codes survivent
+    # over budget but already failing / interrupted: the codes survive
     monkeypatch.setattr(
         conftest, "_SUITE_STARTED_AT",
         time.perf_counter() - conftest.SUITE_BUDGET_S - 1,
@@ -273,36 +271,36 @@ def test_suite_cost_keeps_failure_codes_and_reports_green_runs(monkeypatch):
 
 
 def test_the_suite_is_independent_of_the_users_language_file():
-    """La suite ne lit ni n'écrit le ~/.v2m_lang réel de l'utilisateur.
+    """The suite neither reads nor writes the user's real ~/.v2m_lang.
 
-    Régression observée : un `--lang en` manuel avait basculé le fichier
-    persisté ; `cli.main` sans --lang et MainWindow rappellent
-    `get_language()` au milieu du run, tout le process passait en anglais
-    et les tests français (« décoder », « Terminé ») échouaient selon l'état
-    du poste. La fixture session de conftest sandbox le fichier ET force le
-    français : point de départ identique à chaque run.
+    Observed regression: a manual `--lang en` had flipped the persisted
+    file; `cli.main` without --lang and MainWindow re-call `get_language()`
+    mid-run, the whole process went English and the French tests
+    ("décoder", "Terminé") literals failed depending on the machine's state. The
+    conftest session fixture sandboxes the file AND forces French: the
+    same starting point at every run.
     """
     from v2m.core import i18n
 
     assert "pytest-" in str(i18n.LANG_FILE), (
-        f"LANG_FILE non sandboxé ({i18n.LANG_FILE}) : la suite lirait/écrirait "
-        "le ~/.v2m_lang réel — fixture _sandbox_language_file dans tests/conftest.py"
+        f"LANG_FILE not sandboxed ({i18n.LANG_FILE}) : the suite would read/write "
+        "the real ~/.v2m_lang — _sandbox_language_file fixture in tests/conftest.py"
     )
     assert i18n.LANG_FILE.read_text(encoding="utf-8") == "fr", (
-        "la suite doit DÉMARRER en français, quel que soit l'état ambiant"
+        "the suite must START in French, whatever the ambient state"
     )
 
 
-# --- garde 6 : toute clé littérale de tr() existe dans les deux tables ------
-# tr() retombe sur la clé elle-même (contrat runtime épinglé par
-# test_tr_falls_back_to_key : les clés dynamiques doivent rester possibles),
-# donc une faute de frappe dans une clé ne plante JAMAIS à l'exécution —
-# l'utilisateur voit la clé brute. Seul un contrôle statique peut la voir.
+# --- guard 6: every literal key of tr() exists in both tables ---------------
+# tr() falls back to the key itself (the runtime contract pinned by
+# test_tr_falls_back_to_key: dynamic keys must stay possible), so a typo in
+# a key NEVER crashes at runtime — the user sees the raw key. Only a static
+# check can see it.
 def _tr_names(tree: ast.AST) -> set[str]:
-    """Noms LOCAUX de i18n.tr importé ('from v2m.core.i18n import tr as _tr').
+    """LOCAL names of an imported i18n.tr ('from v2m.core.i18n import tr as _tr').
 
-    Les appels attributaires (QObject.tr de Qt, i18n.tr) ne sont PAS des
-    ast.Name : ils sortent naturellement du champ.
+    Attribute calls (Qt's QObject.tr, i18n.tr) are NOT ast.Name: they fall
+    out of scope naturally.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -314,7 +312,7 @@ def _tr_names(tree: ast.AST) -> set[str]:
 
 
 def _tr_key_offenders(rel: str, source: str, tables: dict) -> list[str]:
-    """Littéraux passés à tr() absents d'UNE des deux tables de `tables`."""
+    """Literals passed to tr() absent from ONE of `tables`' two tables."""
     tree = ast.parse(source)
     names = _tr_names(tree)
     offenders: list[str] = []
@@ -333,12 +331,12 @@ def _tr_key_offenders(rel: str, source: str, tables: dict) -> list[str]:
 
 
 def test_every_tr_literal_key_exists_in_both_language_tables():
-    """Une clé tr() mal orthographiée est vue ICI, pas par l'utilisateur.
+    """A mistyped tr() key is seen HERE, not by the user.
 
-    Le garde couvre src/ ET scripts/ (profile_analysis, score_accuracy
-    traduisent aussi) ; un argument non littéral (variable, f-string) est
-    volontairement hors garde — c'est le cas dynamique que le fallback
-    runtime continue de servir.
+    The guard covers src/ AND scripts/ (profile_analysis, score_accuracy
+    translate too); a non-literal argument (a variable, an f-string) is
+    deliberately outside the guard — that is the dynamic case the runtime
+    fallback keeps serving.
     """
     from v2m.core import i18n
 
@@ -350,34 +348,34 @@ def test_every_tr_literal_key_exists_in_both_language_tables():
                 rel, path.read_text(encoding="utf-8"), i18n.STRINGS
             )
     assert not offenders, (
-        "clés tr() absentes des tables fr/en — le fallback rendrait la clé "
-        "brute à l'utilisateur ; ajoute la clé aux DEUX tables :\n  "
+        "tr() keys missing from the fr/en tables — the fallback would render "
+        "the raw key to the user; add the key to BOTH tables:\n  "
         + "\n  ".join(offenders)
     )
 
 
 def test_tr_key_guard_bites():
-    """Le garde 6 a des DENTS : clé absente mordue, clé réelle et variable non."""
+    """Guard 6 has TEETH: a missing key is bitten, a real key and a variable are not."""
     from v2m.core import i18n
 
     bad = 'from v2m.core.i18n import tr\nmsg = tr("err missing key")\n'
-    assert _tr_key_offenders("cli.py", bad, i18n.STRINGS), "le garde ne mord pas ?"
-    # une clé réelle des DEUX tables passe
+    assert _tr_key_offenders("cli.py", bad, i18n.STRINGS), "the guard does not bite?"
+    # a real key of BOTH tables passes
     ok = 'from v2m.core.i18n import tr\nmsg = tr("err file not found")\n'
     assert not _tr_key_offenders("cli.py", ok, i18n.STRINGS)
-    # une clé présente d'un SEUL côté mord aussi (parité fr/en)
+    # a key present on ONE side bites too (fr/en parity)
     half = 'from v2m.core.i18n import tr\nmsg = tr("key tempo")\n'
     one_sided = {"fr": {"key tempo": "Tempo"}, "en": {}}
     assert _tr_key_offenders("cli.py", half, one_sided)
-    # un argument dynamique n'est pas vérifié (contrat du fallback runtime)
+    # a dynamic argument is not checked (the runtime fallback's contract)
     dyn = 'from v2m.core.i18n import tr\nmsg = tr(key)\n'
     assert not _tr_key_offenders("cli.py", dyn, i18n.STRINGS)
-    # l'alias d'import est suivi ('import tr as _tr' du smoke test)
+    # the import alias is followed ('import tr as _tr' of the smoke test)
     aliased = 'from v2m.core.i18n import tr as _tr\nmsg = _tr("err missing key")\n'
     assert _tr_key_offenders("smoke.py", aliased, i18n.STRINGS)
-    # morsure sur la FORME du vrai code : une faute injectée en mémoire dans
-    # cli.py est vue — le scan réel du test au-dessus n'a rien raté
+    # biting on the SHAPE of the real code: a typo injected in memory into
+    # cli.py is seen — the real scan of the test above missed nothing
     cli_src = (REPO / "src" / "v2m" / "cli.py").read_text(encoding="utf-8")
     poisoned = cli_src.replace('tr("err file not found")', 'tr("err file not foundd")', 1)
-    assert poisoned != cli_src, "la sonde n'a plus rien à injecter : cli.py a changé ?"
+    assert poisoned != cli_src, "the probe has nothing left to inject: did cli.py change?"
     assert _tr_key_offenders("cli.py", poisoned, i18n.STRINGS)

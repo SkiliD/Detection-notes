@@ -1,28 +1,28 @@
-"""Propriétés de la Grille, écrites AVANT que la Grille n'existe.
+"""Grid properties, written BEFORE the Grid existed.
 
-Le référentiel métrique — conversion secondes ↔ temps, position en mesure,
-arrimage sur la grille — est aujourd'hui recopié dans sept modules. Ces tests
-ne décrivent pas cette dispersion : ils fixent ce que tout consommateur doit
-continuer de faire quand elle sera un seul module (`grid.BeatGrid`, voir
-CONTEXT.md « Grille »). C'est le contrat de non-régression du refactor : chaque
-propriété se relira ensuite à travers la grille sans changer d'énoncé.
+The metric frame — seconds ↔ beats conversion, measure position, snapping
+onto the grid — used to be copy-pasted across seven modules. These tests
+do not describe that dispersion: they pin what every consumer must keep
+doing once it is one module (`grid.BeatGrid`, see CONTEXT.md "Grille").
+It is the refactor's non-regression contract: each property can then be
+re-read through the grid without changing its statement.
 
-Deux partis pris :
+Two commitments:
 
-- les propriétés passent par les interfaces PUBLIQUES des consommateurs
-  (figures, meter, musicxml, midi_export), jamais par une recopie de leur
-  arithmétique dans le test ;
-- elles tiennent à PLUSIEURS tempos : c'est l'invariance par tempo qui est la
-  propriété, pas un résultat à 120 BPM. Un `171,02 BPM` traîne partout ici
-  parce que c'est le tempo réellement détecté sur `chant.wav`.
+- the properties go through the consumers' PUBLIC interfaces (figures,
+  meter, musicxml, midi_export), never by re-implementing their
+  arithmetic inside the test;
+- they hold at SEVERAL tempos: tempo invariance is the property, not a
+  result at 120 BPM. A `171.02 BPM` shows up everywhere here because
+  that is the tempo actually detected on `chant.wav`.
 
-L'arrimage d'une prise est un membre de la Grille (`BeatGrid.snap_notes`) :
-les propriétés d'arrimage ci-dessous l'interrogent donc directement, alors
-qu'elles passaient par une fonction privée de l'export. Ce que l'export en
-fait reste tenu par le filet, `test_reference_artifacts.py`. La dernière
-propriété fait de même pour `BeatGrid.written`, le choix de la valeur écrite
-d'une durée sans figure : elle interroge la Grille ET la Portée, qui doit s'en
-servir au lieu de réarrondir chez elle.
+A take's snapping is a member of the Grid (`BeatGrid.snap_notes`): the
+snapping properties below query it directly, whereas they used to go
+through a private function of the export. What the export makes of it
+remains held by the net, `test_reference_artifacts.py`. The last
+property does the same for `BeatGrid.written`, the choice of the
+written value of a figure-less duration: it queries the Grid AND the
+Staff, which must use it instead of re-rounding at home.
 """
 
 import io
@@ -35,7 +35,7 @@ from v2m.core.midi_export import build_midi
 from v2m.core.notation import notated_duration
 from v2m.core.notes import Note
 
-BPM = (60.0, 120.0, 171.02)  # dont le tempo réellement détecté sur chant.wav
+BPM = (60.0, 120.0, 171.02)  # incl. the tempo actually detected on chant.wav
 
 
 def _note(midi, start, dur_s):
@@ -43,7 +43,7 @@ def _note(midi, start, dur_s):
 
 
 def _score_step(bpm):
-    """Pas d'arrimage de la partition : le seizième (un quart de temps)."""
+    """The score's snap step: the sixteenth (a quarter of a beat)."""
     return BeatGrid(bpm).step_seconds(per_beat=4.0)
 
 
@@ -53,13 +53,13 @@ def _midi_bytes(notes, grid, quantize_s):
     return buf.getvalue()
 
 
-# ------------------------------------------------ secondes ↔ temps, aller-retour
+# ------------------------------------------------ seconds <-> beats, round-trip
 @pytest.mark.parametrize("bpm", BPM)
 @pytest.mark.parametrize("beats,figure", [(4.0, "ronde"), (2.0, "blanche"),
                                          (1.0, "noire"), (0.5, "croche")])
 def test_a_note_of_k_beats_is_labeled_k(bpm, beats, figure):
-    """Une durée de k temps porte la figure de k temps, à tout tempo : c'est la
-    conversion secondes → temps, vue par le consommateur des figures."""
+    """A duration of k beats carries the k-beat figure, at any tempo: that is
+    the seconds → beats conversion, seen by the figures consumer."""
     notes = [_note(60, 0.0, beats * 60.0 / bpm)]
     label_notes(notes, BeatGrid(bpm))
     assert notes[0].figure == figure
@@ -69,13 +69,13 @@ def test_a_note_of_k_beats_is_labeled_k(bpm, beats, figure):
 @pytest.mark.parametrize("meter,beats", [(Meter(4, 4), 4.0), (Meter(3, 4), 3.0),
                                         (Meter(6, 8), 3.0)])
 def test_a_measure_lasts_its_quarter_beats(bpm, meter, beats):
-    """Une mesure dure son nombre de noires à tout tempo — un 6/8, trois."""
+    """A measure lasts its number of quarter beats at any tempo — a 6/8, three."""
     assert BeatGrid(bpm, meter).measure_seconds == pytest.approx(beats * 60.0 / bpm)
 
 
 @pytest.mark.parametrize("bpm", BPM)
 def test_a_sixteenth_is_a_quarter_of_a_beat(bpm):
-    """Le pas de quantification est un temps divisé, pas un nombre de secondes."""
+    """The quantization step is a divided beat, not a number of seconds."""
     assert BeatGrid(bpm).step_seconds(per_beat=4.0) * bpm / 60.0 == pytest.approx(0.25)
     assert BeatGrid(bpm).step_seconds(per_beat=1.0) * bpm / 60.0 == pytest.approx(1.0)
 
@@ -83,8 +83,8 @@ def test_a_sixteenth_is_a_quarter_of_a_beat(bpm):
 # ------------------------------------------------------------- positions
 @pytest.mark.parametrize("meter", [None, Meter(3, 4), Meter(4, 4), Meter(6, 8)])
 def test_positions_rebuild_the_note_start_and_never_go_back(meter):
-    """(mesure, temps) suffit à retrouver le début : la position est une
-    conversion, pas un décor — et l'ordre des notes est conservé."""
+    """(measure, beat) suffices to recover the start: the position is a
+    conversion, not decoration — and the notes' order is kept."""
     bpm = 120.0
     grid = BeatGrid(bpm, meter)
     measure_s, slot_s = grid.measure_seconds, grid.slot_seconds
@@ -110,13 +110,13 @@ def test_a_note_on_a_boundary_opens_the_next_measure():
 def test_measures_cover_the_last_note_that_overhangs():
     grid = BeatGrid(120.0, Meter(4, 4))
     notes = [_note(60, 0.0, 0.5), _note(62, grid.measure_seconds - 0.1, 0.4)]
-    assert grid.measures(notes) == 2  # déborde de 0,3 s dans la 2e
+    assert grid.measures(notes) == 2  # overhangs 0.3 s into the 2nd
 
 
-# ------------------------------------------------------------- arrimage
+# ------------------------------------------------------------- snapping
 def test_snapping_is_idempotent_and_lands_on_the_grid():
-    """Arrimer deux fois, c'est arrimer une fois : c'est ce qui autorise un
-    consommateur à se servir d'un résultat déjà aligné sans le déplacer."""
+    """Snapping twice is snapping once: that is what lets a consumer use an
+    already-aligned result without moving it."""
     bpm = 171.02
     step = _score_step(bpm)
     notes = [_note(60, 0.0, 0.31), _note(62, 0.37, 0.19), _note(64, 1.29, 0.44)]
@@ -131,8 +131,8 @@ def test_snapping_is_idempotent_and_lands_on_the_grid():
 
 
 def test_snapping_never_moves_a_boundary_more_than_one_division():
-    """Un arrimage qui saute une division entière serait un décalage, pas un
-    arrondi : balayé sur des débuts et durées pseudo-aléatoires."""
+    """A snap that jumps a whole division would be a shift, not a rounding:
+    swept over pseudo-random starts and durations."""
     bpm = 171.02
     step = _score_step(bpm)
     rng = np.random.default_rng(0)
@@ -146,19 +146,19 @@ def test_snapping_never_moves_a_boundary_more_than_one_division():
 
 
 def test_midi_quantization_leaves_an_already_aligned_note_alone():
-    """Le pas de quantification ne doit rien déplacer sur une note déjà sur sa
-    grille : quantifier ou non donne alors le même fichier."""
+    """The quantization step must move nothing on a note already on its
+    grid: quantizing or not then gives the same file."""
     grid = BeatGrid(120.0)
     step = _score_step(grid.bpm)
     notes = [_note(60, 0.0, 4 * step), _note(62, 2 * step, step), _note(64, 5 * step, 2 * step)]
     assert _midi_bytes(notes, grid, quantize_s=step) == _midi_bytes(notes, grid, quantize_s=None)
 
 
-# --------------------------------------------------- durées écrites
+# --------------------------------------------------- written durations
 @pytest.mark.parametrize("bpm", BPM)
 def test_a_duration_on_a_written_value_is_written_as_is(bpm):
-    """Le plus proche voisin d'une durée déjà écrivable, c'est elle-même : la
-    borne arrondit sans dériver, à tout tempo."""
+    """The nearest neighbour of an already-writable duration is itself: the
+    bound rounds without drifting, at any tempo."""
     grid = BeatGrid(bpm)
     for figure in CATALOGUE:
         if figure.tuplet is None and not figure.export_only:
@@ -166,25 +166,25 @@ def test_a_duration_on_a_written_value_is_written_as_is(bpm):
 
 
 def test_at_equal_distance_the_plain_figure_wins():
-    """L'ordre du catalogue départage les égalités : 1,25 temps est à 0,25
-    d'une noire comme d'une noire pointée, et 5 temps à 1 d'une ronde comme
-    d'une ronde pointée ; les deux s'écrivent en figure simple."""
+    """The catalogue's order breaks the ties: 1.25 beats sits 0.25 from a
+    quarter as from a dotted quarter, and 5 beats 1 from a whole as from a
+    dotted whole; both are written as plain figures."""
     grid = BeatGrid(120.0)
     assert grid.written(grid.seconds(1.25)).name == "noire"
     assert grid.written(grid.seconds(5.0)).name == "ronde"
 
 
 def test_a_duration_exactly_on_a_dotted_value_gets_it():
-    """La double-croche pointée (0,375 temps) est une valeur du catalogue : une
-    durée qui tombe pile dessus n'est plus rabattue sur la croche voisine."""
+    """The dotted sixteenth (0.375 beats) is a catalogue value: a duration
+    landing exactly on it is no longer folded onto the neighbouring eighth."""
     grid = BeatGrid(120.0)
     assert grid.written(grid.seconds(0.375)).name == "double-croche pointée"
 
 
 @pytest.mark.parametrize("bpm", BPM)
 def test_a_written_duration_stays_within_the_catalogue(bpm):
-    """Rien de plus court qu'un seizième, rien de plus long qu'une ronde
-    pointée — durée nulle, négative, énorme ou non décidable comprises."""
+    """Nothing shorter than a sixteenth, nothing longer than a dotted whole
+    — null, negative, huge and undecidable durations included."""
     grid = BeatGrid(bpm)
     for seconds in (-3.0, 0.0, 1e-9, 0.2, 137.0, float("nan")):
         figure = grid.written(seconds)
@@ -193,15 +193,15 @@ def test_a_written_duration_stays_within_the_catalogue(bpm):
 
 
 def test_a_longer_duration_is_never_written_shorter():
-    """La valeur écrite croît avec la durée chantée : balayé sur 300 durées."""
+    """The written value grows with the sung duration: swept over 300 durations."""
     grid = BeatGrid(171.02)
     beats = [grid.written(grid.seconds(b)).beats for b in np.linspace(0.0, 6.5, 300)]
     assert beats == sorted(beats)
 
 
 def test_the_staff_takes_its_fallback_duration_from_the_grid():
-    """La Portée ne réarrondit plus chez elle : la durée écrite d'une note sans
-    figure est exactement ce que la Grille annonce."""
+    """The Staff no longer re-rounds at home: the written duration of a note
+    without a figure is exactly what the Grid announces."""
     grid = BeatGrid(171.02)
     for dur_s in (100.0, 1.1, 0.5, 0.35, 0.01):
         w = notated_duration(_note(60, 0.0, dur_s), grid)

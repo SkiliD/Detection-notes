@@ -1,19 +1,19 @@
-"""Vérité terrain : une voix synthétique dont on connaît toutes les notes.
+"""Ground truth: a synthetic voice whose notes are all known.
 
-Un sinus pur ne teste rien d'utile ici : il n'a ni transition, ni consonne, ni
-vibrato — donc rien de ce qui fait échouer la segmentation. Ce module fabrique
-un signal « chanté » (harmoniques glottiques, portamento entre les notes,
-consonnes large bande, vibrato, bruit de fond) dont les événements sont connus
-exactement, puis compare ce que le pipeline détecte à cette vérité.
+A pure sine tests nothing useful here: it has no transition, no consonant, no
+vibrato — none of what makes segmentation fail. This module builds a "sung"
+signal (glottal harmonics, portamento between notes, wide-band consonants,
+vibrato, background noise) whose events are known exactly, then compares what
+the pipeline detects against that truth.
 
-Deux usages :
+Two uses:
 
     from voicetruth import sequence, synthesize, detect_notes, measure
-    truth = sequence([60, 62, 64])              # noires liées, 100 BPM
+    truth = sequence([60, 62, 64])              # legato quarters, 100 BPM
     acc = measure(detect_notes(synthesize(truth)), truth)
     assert acc.exact
 
-`scripts/score_accuracy.py` s'en sert pour noter une vraie prise.
+`scripts/score_accuracy.py` uses it to score a real take.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ SR = 22_050
 
 @dataclass(frozen=True)
 class SungNote:
-    """Une note effectivement chantée (la référence).
+    """A note actually sung (the reference).
 
-    `amp` : amplitude RELATIVE de la note dans la prise (1.0 par défaut) —
-    c'est ce qui fabrique les accents que la force d'attaque doit lire.
+    `amp`: the note's RELATIVE amplitude in the take (1.0 by default) —
+    it is what manufactures the accents the attack strength must read.
     """
 
     midi: int
@@ -44,7 +44,7 @@ class SungNote:
 
 
 # --------------------------------------------------------------------------- #
-# Synthèse
+# Synthesis
 # --------------------------------------------------------------------------- #
 
 
@@ -55,13 +55,13 @@ def sequence(
     gap_s: float = 0.0,
     legato_s: float = 0.0,
 ) -> list[SungNote]:
-    """Notes successives : `legato_s` > 0 les enchaîne (portamento, pas de silence)."""
+    """Successive notes: `legato_s` > 0 chains them (portamento, no silence)."""
     step = dur_s + gap_s - legato_s
     return [SungNote(m, start_s + i * step, dur_s) for i, m in enumerate(midis)]
 
 
 def _harmonic_voice(f0: np.ndarray, sr: int, f_max: float = 4000.0) -> np.ndarray:
-    """Somme harmonique à pente glottique (1/k^1.4), bornée vers 4 kHz."""
+    """Harmonic sum with a glottal slope (1/k^1.4), capped near 4 kHz."""
     phase = 2.0 * np.pi * np.cumsum(f0) / sr
     base = float(np.mean(f0))
     n_harm = max(1, int(f_max / max(base, 1.0)))
@@ -82,15 +82,29 @@ def synthesize(
     noise: float = 0.0,
     amp: float = 0.35,
     seed: int = 0,
+    closure_s: float = 0.0,
+    tremolo_depth: float = 0.0,
+    tremolo_hz: float = 5.5,
 ) -> np.ndarray:
-    """Signal mono float32 portant `notes`.
+    """Mono float32 signal carrying `notes`.
 
-    `glide_s` : durée du portamento à l'attaque (0 = attaque nette). Le
-        portamento n'existe qu'entre notes LIÉES : après un silence, le
-        chanteur réattaque la note (c'est ce que fait un vrai détaché).
-    `consonant_s` : durée du burst large bande à l'attaque (0 = aucune).
-    `vibrato_st` : profondeur du vibrato en demi-tons (±valeur), 0 = tenue.
-    `noise` : amplitude du bruit de fond ajouté partout.
+    `glide_s`: duration of the attack portamento (0 = crisp attack). The
+        portamento only exists between LEGATO notes: after a silence, the
+        singer re-strikes the note (that is what a real détaché does).
+    `consonant_s`: duration of the wide-band attack burst (0 = none).
+    `vibrato_st`: vibrato depth in semitones (±value), 0 = steady hold.
+    `noise`: amplitude of the background noise added everywhere.
+    `closure_s`: glottal closure at the seam of each LEGATO note (the
+        first excepted): a level notch (~5% for the given duration) that
+        models the singer's re-emission. Without it, two glued notes are
+        one continuous envelope — no detector, human or machine, can see
+        a seam there (measured: level flat at ±5%, tonal spectrum); a
+        real singer interrupts the airflow, and it is THAT interruption
+        the live segmentation cuts on, via its mute frames
+        (SPLIT_FRAMES).
+    `tremolo_depth`: amplitude modulation (0.30 = ±30%) — the case that
+        must NEVER fragment into "notes" at every cycle.
+    `tremolo_hz`: modulation speed (5.5 Hz = vibrato of amplitude).
     """
     if not notes:
         return np.zeros(0, dtype=np.float32)
@@ -110,15 +124,20 @@ def synthesize(
         legato = note.start_s <= prev_end + 0.05
         if prev_hz and glide_s > 0 and legato:
             g = min(int(glide_s * sr), ln)
-            f0[:g] = np.linspace(prev_hz, hz, g)  # portamento linéaire en Hz
+            f0[:g] = np.linspace(prev_hz, hz, g)  # linear portamento in Hz
         if vibrato_st > 0:
-            depth = np.clip((t - 0.12) / 0.12, 0.0, 1.0)  # vibrato qui s'installe
+            depth = np.clip((t - 0.12) / 0.12, 0.0, 1.0)  # vibrato settling in
             f0 = f0 * 2.0 ** (vibrato_st * np.sin(2 * np.pi * vibrato_hz * t) * depth / 12.0)
 
-        # phase continue d'une note à l'autre : pas de clic à la jointure
+        # phase continuous from one note to the next: no click at the seam
         phase = phase0 + 2.0 * np.pi * np.cumsum(f0) / sr
         phase0 = float(phase[-1] + 2.0 * np.pi * f0[-1] / sr)
-        body = _harmonic_voice(f0, sr) * _envelope(t, ln / sr)
+        env = _envelope(t, ln / sr)
+        if closure_s > 0 and legato:
+            env = env * _glottal_closure(t, ln / sr, closure_s)
+        if tremolo_depth > 0:
+            env = env * (1.0 + tremolo_depth * np.sin(2 * np.pi * tremolo_hz * (t + note.start_s)))
+        body = _harmonic_voice(f0, sr) * env
 
         if consonant_s > 0:
             cn = min(int(consonant_s * sr), ln)
@@ -136,7 +155,7 @@ def synthesize(
 
 
 def _envelope(t: np.ndarray, dur_s: float) -> np.ndarray:
-    """Attaque 25 ms, relâchement 40 ms — pas de clic aux extrémités."""
+    """25 ms attack, 40 ms release — no click at either end."""
     env = np.ones_like(t)
     a = min(int(0.025 * len(t) / max(dur_s, 1e-9)), len(t) // 2)
     r = min(int(0.040 * len(t) / max(dur_s, 1e-9)), len(t) // 2)
@@ -147,20 +166,38 @@ def _envelope(t: np.ndarray, dur_s: float) -> np.ndarray:
     return env
 
 
+def _glottal_closure(t: np.ndarray, dur_s: float, closure_s: float) -> np.ndarray:
+    """Glottal-closure notch at the start of a legato note (re-emission).
+
+    The level falls to ~5% for `closure_s` (~30 ms, measured on sung
+    repetitions), with 12 ms edges — not a silence (the breath and the
+    note's body remain; it is a re-emission, not a restart after
+    silence) but a dip the level measure reads.
+    """
+    env = np.ones_like(t)
+    n = int(closure_s * len(t) / max(dur_s, 1e-9))
+    f = min(int(0.012 * len(t) / max(dur_s, 1e-9)), n // 3)
+    if n > 0 and f > 0:
+        env[:f] = np.linspace(1.0, 0.05, f)
+        env[f : n - f] = 0.05
+        env[n - f : n] = np.linspace(0.05, 1.0, f)
+    return env
+
+
 def _consonant_envelope(n: int, sr: int) -> np.ndarray:
-    """Burst percussif : très court, décroissance rapide."""
+    """Percussive burst: very short, fast decay."""
     t = np.arange(n) / sr
     return np.exp(-t / max(0.012, 1e-9))
 
 
 def add_breath(y: np.ndarray, at: float, dur_s: float = 0.09, amp: float = 0.25,
                seed: int = 7) -> None:
-    """Ajoute une reprise d'air (burst de bruit fenêtré) dans `y`, en place.
+    """Adds an air intake (windowed noise burst) into `y`, in place.
 
-    Le chanteur respire : dans le gap d'une ligne liée (juste avant la
-    réattaque), en silence entre deux phrases, ou le souffle continu d'une
-    voix soufflée (paramètre `noise` de synthesize). La segmentation ne doit
-    JAMAIS en faire une note.
+    The singer breathes: in the gap of a legato line (just before the
+    re-strike), in the silence between two phrases, or as the continuous
+    breath of a breathy voice (synthesize's `noise` parameter).
+    Segmentation must NEVER turn it into a note.
     """
     i0 = int(at * SR)
     n = int(dur_s * SR)
@@ -169,45 +206,46 @@ def add_breath(y: np.ndarray, at: float, dur_s: float = 0.09, amp: float = 0.25,
 
 
 # --------------------------------------------------------------------------- #
-# Mesure
+# Measurement
 # --------------------------------------------------------------------------- #
 
 
 @dataclass
 class Accuracy:
-    """Ce que la chaîne a fait des notes chantées."""
+    """What the chain made of the sung notes."""
 
     truth_n: int
     detected_n: int
     matched: int
     missing: int
     extra: int
-    intruders: int          # notes en trop À L'INTÉRIEUR d'une note chantée
+    intruders: int          # extra notes INSIDE a sung note
     worst_start_ms: float
     worst_pitch_st: float
 
     @property
     def exact(self) -> bool:
-        """Toutes les notes trouvées, aucune en trop (donc pas de fragment)."""
+        """Every note found, none extra (hence no fragment)."""
         return self.matched == self.truth_n and self.extra == 0
 
     def line(self) -> str:
         return (
-            f"{self.matched}/{self.truth_n} notes, {self.extra} en trop "
-            f"(dont {self.intruders} à l'intérieur), écart attaque ≤ "
+            f"{self.matched}/{self.truth_n} notes, {self.extra} extra "
+            f"({self.intruders} inside), attack gap <= "
             f"{self.worst_start_ms:.0f} ms"
         )
 
 
 def detect_notes(y: np.ndarray, sr: int = SR, with_attacks: bool = True):
-    """Chaîne complète hauteur -> attaques -> segmentation."""
-    from v2m.core.notes import track_to_notes
-    from v2m.core.onsets import detect_attacks
-    from v2m.core.pitch import track_pitch_offline
+    """Full chain pitch -> attacks -> segmentation."""
+    from v2m.core.notes import interpret
+    from v2m.core.observation import VoiceObservation
 
-    track = track_pitch_offline(y, sr)
-    attacks = detect_attacks(y, sr) if with_attacks else None
-    return track_to_notes(track, sr, attacks=attacks)
+    # one observation (cleaned curve + attacks + clock), then interpretation:
+    # the evidence is built by the module that owns it, and this harness feeds
+    # the SAME two doors as the pipeline
+    observation = VoiceObservation.from_signal(y, sr, use_attacks=with_attacks)
+    return interpret(observation)
 
 
 def measure(
@@ -216,12 +254,11 @@ def measure(
     tol_s: float = 0.12,
     pitch_tol_st: float = 0.5,
 ) -> Accuracy:
-    """Apparie les notes détectées aux notes chantées (même attaque, même hauteur).
+    """Matches detected notes to sung notes (same attack, same pitch).
 
-    Un fragment de transition (note en trop entre deux vraies notes) est
-    compté comme `intruders` : c'est exactement le défaut que la détection
-    d'attaques doit supprimer, et il se cacherait dans un simple compte de
-    notes total.
+    A transition fragment (an extra note between two real ones) counts
+    as `intruders`: it is exactly the defect attack detection must
+    remove, and it would hide inside a plain total note count.
     """
     used = [False] * len(detected)
     matched = 0
@@ -265,6 +302,6 @@ def measure(
 
 
 def describe(acc: Accuracy) -> str:
-    """Ligne lisible pour les rapports de script."""
+    """Readable line for script reports."""
     flag = "OK " if acc.exact else "→  "
     return f"{flag}{acc.line()}"

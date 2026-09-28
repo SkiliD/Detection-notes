@@ -3,20 +3,20 @@
     "n_notes": 29,
     "n_rests": 4,
     "sha256": {
-      "score.json": "cadf3a156e8a4f398b7a6ef9c897a4e9e2ae0277db105f6ef126f0887651e11b",
-      "score.mid": "047989026277b5cd69ae103bb966c1d3e0b7464002e245e12ccad9d9d925cb31",
-      "score.musicxml": "5786a272a1243db5694d73da35e6ed3b032ecfec9844e87503da40df4ca2d139"
+      "score.json": "3825f4abca3ec14c63f1fcd5eb2bf0c698fcaa046ce2e5640a6a4a22b1e3a250",
+      "score.mid": "c35485c687c9027c109eb2fff3d7b1b4df9814e67d442999b01a53b1fff35090",
+      "score.musicxml": "77e22d648227e2988333cd750c6387d3504b278d21331c555e8012ee74acc9aa"
     },
     "tempo_bpm": 170.98
   },
   "demo.wav": {
-    "n_notes": 15,
+    "n_notes": 16,
     "n_rests": 0,
     "sha256": {
-      "score.json": "df270a54836873acb371a2a7ed417ce64cb6dabbdae88bb4865dea322605ab94",
-      "score.mid": "c7704c30b93f416098000ba2f8a009927fffbc53ec62af28b6bdbe6db4f84dda",
-      "score.musicxml": "d88ebe615737d87b2283df98ca1211c62f87036346c143200fda7b858f5fb3cb"
+      "score.json": "e4b739d86dec8a8a34c814d9d351daffe5dfcf2c1a0aea890274c131b8a35e8c",
+      "score.mid": "f9d5792e21bc2af8f903443dbcc315e1ee0f5f3e39636395027386d2bd09e6f4",
+      "score.musicxml": "323c91dd9d262d85b7cba1ae9aabb8b67eb7b9bd3e896d8e04a9ace89685001f"
     },
-    "tempo_bpm": 120.18
+    "tempo_bpm": 119.95
   }
 }

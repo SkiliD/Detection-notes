@@ -1,4 +1,4 @@
-"""Tests tonalité : gammes connues -> candidates attendues."""
+"""Key tests: known scales -> expected candidates."""
 
 from v2m.core.keys import detect_key, pitch_class_histogram, scale_pitch_classes, snap_to_key
 from v2m.core.notes import Note
@@ -14,7 +14,7 @@ def _notes_from_midis(midis_durs: list[tuple[int, float]]) -> list[Note]:
 
 
 def test_c_major_scale():
-    # gamme de Do majeur, Do insiste (tonique + dominante longues)
+    # C major scale, C insisted on (long tonic + dominant)
     midis = [60, 62, 64, 65, 67, 69, 71, 72]
     durs = [0.6, 0.25, 0.25, 0.25, 0.5, 0.25, 0.25, 0.6]
     notes = _notes_from_midis(list(zip(midis, durs)))
@@ -25,7 +25,7 @@ def test_c_major_scale():
 
 
 def test_a_minor():
-    # gamme de La mineur, La insiste
+    # A minor scale, A insisted on
     midis = [57, 59, 60, 62, 64, 65, 67, 69]
     durs = [0.6, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.6]
     notes = _notes_from_midis(list(zip(midis, durs)))
@@ -39,7 +39,7 @@ def test_alternatives_present():
     notes = _notes_from_midis([(m, 0.3) for m in midis])
     res = detect_key(notes)
     assert 1 <= len(res.alternatives) <= 2
-    # le score décroît
+    # the score decreases
     scores = [res.best.score] + [a.score for a in res.alternatives]
     assert scores == sorted(scores, reverse=True)
 
@@ -47,7 +47,7 @@ def test_alternatives_present():
 def test_histogram_weighted_by_duration():
     notes = [
         Note(start=0, end=1.0, midi=60, confidence=0.9),   # C
-        Note(start=1, end=1.1, midi=67, confidence=0.9),   # G court
+        Note(start=1, end=1.1, midi=67, confidence=0.9),   # short G
     ]
     h = pitch_class_histogram(notes)
     assert h[0] > h[7] * 5  # C >> G
@@ -59,7 +59,7 @@ def test_empty_notes():
 
 
 # ---------------------------------------------------------------------------
-# snap_to_key : le collage à la gamme (déviation résiduelle + contexte)
+# snap_to_key: the key snap (residual deviation + context)
 # ---------------------------------------------------------------------------
 
 
@@ -74,9 +74,9 @@ def test_scale_pitch_classes_covers_the_key():
 
 
 def test_ambiguous_out_of_scale_note_resolves_toward_its_lean():
-    """Un Fa# chanté PRESQUE juste (deviation -0.4 : penche vers le bas) en
-    Do majeur rejoint Fa, le degré vers lequel il penche — la règle du
-    collage à la gamme. Un Fa# franc (deviation ~0) reste chromatique."""
+    """An F# sung NEARLY in tune (deviation -0.4: leaning down) in C major
+    joins F, the degree it leans toward — the key-snap rule. A frank F#
+    (deviation ~0) stays chromatic."""
     key = detect_key(_notes_from_midis([(60, 0.4), (64, 0.4), (67, 0.4)])).best
     flat_fsharp = [_one(66, -0.4)]  # 40 cents flat of F#3 -> leans to F
     assert snap_to_key(flat_fsharp, key) == 1
@@ -88,9 +88,9 @@ def test_ambiguous_out_of_scale_note_resolves_toward_its_lean():
 
 
 def test_mistuned_scale_degree_is_re_anchored():
-    """Un degré de la gamme chanté de travers (deviation >= ±0.3) est
-    ré-ancré sur son degré : la clé le dit, le penche était du bruit vocal.
-    La même nuance sous le seuil reste une nuance."""
+    """A scale degree sung off (deviation >= ±0.3) is re-anchored on its
+    degree: the key says so, the lean was vocal noise. The same shade
+    under the threshold stays a shade."""
     key = detect_key(_notes_from_midis([(60, 0.4), (64, 0.4), (67, 0.4)])).best
     mistuned = [_one(65, 0.45)]  # F sung 45 cents sharp: a scale degree anyway
     assert snap_to_key(mistuned, key) == 1

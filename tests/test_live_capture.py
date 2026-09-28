@@ -1,10 +1,10 @@
-"""LiveCapture : la DSP doit tourner HORS du callback audio.
+"""LiveCapture: the DSP must run OUTSIDE the audio callback.
 
-Régression : le callback PortAudio faisait le YIN et la segmentation
-(plusieurs millisecondes par bloc de 23 ms) ; quand il dépasse la durée du
-bloc, le pilote abandonne de l'audio (trous dans la prise). Le callback ne
-fait plus que copier/empiler le bloc, `on_block` est appelé par un thread
-dédié qui draine la file.
+Regression: the PortAudio callback did the YIN and the segmentation
+(several milliseconds per 23 ms block); when it exceeds the block's
+duration, the driver drops audio (holes in the take). The callback now
+only copies/stacks the block; `on_block` is called by a dedicated thread
+draining the queue.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ DRAIN_THREAD = "v2m-live-dsp"
 
 
 class FakeStream:
-    """`sounddevice.InputStream` de remplacement : ne lit aucun micro."""
+    """A stand-in `sounddevice.InputStream`: reads no mic."""
 
     def __init__(self, **kwargs) -> None:  # noqa: ANN003
         self.kwargs = kwargs
@@ -56,26 +56,26 @@ def _capture(monkeypatch, on_block, **kwargs) -> audio_io.LiveCapture:
 
 
 def _push(cap: audio_io.LiveCapture, value: float, n: int = 1) -> None:
-    """Rejoue ce que PortAudio livrerait : des blocs mono float32."""
+    """Replays what PortAudio would deliver: mono float32 blocks."""
     block = np.full((BLOCK, 1), value, dtype=np.float32)
     for _ in range(n):
         cap._callback(block, BLOCK, None, None)
 
 
 def test_on_block_runs_on_a_dedicated_thread(monkeypatch):
-    # le test appellerait le callback depuis le thread principal : on_block
-    # ne doit PAS y être exécuté (c'est tout l'intérêt du découpage)
+    # the test would call the callback from the main thread: on_block must
+    # NOT run there (that is the whole point of the split)
     seen: list[tuple[float, float, str]] = []
     cap = _capture(monkeypatch, lambda blk, t: seen.append((blk[0], t, threading.current_thread().name)))
     try:
         _push(cap, 0.25, n=3)
-        assert _wait(lambda: len(seen) == 3), "les blocs n'ont pas atteint on_block"
+        assert _wait(lambda: len(seen) == 3), "the blocks never reached on_block"
     finally:
         cap.stop()
 
     assert {s[2] for s in seen} == {DRAIN_THREAD}
     assert [round(s[0], 3) for s in seen] == [0.25, 0.25, 0.25]
-    # horodatage : le temps de capture croît avec les blocs, sans recompter
+    # timestamping: the capture time grows with the blocks, never recounting
     ts = [s[1] for s in seen]
     assert ts == sorted(ts) and ts[-1] > ts[0]
 
@@ -84,7 +84,7 @@ def test_callback_never_loses_blocks_and_stop_flushes(monkeypatch):
     seen: list[float] = []
     cap = _capture(monkeypatch, lambda blk, t: seen.append(t))
     _push(cap, 0.1, n=8)
-    cap.stop()  # doit vider la file avant de rendre la main
+    cap.stop()  # must drain the queue before returning
     assert len(seen) == 8
     assert len(cap.chunks) == 8
     assert cap.elapsed() == 8 * BLOCK / cap.samplerate

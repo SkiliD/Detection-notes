@@ -91,28 +91,43 @@ def refine_bpm_with_onsets(
     onsets (+/-15% of period window) and the best score wins:
     hits - 0.5*quadratic error. No proximity penalty: within a +/-8% span,
     the half/double tempo equivalents are out of reach.
+
+    The scan is VECTORIZED by batches: candidates are stacked so the inner
+    loop runs in NumPy over a (batch, n_onsets) block instead of one Python
+    iteration per BPM candidate (~640 candidates on a refine — the heaviest
+    project function on a long take, AGENTS.md's profile note). The tie
+    rules match the sequential version exactly: first candidate wins an
+    equal score (min on the first best), and candidates with too few hits
+    are excluded before scoring, as before.
     """
     if bpm <= 0 or len(onsets) < min_hits:
         return float(bpm)
-    best_bpm, best_score = float(bpm), -np.inf
+    onsets = np.asarray(onsets, dtype=float)
     lo, hi = bpm * (1.0 - span_rel), bpm * (1.0 + span_rel)
-    for cand in np.arange(lo, hi + step / 2, step):
-        c_period = 60.0 / cand
-        # alignement de phase par moindres carrés (sans recalculer hits)
-        k = np.round(onsets / c_period)
-        targets = k * c_period
-        resid = onsets - targets
-        # tight window: a 1%-wrong BPM accumulates ~75 ms of drift over
-        # 9 beats and loses most of its hits
-        tol = max(0.045, 0.15 * c_period)
+    cands = np.arange(lo, hi + step / 2, step)
+    if len(cands) == 0:
+        return float(bpm)
+
+    BATCH = 64  # 64 x n_onsets floats per block: cache-friendly, no big alloc
+    best_bpm, best_score = float(bpm), -np.inf
+    for i in range(0, len(cands), BATCH):
+        block = cands[i : i + BATCH]
+        periods = 60.0 / block[:, None]                     # (B, 1)
+        k = np.round(onsets[None, :] / periods)             # (B, N)
+        resid = onsets[None, :] - k * periods               # (B, N)
+        tol = np.maximum(0.045, 0.15 * periods)             # (B, 1)
         good = np.abs(resid) <= tol
-        n_hits = int(good.sum())
-        if n_hits < min_hits:
+        n_hits = good.sum(axis=1)                           # (B,)
+        ok = n_hits >= min_hits
+        if not ok.any():
             continue
-        rms = float(np.sqrt(np.mean(resid[good] ** 2)))
-        score = n_hits - 0.5 * rms
-        if score > best_score:
-            best_score, best_bpm = score, float(cand)
+        sq = np.where(good, resid * resid, 0.0)
+        rms = np.sqrt(sq.sum(axis=1) / np.maximum(n_hits, 1))
+        scores = n_hits - 0.5 * rms
+        scores = np.where(ok, scores, -np.inf)
+        j = int(np.argmax(scores))  # argmax keeps the FIRST best of the block
+        if scores[j] > best_score:
+            best_score, best_bpm = float(scores[j]), float(block[j])
 
     # polish: linear regression time = k*period + offset on the in-phase
     # onsets -> exact period (e.g. 120.75 -> 120.00)

@@ -1,21 +1,21 @@
-"""La garde de la structure faits/présentation : les adaptateurs consomment.
+"""The guard of the facts/presentation structure: adapters consume.
 
-Le partage décisif des passes d'architecture : core possède les FAITS
-musicaux (bpm, mesure, figures, grille), la GUI et le CLI ne possèdent que
-la PRÉSENTATION et consomment des faits publiés (`note_closed` porte la
-note étiquetée et la grille). La régression à refuser est un adaptateur qui
-REDÉRIVE un fait — c'est déjà arrivé trois fois : le CLI ré-étiquetait la
-liste (`estimate_bpm_live` + `label_notes` dans `_on_event`), le tick GUI
-reconstruisait une troisième `BeatGrid`, et le métronome GUI appelait
-`detect_meter` lui-même — ce qui CRASHAIT en silence sur les `LiveNote`
-sans champ `strength`.
+The decisive split of the architecture passes: core owns the musical
+FACTS (bpm, meter, figures, grid), the GUI and the CLI own only the
+PRESENTATION and consume published facts (`note_closed` carries the
+labeled note and the grid). The regression to refuse is an adapter that
+RE-DERIVES a fact — it already happened three times: the CLI re-labeled
+the list (`estimate_bpm_live` + `label_notes` in `_on_event`), the GUI
+tick rebuilt a third `BeatGrid`, and the GUI metronome called
+`detect_meter` itself — which CRASHED silently on `LiveNote`s without a
+`strength` field.
 
-Le contrôle est un AST, pas un grep : les alias
-(`import x as y`) et les appels par chemin de module (`x.detect_meter(...)`)
-sont vus comme les imports directs. La preuve que la garde mord est dans le
-test : les régressions historiques, réécrites en extraits, sont rejetées par
-le même vérificateur — si quelqu'un les réintroduit dans un vrai adaptateur,
-le premier test échoue par la même logique.
+The check is an AST, not a grep: aliases (`import x as y`) and module
+path calls (`x.detect_meter(...)`) are seen like direct imports. The
+proof the guard bites lives in the test: the historical regressions,
+rewritten as snippets, are rejected by the same checker — should anyone
+reintroduce them in a real adapter, the first test fails by the same
+logic.
 """
 
 from __future__ import annotations
@@ -34,10 +34,10 @@ ADAPTER_FILES = [
 
 
 def _violations(source: str) -> list[str]:
-    """Imports et appels d'une entrée de détection, alias compris.
+    """Imports and calls of a detection entry, aliases included.
 
-    L'import seul compte déjà : un adaptateur qui garde l'entrée sous le
-    coude est l'odeur à refuser, même sans appel aujourd'hui.
+    The import alone already counts: an adapter keeping the entry up its
+    sleeve is the smell to refuse, even without a call today.
     """
     tree = ast.parse(source)
     bound = {
@@ -47,28 +47,28 @@ def _violations(source: str) -> list[str]:
         for alias in node.names
         if alias.name in DETECTION_ENTRIES
     }
-    found = list(bound)  # l'import lui-même est déjà la violation
+    found = list(bound)  # the import itself is already the violation
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr in DETECTION_ENTRIES:
-            found.append(func.attr)  # appel par chemin de module : x.detect_meter(...)
+            found.append(func.attr)  # module-path call: x.detect_meter(...)
         elif isinstance(func, ast.Name) and (func.id in bound or func.id in DETECTION_ENTRIES):
-            found.append(func.id)  # appel d'un alias importé (ou du nom brut)
+            found.append(func.id)  # call of an imported alias (or the bare name)
     return found
 
 
 def test_adapters_import_no_detection_entry():
-    """GUI et CLI ne contiennent NI import NI appel des entrées de détection."""
-    assert ADAPTER_FILES, "les fichiers adaptateurs existent"
+    """GUI and CLI contain NEITHER an import NOR a call of the detection entries."""
+    assert ADAPTER_FILES, "the adapter files exist"
     offenders = []
     for path in ADAPTER_FILES:
         found = _violations(path.read_text(encoding="utf-8"))
         if found:
             offenders.append(f"{path.name}: {sorted(set(found))}")
     assert not offenders, (
-        "un adaptateur re-dérive un fait (core possède la politique) : "
+        "an adapter re-derives a fact (core owns the policy) : "
         + "; ".join(offenders)
     )
 
@@ -85,6 +85,6 @@ def test_adapters_import_no_detection_entry():
     ids=["cli-direct", "cli-alias", "gui-direct", "gui-module-path", "gui-labels"],
 )
 def test_the_guard_bites_on_the_historical_regressions(snippet):
-    """Les régressions historiques (CLI ré-étiquetant, tick GUI, métronome
-    GUI sur detect_meter) sont exactement ce que le vérificateur refuse."""
-    assert _violations(snippet), "le vérificateur doit rejeter cet extrait"
+    """The historical regressions (CLI re-labeling, GUI tick, GUI metronome
+    on detect_meter) are exactly what the checker refuses."""
+    assert _violations(snippet), "the checker must reject this snippet"

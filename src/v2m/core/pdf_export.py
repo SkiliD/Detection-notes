@@ -7,6 +7,7 @@ clear error states what was searched and where to install it.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +18,26 @@ TOOLS = [
     ("MuseScore", "musescore", ["musescore4", "musescore3", "musescore", "MuseScore4.exe", "MuseScore3.exe"]),
     ("LilyPond", "lilypond", ["lilypond"]),
 ]
+
+# The Windows installers do NOT add themselves to the PATH: probe the
+# standard install locations too (machine-wide and per-user — MuseScore 4
+# defaults to the latter). Keyed by the PATH command they complete.
+_STANDARD_DIRS = {
+    "musescore4": ["MuseScore 4", "bin", "MuseScore4.exe"],
+    "musescore3": ["MuseScore 3", "bin", "MuseScore3.exe"],
+}
+
+
+def _installed_bases() -> list[Path]:
+    bases = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        v = os.environ.get(var)
+        if v:
+            bases.append(Path(v))
+    local = os.environ.get("LocalAppData")
+    if local:
+        bases.append(Path(local) / "Programs")
+    return bases
 
 
 class PdfExportError(RuntimeError):
@@ -33,11 +54,22 @@ class PdfToolMissing(PdfExportError):
 
 
 def find_notation_tool() -> tuple[str, str] | None:
-    """Return (name, command) of the first available tool, else None."""
+    """Return (name, command) of the first available tool, else None.
+
+    Beyond the PATH, the standard Windows install locations are probed:
+    MuseScore installed but invisible to `shutil.which` is the common case
+    on a real machine (the tool WAS there, the PDF was skipped anyway).
+    """
     for name, pkg, cmds in TOOLS:
         for cmd in cmds:
             if shutil.which(cmd):
                 return name, cmd
+            parts = _STANDARD_DIRS.get(cmd)
+            if parts:
+                for base in _installed_bases():
+                    exe = base.joinpath(*parts)
+                    if exe.exists():
+                        return name, str(exe)
     return None
 
 

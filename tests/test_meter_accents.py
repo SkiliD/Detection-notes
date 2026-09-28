@@ -52,40 +52,41 @@ def test_common_time_detected_as_4_4():
 
 
 def _pulse(strengths: list[float]) -> list[Note]:
-    """Une pulsation de notes (une par temps) répétant le profil donné.
+    """A pulse of notes (one per beat) repeating the given profile.
 
-    Répété jusqu'à 12 notes : la lecture parité du 2/4 exige que CHAQUE
-    phase de la grille 4 temps soit assez peuplée (MIN_DOWNBEATS) pour
-    que son absence ne masque pas le motif.
+    Repeated up to 12 notes: the 2/4 parity reading demands EVERY phase
+    of the 4-beat grid be populated enough (MIN_DOWNBEATS) that its
+    absence cannot mask the pattern.
     """
     n_reps = -(-12 // len(strengths))  # ceil(12 / len)
     return _make_meter_notes([(0,)] * (len(strengths) * n_reps), strengths * n_reps)
 
 
 def test_march_pattern_is_2_4():
-    """Forces alternées strictes (période 2) : la mesure est 2/4.
+    """Strictly alternating strengths (period 2): the meter is 2/4.
 
-    Les grilles emboîtées ne peuvent pas séparer 2/4 de 4/4 (barre moitié) ;
-    la période des forces le peut — c'est la preuve qui casse le tie. Les
-    deux temps forts doivent être comparables : un 4/4 à hiérarchie (t1
-    primaire, t3 secondaire) garde le 4/4.
+    The nested grids cannot separate 2/4 from 4/4 (half bar); the
+    strengths' period can — it is the proof that breaks the tie. Both
+    strong beats must be comparable: a 4/4 with a hierarchy (beat 1
+    primary, beat 3 secondary) keeps 4/4.
     """
     meter = detect_meter(_pulse([1.0, 0.15]), 120.0)
     assert meter is not None and meter.label == "2/4"
 
 
 def test_unequal_strong_beats_stay_4_4():
-    """Temps forts inégaux (t1 primaire, t3 secondaire plus faible) : la
-    hiérarchie entre les phases paires est la signature 4 temps — pas 2/4.
+    """Unequal strong beats (beat 1 primary, beat 3 a weaker secondary):
+    the hierarchy between the even phases is the 4-beat signature — not
+    2/4.
     """
     meter = detect_meter(_pulse([1.0, 0.3, 0.6, 0.3]), 120.0)
     assert meter is not None and meter.label == "4/4"
 
 
 def test_backbeat_keeps_4_4():
-    """Pulsation forte sur les temps FAIBLES : pas de 2/4 — les barres
-    démarreraient sur un temps faible et la grille n'a pas de phase de
-    mesure ; le défaut 4/4 est non destructeur.
+    """Loud pulse on the WEAK beats: no 2/4 — the bars would start on a
+    weak beat and the grid has no measure phase; the 4/4 default is non
+    destructive.
     """
     meter = detect_meter(_pulse([0.15, 1.0]), 120.0)
     assert meter is not None and meter.label == "4/4"
@@ -106,12 +107,17 @@ def test_strength_is_filled_by_pipeline():
              Note(start=0.5, end=0.9, midi=64, confidence=0.9)]
     import numpy as np
 
+    from v2m.core.observation import VoiceObservation
+
     sr = 22050
     y = np.zeros(int(1.0 * sr), dtype=np.float32)
     # loud burst at t=0, quiet at t=0.5 -> relative strengths differ
     y[: int(0.1 * sr)] = 0.9
     y[int(0.5 * sr): int(0.55 * sr)] = 0.1
-    compute_onset_strengths(notes, y, sr)
+    # the accent envelope now travels on the observation (it owns the hop and
+    # the rate), so the strength pass takes the evidence, not the audio
+    observation = VoiceObservation.from_signal(y, sr, use_attacks=False)
+    compute_onset_strengths(observation, notes)
     assert 0.0 <= notes[0].strength <= 1.0
     assert 0.0 <= notes[1].strength <= 1.0
     assert notes[0].strength > notes[1].strength

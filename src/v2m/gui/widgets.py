@@ -10,6 +10,8 @@ from PyQt6.QtCore import pyqtSignal
 
 from ..core.figures import figures_summary, short_label
 from ..core.accuracy import AccuracyHistory
+from ..core.continuity import coherence_report
+from ..core.intonation import IN_TUNE_CENTS
 from ..core.i18n import note_display_pair, tr, tr_chord_label, tr_figure, tr_key_label
 from ..core.music import midi_to_name
 
@@ -20,7 +22,7 @@ SILENCE_COLOR = (120, 120, 130)
 MATCH_COLOR = (80, 210, 120)
 MISMATCH_COLOR = (220, 80, 80)
 AMBER_COLOR = (230, 180, 80)
-CENTER_CENTS = 10.0   # |cents| <= 10: in tune (green)
+CENTER_CENTS = IN_TUNE_CENTS   # in tune (green) — the scale intonation.py owns
 NEAR_CENTS = 25.0     # <= 25 cents: close (amber); beyond = red
 
 
@@ -98,11 +100,12 @@ class PianoRoll(pg.PlotWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent, axisItems={"left": PitchAxis(orientation="left")})
-        self.setBackground("#12161c")
-        self.getPlotItem().showGrid(x=True, y=True, alpha=0.2)
+        self.setBackground(BG_APP)
+        self.getPlotItem().showGrid(x=True, y=True, alpha=0.12)
         self.set_axis_labels()   # titled by the window's retranslate()
         self._bar_items: list = []
         self._labels: list = []
+        self._diff_items: list = []  # live-vs-final outlines (outline_note)
         self._curve = None
         self._notation_mode = False
         self._last_notes: list = []
@@ -314,13 +317,40 @@ class PianoRoll(pg.PlotWidget):
         b = int(LOW_COLOR[2] + (HIGH_COLOR[2] - LOW_COLOR[2]) * conf)
         return (r, g, b, 220)
 
+    def outline_note(self, start: float, end: float, midi: int, color) -> None:
+        """Draw an OUTLINE over one note's band (the live-vs-final diff mark).
+
+        The final analysis replaced this note (pitch moved, or onset beyond
+        the grid tolerance): the outline shows the singer WHERE, without
+        repainting the final bars — the roll reads "here is what I corrected".
+        Marks are cleared by `_clear_notes` (next `set_notes` rebuild) and by
+        `begin_live` (a new take starts with a clean roll).
+        """
+        # `color` may be a hex string (the palette's ACCENT) or an RGB tuple:
+        # mkPen accepts both, tuple() would SHATTER a string into chars and
+        # the mark silently never drew (the try/except in the caller ate it)
+        pen = pg.mkPen(color, width=2)
+        item = pg.LinearRegionItem(
+            values=[start, max(end, start + 0.02)],
+            orientation="vertical",
+            brush=None,
+            pen=pen,
+            movable=False,
+        )
+        item.setZValue(5)
+        self.addItem(item)
+        self._diff_items.append(item)
+
     def _clear_notes(self) -> None:
         for it in self._bar_items:
             self.removeItem(it)
         for it in self._labels:
             self.removeItem(it)
+        for it in self._diff_items:
+            self.removeItem(it)
         self._bar_items = []
         self._labels = []
+        self._diff_items = []
         self._rendered_figures = []
 
 
@@ -331,7 +361,7 @@ class WaveformView(pg.PlotWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setBackground("#12161c")
+        self.setBackground(BG_APP)
         self.getPlotItem().hideAxis("left")
         self.getPlotItem().setLabel("bottom", "Temps", units="s")
         self._curves: list = []  # min and max envelope curves
@@ -386,6 +416,8 @@ class ResultsPanel(pg.LayoutWidget):
         "key notes count",
         "key measures count",
         "key figures",
+        "key tuning offset",
+        "key coherence",
     )
 
     def __init__(self, parent=None):
@@ -397,8 +429,8 @@ class ResultsPanel(pg.LayoutWidget):
         self._waiting = pg.QtWidgets.QLabel("")
         self._waiting.setAlignment(pg.QtCore.Qt.AlignmentFlag.AlignCenter)
         self._waiting.setStyleSheet(
-            "color: #8a97a5; font-size: 10pt; font-style: italic;"
-            "background: #20262e; border: 1px solid #2e3742; border-radius: 8px; padding: 12px;"
+            f"color: {TEXT_DIM}; font-size: 10pt; font-style: italic;"
+            f"background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 8px; padding: 12px;"
         )
         self._waiting.setVisible(False)
         self.addWidget(self._waiting, row=len(self.SLOT_KEYS) + 3, col=0, colspan=2)
@@ -421,10 +453,21 @@ class ResultsPanel(pg.LayoutWidget):
         self._lbl_notes = pg.QtWidgets.QLabel("")
         self.addWidget(self._lbl_notes, row=r, col=0)
         self.addWidget(self._notes_table, row=r + 1, col=0, colspan=2)
+        # the live-vs-final explainer, one line per cause (a live take
+        # only): hidden for a file analysis, where nothing moved
+        self._lbl_explain = pg.QtWidgets.QLabel("")
+        self._lbl_explain.setWordWrap(True)
+        self._lbl_explain.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 8pt; font-style: italic;"
+            f"background: {BG_CARD}; border: 1px solid {BORDER};"
+            "border-radius: 8px; padding: 8px;"
+        )
+        self._lbl_explain.setVisible(False)
+        self.addWidget(self._lbl_explain, row=r + 2, col=0, colspan=2)
         self._has_results: bool = False
 
         # Per-segment chord table
-        r2 = r + 2
+        r2 = r + 4
         self._seg_table = self._make_table(2)
         self._lbl_segs = pg.QtWidgets.QLabel("")
         self.addWidget(self._lbl_segs, row=r2, col=0)
@@ -462,6 +505,8 @@ class ResultsPanel(pg.LayoutWidget):
         self._labels["key notes count"].setText(f"<b>{tr('key notes count')}</b>")
         self._labels["key measures count"].setText(f"<b>{tr('key measures count')}</b>")
         self._labels["key figures"].setText(f"<b>{tr('key figures')}</b>")
+        self._labels["key tuning offset"].setText(f"<b>{tr('key tuning offset')}</b>")
+        self._labels["key coherence"].setText(f"<b>{tr('key coherence')}</b>")
         self._lbl_notes.setText(f"<b>{tr('key notes table')}</b>")
         self._lbl_segs.setText(f"<b>{tr('key chord segments')}</b>")
         self._notes_table.setHorizontalHeaderLabels(
@@ -514,10 +559,54 @@ class ResultsPanel(pg.LayoutWidget):
             self._values["key chord"].setText("—")
 
         self._values["key notes count"].setText(str(len(res.notes)))
+        # The GLOBAL tuning offset (cents) the analysis absorbed, with a
+        # one-line intonation advice for the singer. |offset| <= 10 c is
+        # dead-on (a professional reads ±5-10); 10-25 c is a mild pull to
+        # correct at the next take; beyond 25 c the take sits noticeably
+        # off — and beyond the ±35 st*100 cap it was treated as a
+        # transposition, not intonation, so nothing was absorbed.
+        cents = getattr(res, "tuning_offset_cents", None)
+        if cents is None:
+            cents = round(100.0 * getattr(res, "tuning_offset_st", 0.0), 1)
+        if cents is None:
+            self._values["key tuning offset"].setText("—")
+        else:
+            c = float(cents)
+            if abs(c) <= 10.0:
+                advice = tr("ui tuning ok")
+            elif abs(c) <= 25.0:
+                advice = tr("ui tuning slightly off").format(
+                    dir=tr("ui tuning sharp") if c > 0 else tr("ui tuning flat"))
+            else:
+                advice = tr("ui tuning off").format(
+                    dir=tr("ui tuning sharp") if c > 0 else tr("ui tuning flat"))
+            self._values["key tuning offset"].setText(
+                f"{c:+.1f} c — {advice}"
+            )
         figs = figures_summary(res.notes)
         self._values["key figures"].setText(
             ", ".join(f"{tr_figure(k)} ×{v}" for k, v in figs.items()) if figs else "—"
         )
+
+        # The take's coherence verdict, where the singer looks: the same
+        # `coherence_report` the JSON block carries (same evidence, same
+        # thresholds), read here so the verdict needs no script and no JSON
+        # diving. A file analysis without evidence shows why it is silent.
+        observation = getattr(res, "observation", None)
+        if observation is None:
+            self._values["key coherence"].setText(tr("ui coherence na"))
+        else:
+            block = coherence_report(observation, res.notes)
+            checked = block["checked"]
+            n_suspects = len(block["suspects"])
+            if n_suspects:
+                self._values["key coherence"].setText(
+                    tr("ui coherence suspects").format(n=n_suspects, checked=checked)
+                )
+            else:
+                self._values["key coherence"].setText(
+                    tr("ui coherence clean").format(checked=checked)
+                )
 
         # Per-note table (note names follow the UI language)
         positions = getattr(res, "note_positions", None) or []
@@ -533,6 +622,18 @@ class ResultsPanel(pg.LayoutWidget):
             for c, v in enumerate(vals):
                 self._notes_table.setItem(i, c, pg.QtWidgets.QTableWidgetItem(v))
         self._notes_table.resizeColumnsToContents()
+
+        # The live/final explainer: WHY the final score differs from what
+        # the singer watched, one honest line per cause (numbers included).
+        # A file analysis has no live reading and stays silent.
+        from ..core.explain import explain as explain_block
+
+        lines = explain_block(getattr(res, "live_vs_final", None) or {})
+        if lines:
+            self._lbl_explain.setText("<br>".join(lines))
+            self._lbl_explain.setVisible(True)
+        else:
+            self._lbl_explain.setVisible(False)
 
         # Per-measure chord progression (falls back to legacy 2 s segments)
         prog = getattr(res, "chord_progression", None)
@@ -661,7 +762,7 @@ class ErrorBanner(pg.QtWidgets.QLabel):
         self.setWordWrap(True)
         self.setStyleSheet(
             "background: #5c1a1a; color: #ffd7d7; border: 1px solid #a33;"
-            "border-radius: 4px; padding: 8px; font-weight: bold;"
+            "border-radius: 6px; padding: 8px; font-weight: bold;"
         )
         self.hide()
 
@@ -819,7 +920,8 @@ class LiveIndicator(pg.QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = pg.QtWidgets.QVBoxLayout(self)
+        lay = pg.QtWidgets.QHBoxLayout(self)
+        left = pg.QtWidgets.QVBoxLayout()
         self.label_note = pg.QtWidgets.QLabel("—")
         self.label_note.setStyleSheet(
             f"font-size: 21pt; font-weight: bold; color: {NOTE_TEXT_COLOR};"
@@ -828,15 +930,38 @@ class LiveIndicator(pg.QtWidgets.QWidget):
         self.label_rms = pg.QtWidgets.QLabel("")
         self.tuning = TuningMeter()
         self._rms = 0.0
-        lay.addWidget(self.label_note)
-        lay.addWidget(self.label_hz)
-        lay.addWidget(self.tuning)
-        lay.addWidget(self.label_rms)
+        left.addWidget(self.label_note)
+        left.addWidget(self.label_hz)
+        left.addWidget(self.tuning)
+        left.addWidget(self.label_rms)
+        lay.addLayout(left, stretch=1)
+        # the CONFIRMED-note counter, BIG: "is the recognition following me?"
+        # is the singer's first question, and the status line was too small to
+        # answer it — a glance answers now. Updated by the same live tick that
+        # renders the roll (one owner of the live rendering).
+        right = pg.QtWidgets.QVBoxLayout()
+        self.label_note_count = pg.QtWidgets.QLabel("0")
+        self.label_note_count.setAlignment(pg.QtCore.Qt.AlignmentFlag.AlignRight)
+        self.label_note_count.setStyleSheet(
+            f"font-size: 30pt; font-weight: bold; color: {ACCENT};"
+        )
+        self.label_count_unit = pg.QtWidgets.QLabel("")
+        self.label_count_unit.setAlignment(pg.QtCore.Qt.AlignmentFlag.AlignRight)
+        self.label_count_unit.setStyleSheet(f"color: {TEXT_DIM}; font-size: 9pt;")
+        right.addWidget(self.label_note_count)
+        right.addWidget(self.label_count_unit)
+        right.addStretch(1)
+        lay.addLayout(right)
         self.retranslate()
+
+    def set_note_count(self, count: int) -> None:
+        """Show how many notes the take has CONFIRMED so far."""
+        self.label_note_count.setText(str(count))
 
     def retranslate(self) -> None:
         """Refresh the idle level label without resetting live measurements."""
         self.update_rms(self._rms)
+        self.label_count_unit.setText(tr("ui live notes label"))
 
     def update_note(
         self, midi_float: float | None, hz: float, cents: float | None = None
@@ -873,92 +998,99 @@ class LiveIndicator(pg.QtWidgets.QWidget):
 
 # Application-wide QSS: coherent dark palette, visible focus, calm motion.
 ACCENT = "#4da3d8"  # single accent color for primary actions & progress
-NOTE_TEXT_COLOR = "#6cf"  # the recognized note, wherever it is written large
-
-# Calm card for "here is what to do": the home steps, the live hint and the
-# finder share it, so guidance reads the same wherever it appears.
+# The palette, read once by every inline style (cards, meters, plots): the
+# tones must stay COHERENT across the app — a color family, not a grab bag.
+BG_APP = "#12161d"        # the window's depth (plots sit exactly on it)
+BG_CARD = "#1a202a"       # raised surfaces: group boxes, hint cards, results
+BG_SUNKEN = "#0e1218"     # inputs and plots: recessed, slightly darker
+BORDER = "#2c3644"        # hairline borders everywhere
+BORDER_SOFT = "#242d39"   # inner separations (alternate rows, handles)
+TEXT = "#e8edf4"          # primary text
+TEXT_DIM = "#8b98a8"      # secondary text, hints
+TEXT_FAINT = "#6a7686"    # disabled, idle placeholders
+ACCENT_SOFT = "#274059"   # quiet accent wash (selections, hovered rows)
+NOTE_TEXT_COLOR = "#7cd0ff"  # the recognized note, wherever it is written large
 HINT_CARD_STYLE = (
-    "color: #8a97a5; font-size: 9pt;"
-    "background: #1e242c; border: 1px solid #2c3540; border-radius: 10px;"
+    f"color: {TEXT_DIM}; font-size: 9pt;"
+    f"background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 10px;"
     "padding: 10px 18px;"
 )
-STYLESHEET = """
+STYLESHEET = f"""
 # Font sizes in pt, never px: a px-sized font reports pointSize() == -1,
 # and rich-text labels then hit QFont::setPointSize(-1) (console warning).
 # pt also scales with the user's Windows DPI setting, px does not.
-QMainWindow, QWidget { background: #171c23; color: #e6e6e6; font-size: 10pt; }
-QLabel { color: #cfd6dd; background: transparent; }
-QPushButton {
+QMainWindow, QWidget {{ background: {BG_APP}; color: {TEXT}; font-size: 10pt; }}
+QLabel {{ color: #cfd6dd; background: transparent; }}
+QPushButton {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 #2c3542, stop:1 #262e3a);
-    color: #e6e6e6; border: 1px solid #3a4655;
+                                stop:0 #2e3948, stop:1 #28313e);
+    color: {TEXT}; border: 1px solid {BORDER};
     border-radius: 10px; padding: 8px 16px; font-weight: 500;
-}
-QPushButton:hover {
+}}
+QPushButton:hover {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 #354154, stop:1 #2c3542);
-    border-color: @ACCENT@;
-}
-QPushButton:pressed { background: #20262e; }
-QPushButton:focus { border: 1px solid @ACCENT@; }
-QPushButton:disabled { color: #6a7480; background: #20262e; }
-QPushButton:flat { border: none; background: transparent; }
-QCheckBox, QSpinBox { color: #cfd6dd; background: transparent; }
-QCheckBox:hover { color: #e6e6e6; }
-QCheckBox::indicator {
+                                stop:0 #38445a, stop:1 #2e3948);
+    border-color: {ACCENT};
+}}
+QPushButton:pressed {{ background: {BG_SUNKEN}; }}
+QPushButton:focus {{ border: 1px solid {ACCENT}; }}
+QPushButton:disabled {{ color: {TEXT_FAINT}; background: #1c2229; }}
+QPushButton:flat {{ border: none; background: transparent; }}
+QCheckBox, QSpinBox {{ color: #cfd6dd; background: transparent; }}
+QCheckBox:hover {{ color: {TEXT}; }}
+QCheckBox::indicator {{
     width: 15px; height: 15px; border-radius: 4px;
-    border: 1px solid #3a4655; background: #20262e;
-}
-QCheckBox::indicator:checked { background: @ACCENT@; border-color: @ACCENT@; }
-QSpinBox {
-    background: #20262e; border: 1px solid #3a4655; border-radius: 6px;
+    border: 1px solid {BORDER}; background: #1c2229;
+}}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QSpinBox {{
+    background: {BG_SUNKEN}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 2px 6px;
-}
-QSpinBox:focus { border-color: @ACCENT@; }
-QSpinBox::up-button, QSpinBox::down-button { width: 16px; background: transparent; border: none; }
-QGroupBox {
-    background: #1e242c; border: 1px solid #2c3540; border-radius: 10px;
+}}
+QSpinBox:focus {{ border-color: {ACCENT}; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; background: transparent; border: none; }}
+QGroupBox {{
+    background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 10px;
     margin-top: 12px; padding: 10px 8px 8px 8px;
-}
-QGroupBox::title { subcontrol-origin: margin; left: 12px; color: #9fb3c8; }
-QListWidget {
-    background: #1e242c; border: 1px solid #2c3540; border-radius: 8px;
+}}
+QGroupBox::title {{ subcontrol-origin: margin; left: 12px; color: #9fb3c8; }}
+QListWidget {{
+    background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 8px;
     padding: 4px;
-}
-QListWidget::item { border-radius: 4px; padding: 2px; }
-QListWidget::item:selected { background: #2c3542; color: #e6e6e6; }
-QTableWidget {
-    background: #1e242c; alternate-background-color: #212932;
-    gridline-color: #2c3540; border: 1px solid #2c3540; border-radius: 8px;
-}
-QHeaderView::section {
-    background: #242d38; color: #9fb3c8; border: none; padding: 4px;
-}
-QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
-QScrollBar::handle:vertical { background: #34404f; border-radius: 4px; min-height: 24px; }
-QScrollBar::handle:vertical:hover { background: #4a5a6e; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #34404f; border-radius: 4px; min-width: 24px; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-QProgressBar {
-    background: #20262e; border: 1px solid #3a4655; border-radius: 8px;
+}}
+QListWidget::item {{ border-radius: 4px; padding: 2px; }}
+QListWidget::item:hover {{ background: {ACCENT_SOFT}; }}
+QListWidget::item:selected {{ background: {ACCENT_SOFT}; color: {TEXT}; }}
+QTableWidget {{
+    background: {BG_CARD}; alternate-background-color: {BG_SUNKEN};
+    gridline-color: {BORDER_SOFT}; border: 1px solid {BORDER}; border-radius: 8px;
+    selection-background-color: {ACCENT_SOFT}; selection-color: {TEXT};
+}}
+QHeaderView::section {{
+    background: #232c38; color: #9fb3c8; border: none; padding: 4px;
+}}
+QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #34404f; border-radius: 4px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: #4a5a6e; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: #34404f; border-radius: 4px; min-width: 24px; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+QProgressBar {{
+    background: #1c2229; border: 1px solid {BORDER}; border-radius: 8px;
     text-align: center; color: #cfd6dd; height: 16px;
-}
-QProgressBar::chunk {
+}}
+QProgressBar::chunk {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                stop:0 @ACCENT@, stop:1 #6cc3f0);
+                                stop:0 {ACCENT}, stop:1 #7ccbf5);
     border-radius: 7px;
-}
-QStatusBar { color: #9fb3c8; background: #171c23; }
-QToolTip {
-    background: #242d38; color: #e6e6e6; border: 1px solid #3a4655;
+}}
+QStatusBar {{ color: #9fb3c8; background: {BG_APP}; border-top: 1px solid {BORDER_SOFT}; }}
+QToolTip {{
+    background: #232c38; color: {TEXT}; border: 1px solid {BORDER};
     padding: 5px; border-radius: 6px;
-}
-""".replace("@ACCENT@", ACCENT)  # single source for the accent color
-# NB: the token must not appear in real QSS — "#ACCENT" + a naive
-# .replace("ACCENT", ...) produced "##4da3d8" (invalid QSS: Qt dropped the
-# whole application stylesheet and the UI silently fell back to defaults).
+}}
+"""
 
 
 def action_button_style(primary: bool = False) -> str:

@@ -1,4 +1,4 @@
-"""Tests tempo : clics à BPM connu -> BPM détecté juste."""
+"""Tempo tests: clicks at a known BPM -> the right detected BPM."""
 
 import numpy as np
 
@@ -7,7 +7,7 @@ from v2m.core.tempo import detect_tempo, refine_bpm_with_onsets
 
 
 def click_track(bpm: float, dur_s: float = 20.0, sr: int = SR) -> np.ndarray:
-    """Piste de clics percussifs au tempo donné."""
+    """A percussive click track at the given tempo."""
     n = int(dur_s * sr)
     y = np.zeros(n, dtype=np.float32)
     period = 60.0 / bpm
@@ -36,23 +36,23 @@ def test_click_90bpm():
 
 
 def test_refine_bpm_with_onsets():
-    """Un BPM arrondi (117,5) est raffiné vers le vrai tempo (120) sur
-    une grille d'attaques exactes."""
+    """A rounded BPM (117.5) is refined toward the true tempo (120) on a
+    grid of exact attacks."""
     bpm_true = 120.0
-    onsets = np.arange(16) * (60.0 / bpm_true)  # attaques pile sur la grille
+    onsets = np.arange(16) * (60.0 / bpm_true)  # attacks right on the grid
     refined = refine_bpm_with_onsets(onsets, 117.5)
     assert abs(refined - 120.0) <= 0.5
 
 
 def test_refine_bpm_keeps_close_value():
-    """Si les attaques sont déjà en phase, le BPM reste quasi identique."""
+    """If the attacks are already in phase, the BPM stays near identical."""
     onsets = np.arange(10) * 0.5
     refined = refine_bpm_with_onsets(onsets, 120.0)
     assert abs(refined - 120.0) <= 1.0
 
 
 def test_refine_bpm_too_few_onsets():
-    """Moins de 3 attaques : pas de raffinement, BPM inchangé."""
+    """Fewer than 3 attacks: no refinement, BPM unchanged."""
     assert refine_bpm_with_onsets(np.array([0.0, 0.5]), 120.0) == 120.0
 
 

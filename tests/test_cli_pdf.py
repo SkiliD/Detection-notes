@@ -1,9 +1,9 @@
-"""CLI : la gravure PDF est une étape à part, jamais fatale au reste.
+"""CLI: the PDF engraving is a separate step, never fatal to the rest.
 
-Régression : `except PdfExportError` sortait du `try` sans que `stem` et `rep`
-soient liés (export_result levait avant de retourner) ; le résumé qui suit
-tombait alors sur un UnboundLocalError, alors même que .mid/.json/.csv/
-.musicxml venaient d'être écrits.
+Regression: `except PdfExportError` left the `try` without `stem` and
+`rep` bound (export_result raised before returning); the summary that
+followed hit an UnboundLocalError, even though .mid/.json/.csv/
+.musicxml had just been written.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _wav(tmp_path) -> str:
 
 def test_pdf_failure_still_writes_artifacts_and_prints_summary(tmp_path, monkeypatch, capsys):
     def _boom(stem):
-        raise PdfExportError("MuseScore a raté")
+        raise PdfExportError("MuseScore failed")
 
     monkeypatch.setattr(cli, "engrave_pdf", _boom)
     stem = tmp_path / "out"
@@ -36,18 +36,18 @@ def test_pdf_failure_still_writes_artifacts_and_prints_summary(tmp_path, monkeyp
     code = cli.main(["analyze", _wav(tmp_path), "-o", str(stem), "--pdf"])
 
     out, err = capsys.readouterr()
-    assert code == 2, "un échec PDF doit sortir en 2, pas planter"
-    assert "BPM" in out, "le résumé de l'analyse doit être imprimé malgré l'échec"
-    assert "PDF" in err and "MuseScore a raté" in err
+    assert code == 2, "a PDF failure must exit 2, not crash"
+    assert "BPM" in out, "the analysis summary must be printed despite the failure"
+    assert "PDF" in err and "MuseScore failed" in err
     for ext in (".mid", ".musicxml", ".json", ".csv"):
-        assert (tmp_path / f"out{ext}").exists(), f"out{ext} manquant"
+        assert (tmp_path / f"out{ext}").exists(), f"out{ext} missing"
     assert not (tmp_path / "out.pdf").exists()
     assert ".pdf" not in out.split("Export")[-1]
 
 
 def test_missing_tool_skips_the_pdf_without_failing_the_run(tmp_path, monkeypatch, capsys):
-    """Gravure impossible faute d'outil : avertissement clair, exit 0, et le
-    .pdf n'est pas annoncé dans la liste des artefacts écrits."""
+    """Engraving impossible for lack of a tool: clear warning, exit 0, and
+    the .pdf is not announced in the list of written artifacts."""
 
     def _no_tool(stem):
         raise PdfToolMissing("PDF ignored: installez MuseScore ou LilyPond")
@@ -77,5 +77,5 @@ def test_pdf_success_is_listed_with_the_other_artifacts(tmp_path, monkeypatch, c
 
     out, _ = capsys.readouterr()
     assert code == 0
-    assert written, "la gravure n'a pas été demandée"
+    assert written, "the engraving was not requested"
     assert ".pdf" in out

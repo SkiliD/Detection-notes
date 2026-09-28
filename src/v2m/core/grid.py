@@ -54,7 +54,7 @@ class Figure:
 # heavy (weight 10.0): the ±18% relative tolerance is a HUMAN-timing budget
 # and a plain or dotted neighbour always sits inside a double dot's reach,
 # so a light double dot captures the singer's noise around the plain values
-# (measured: a 0.86-beat note read "croche double-pointée" at weight 1.12
+# (measured: a 0.86-beat note read "double-dotted eighth" at weight 1.12
 # AND at 1.30 — its 1.7% error only beats the noire's 14% above weight ~8).
 # Weight 10 narrows the double dot to a measured ±1% band: a singer does not
 # land a double dot by accident, an engraver writes one deliberately. Only

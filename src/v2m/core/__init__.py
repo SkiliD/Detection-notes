@@ -1,1 +1,1 @@
-"""Cœur analytique de Voix -> MIDI."""
+"""The analytical core of Voice -> MIDI."""

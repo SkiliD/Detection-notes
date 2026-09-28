@@ -1,4 +1,4 @@
-"""accuracy.record_take : l'historique de justesse persiste d'une prise à l'autre."""
+"""accuracy.record_take: the accuracy history persists from take to take."""
 
 from __future__ import annotations
 

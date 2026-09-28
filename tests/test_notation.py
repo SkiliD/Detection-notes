@@ -1,4 +1,4 @@
-"""Tests notation : orthographe des hauteurs, armures, durées, mise en page."""
+"""Notation tests: pitch spelling, key signatures, durations, layout."""
 
 from v2m.core.liveseg import LiveNote
 from v2m.core.grid import BeatGrid, Meter
@@ -48,12 +48,12 @@ def test_spell_follows_the_key_signature():
 
 
 def test_spell_key_letter_sung_natural_stays_natural():
-    """Une lettre de l'armure chantée bécarre s'écrit NATURELLE, pas voisine.
+    """A key letter sung natural is spelled NATURAL, not a neighbour.
 
-    Mesuré : en Sol majeur, un Fa bécarre tombait dans le repli chromatique
-    et ressortait E# (le voisin alteré le plus proche) — la portée gravait
-    une hauteur fausse au lieu d'un Fa avec bécarre. Le naturel est TOUJOURS
-    l'orthographe gagnante quand la lettre de l'armure existe.
+    Measured: in G major, an F natural fell into the chromatic fallback
+    and came out E# (the nearest altered neighbour) - the staff engraved
+    a wrong pitch instead of an F with a natural. The natural is ALWAYS
+    the winning spelling when the key's letter exists.
     """
     f_nat = spell(65, fifths=1)      # F natural in G major (F# of the key undone)
     assert (f_nat.letter, f_nat.alter) == ("F", 0)
@@ -189,14 +189,14 @@ def test_notated_rest_duration_follows_the_figure():
 
     w = notated_rest_duration(Rest(start=0.0, end=0.5, figure="soupir"), grid=GRID)
     assert (w.type_, w.beats, w.dots) == ("quarter", 1.0, 0)
-    # sans figure (tempo inconnu) : la valeur dessinable la plus proche
+    # without a figure (unknown tempo): the nearest drawable value
     w = notated_rest_duration(Rest(start=0.0, end=4.0), BeatGrid(60.0))
     assert (w.type_, w.beats) == ("whole", 4.0)
 
 
 def test_layout_engraves_rests_between_phrases_on_the_grid():
-    """Chemin grille : le silence comble l'écart écrit laissé par les figures
-    (le tempo a ralenti pendant la respiration) ; les positions ne bougent pas."""
+    """Grid path: the rest fills the written gap left by the figures (the
+    tempo slowed during the breath); the positions do not move."""
     from v2m.core.rests import Rest
 
     notes = [_note(60, 0.0), _note(62, 2.0)]
@@ -211,8 +211,8 @@ def test_layout_engraves_rests_between_phrases_on_the_grid():
 
 
 def test_layout_chains_rests_so_phrases_are_separated():
-    """Chemin chaîné (live) : le silence CONSOMME du temps écrit — la phrase
-    suivante commence après la respiration au lieu d'être collée."""
+    """Chained path (live): the rest CONSUMES written time — the next
+    phrase starts after the breath instead of being glued to it."""
     from v2m.core.rests import Rest
 
     notes = [
@@ -221,7 +221,7 @@ def test_layout_chains_rests_so_phrases_are_separated():
     ]
     rests = [Rest(start=0.5, end=1.5, figure="pause")]
     lay = layout_staff(notes, grid=GRID, rests=rests)
-    assert [n.onset for n in lay.notes] == [0.0, 5.0]     # 1 note + 4 temps de pause
+    assert [n.onset for n in lay.notes] == [0.0, 5.0]     # 1 note + 4 beats of rest
     assert [r.onset for r in lay.rests] == [1.0]
     assert lay.rests[0].shape == "pause"
     assert lay.total_beats == 6.0

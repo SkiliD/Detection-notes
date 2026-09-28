@@ -47,6 +47,8 @@ coverage.xml
 *.midi
 /live_*
 prises_live/
+# observations vocales persistées (<prise>.observation.npz, scripts/reinterpret.py)
+*.npz
 
 # --- Sorties d'analyse : partitions + rapports (export_result) ---
 # Tout ce que le pipeline écrit avec un préfixe arbitraire :
@@ -101,3 +103,9 @@ docker-compose.override.yml
 adr/
 docs/
 docs/adr/
+/out*
+# prises_verite : les PRISES et vérités restent personnelles (wav/json), mais
+# le README engageant le format et les fingerprints de non-dérive sont suivis
+/prises_verite/*
+!/prises_verite/README.md
+!/prises_verite/*.fingerprint.json

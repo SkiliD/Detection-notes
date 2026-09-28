@@ -1,19 +1,19 @@
-"""Le mode --compare/--golden du diagnostic rejoue la MÊME analyse.
+"""The diagnostic's --compare/--golden mode replays the SAME analysis.
 
-Le script rejoue la segmentation entière (décodage compris) et compare
-l'empreinte des chiffres : ce test vérifie le cas stable sur un audio
-synthétique (déterminisme = zéro différence, sortie 0), puis que la
-comparaison MORDE — un script qui comparerait mal (toujours « stable »)
-ferait moins que rien. Même choix que test_profile_analysis : le vrai
-script est exécuté, jamais copié.
+The script replays the whole segmentation (decoding included) and
+compares the numbers' fingerprint: this test checks the stable case on
+synthetic audio (determinism = zero difference, exit 0), then that the
+comparison BITES — a script that compared badly (always "stable")
+would guarantee less than nothing. Same choice as test_profile_analysis:
+the real script is executed, never copied.
 
-Les prises RÉELLES du dépôt (demo.wav, chant.wav — gitignorées) sont
-rejouées contre leur empreinte dorée quand elles existent : une dérive
-de segmentation sur une vraie prise est alors vue par la suite intégrale,
-pas seulement quand on y pense. Ces rejeux coûtent ~16 s sur ~47 s
-(~34 % de la suite — mesure de 2026-09-23) : ils sont marqués `slow`
-(désélection avec `-m "not slow"` pour une boucle rapide), mais restent
-DANS la suite par défaut — un filet qui ne tourne plus n'est pas un filet.
+The repo's REAL takes (demo.wav, chant.wav — gitignored) are replayed
+against their golden fingerprint when present: a segmentation drift on
+a real take is then seen by the full suite, not only when we think of
+it. These replays cost ~16 s out of ~47 s (~34% of the suite —
+2026-09-23 measurement): they are marked `slow` (deselect with
+`-m "not slow"` for a fast loop), but stay IN the suite by default — a
+net that no longer runs is not a net.
 """
 
 from __future__ import annotations
@@ -50,52 +50,52 @@ def _run(*args: str) -> subprocess.CompletedProcess:
 
 
 # --------------------------------------------------------------------------- #
-# --diagnose : l'audit des seuils réellement exercés
+# --diagnose: the audit of the thresholds actually exercised
 # --------------------------------------------------------------------------- #
 
 
 def test_diagnose_reports_the_thresholds_a_take_exercised(tmp_path):
-    """Le mode --diagnose imprime les plages de la prise : hauteur courbe
-    vs bornes de lecture, offset d'accordage absorbé, forces d'attaque (et
-    combien sous le plancher), déviations ambiguës, et le chemin live.
-    Chaque section annoncée doit exister dans la sortie — un audit qui ne
-    dit rien ne diagnostique rien."""
+    """The --diagnose mode prints the take's ranges: pitch curve vs reading
+    bounds, absorbed tuning offset, attack strengths (and how many under
+    the floor), ambiguous deviations, and the live path.
+    Every announced section must exist in the output — an audit that says
+    nothing diagnoses nothing."""
     wav = _wav(tmp_path)
     proc = _run(wav, "--diagnose")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out = proc.stdout
     # ASCII-safe substrings only: the subprocess console encoding (cp1252
     # on Windows) mangles accents in the captured bytes, not the content
-    assert "Diagnostic" in out
+    assert "diagnosis" in out
     assert "65.0-2100.0" in out  # the reading bounds, FMIN-FMAX
     assert "confirm_s=0.09" in out  # the live path replayed
-    assert "offset" in out or "accordage" in out
+    assert "offset" in out or "tuning" in out
     assert "0.2" in out  # the strength floor appears in the report
 
 
 @pytest.mark.slow
 def test_golden_saves_then_detects_the_same_take(tmp_path):
-    """Première visite : l'empreinte est créée (fichier à côté de l'audio).
-    Seconde visite : identique, sortie 0 — l'audit est vert sur une prise
-    stable.
+    """First visit: the fingerprint is created (file beside the audio).
+    Second visit: identical, exit 0 — the audit is green on a stable
+    take.
     """
     wav = _wav(tmp_path)
     first = _run(wav, "--golden")
     assert first.returncode == 0, first.stdout + first.stderr
-    assert "créée" in first.stdout
+    assert "created" in first.stdout
     golden = tmp_path / "melody.golden.json"
     assert golden.exists()
 
     second = _run(wav, "--golden")
     assert second.returncode == 0, second.stdout + second.stderr
-    assert "identique à la référence" in second.stdout
+    assert "identical to the reference" in second.stdout
 
 
 @pytest.mark.slow
 def test_golden_catches_a_drift(tmp_path):
-    """L'audit MORDE : l'empreinte enregistrée ne peut pas être trompée par
-    un moteur qui dérive (la segmentation de référence a changé) — sortie 1
-    et la différence nommée.
+    """The audit BITES: the stored fingerprint cannot be fooled by a
+    drifting engine (the reference segmentation changed) — exit 1 and
+    the difference named.
     """
     wav = _wav(tmp_path)
     assert _run(wav, "--golden").returncode == 0
@@ -111,14 +111,14 @@ def test_golden_catches_a_drift(tmp_path):
 
 
 def test_compare_reports_stable_segmentation(tmp_path):
-    """Deux passes sur le même fichier : chiffres identiques, sortie 0."""
+    """Two passes on the same file: identical numbers, exit 0."""
     proc = _run(_wav(tmp_path), "--compare")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "identique" in proc.stdout
+    assert "identical" in proc.stdout
 
 
 def test_compare_fingerprints_bites_on_a_drift():
-    """La comparaison rapporte TOUTE dérive — tempo, note, force, silence."""
+    """The comparison reports ANY drift — tempo, note, strength, rest."""
     spec = importlib.util.spec_from_file_location("score_accuracy", SCRIPT)
     assert spec is not None and spec.loader is not None
     script = importlib.util.module_from_spec(spec)
@@ -135,26 +135,26 @@ def test_compare_fingerprints_bites_on_a_drift():
 
     drifted = dict(stable, tempo_bpm=119.0, notes=[(0.0, 0.5, 60, "noire", 0.9)])
     diffs = script.compare_fingerprints(stable, drifted)
-    assert diffs and len(diffs) == 2  # le tempo ET la force de la note 1
+    assert diffs and len(diffs) == 2  # the tempo AND note 1's strength
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("take", ["demo.wav", "chant.wav"])
 def test_real_takes_match_their_golden_fingerprint(take: str):
-    """Les vraies prises du dépôt rejouent leur empreinte dorée (si elles y sont).
+    """The repo's real takes replay their golden fingerprint (when present).
 
-    demo.wav est régénérable (scripts/make_demo.py, voir README) et
-    chant.wav est la prise de référence locale : les deux sont gitignorés,
-    d'où le skip silencieux là où ils sont absents. Une empreinte dorée
-    qui existe et dérive = échec dur : c'est le filet --golden branché sur
-    la suite intégrale.
+    demo.wav is regenerable (scripts/make_demo.py, see README) and
+    chant.wav is the local reference take: both are gitignored, hence
+    the silent skip where they are absent. An existing golden
+    fingerprint that drifts = hard failure: that is the --golden net
+    wired into the full suite.
     """
     audio = Path(__file__).resolve().parents[1] / take
     if not audio.exists():
-        pytest.skip(f"{take} absent (gitignore, régénérable) — empreinte non rejouée")
+        pytest.skip(f"{take} absent (gitignored, regenerable) — fingerprint not replayed")
     proc = _run(str(audio), "--golden")
     if not (audio.parent / audio.with_suffix(".golden.json").name).exists():
-        # première visite : le test vient de créer l'empreinte, rien à rejouer
+        # first visit: the test just created the fingerprint, nothing to replay
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        pytest.skip(f"empreinte dorée de {take} créée à ce passage ; rejouer pour vérifier")
-    assert proc.returncode == 0, "dérive de segmentation sur " + take + " :\n" + proc.stdout
+        pytest.skip(f"{take}'s golden fingerprint created on this pass; replay to verify")
+    assert proc.returncode == 0, "segmentation drift on " + take + ":\n" + proc.stdout

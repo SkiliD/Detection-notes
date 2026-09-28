@@ -1,4 +1,4 @@
-"""Tests de la portée (StaffView) : rendu offscreen, systèmes, défilement live."""
+"""StaffView tests: offscreen rendering, systems, live scrolling."""
 
 import os
 
@@ -56,13 +56,13 @@ def test_empty_staff_paints_without_notes(qapp):
 
 
 def test_natural_accidental_draws_its_own_glyph(qapp):
-    """Le bécarre est SON glyphe, pas un bémol déguisé.
+    """The natural is its OWN glyph, not a disguised flat.
 
-    alter==0 tombait dans le else (bémol) : une lettre d'armure chantée
-    bécarre était gravée avec une FLAT — hauteur fausse sur le papier. Le
-    bécarre a deux verticales à x - 0.17S et x + 0.19S ; le bémol n'a qu'une
-    tige à x - 0.06S, donc les deux glyphes se distinguent par l'encre au
-    voisinage de la 2ᵉ verticale (mêmes mesures que l'inspecteur ASCII).
+    alter==0 fell into the else (flat): a key letter sung natural was
+    engraved with a FLAT — wrong pitch on paper. The natural has two
+    verticals at x - 0.17S and x + 0.19S; the flat has one stem at
+    x - 0.06S, so the two glyphs differ by the ink near the second
+    vertical (same measures as the ASCII inspector).
     """
     from v2m.core.grid import BeatGrid
 
@@ -83,7 +83,7 @@ def test_natural_accidental_draws_its_own_glyph(qapp):
     x2 = view._notes_x(lay) - 1.25 * S_PX + 0.19 * S_PX
     ink2 = _ink(view, x0=x2 - 2, y0=y - 0.9 * S_PX, x1=x2 + 2, y1=y + 0.9 * S_PX)
     # the flat's stem (the old glyph) leaves this column EMPTY
-    assert ink2 > 0, "le bécarre n'a pas de 2ᵉ verticale (glyphe bémol ?)"
+    assert ink2 > 0, "the natural has no 2nd vertical (flat glyph?)"
 
 
 def test_score_needs_no_meter_or_key(qapp):
@@ -98,7 +98,7 @@ def test_score_needs_no_meter_or_key(qapp):
 
 
 def test_every_system_draws_its_notes(qapp):
-    """Régression : les systèmes 2+ dessinaient leurs notes hors du widget."""
+    """Regression: systems 2+ drew their notes outside the widget."""
     notes = [_note(60 + (i % 7), i * 0.5) for i in range(16)]   # 4 measures
     view = StaffView()
     view.resize(560, 260)
@@ -113,7 +113,7 @@ def test_every_system_draws_its_notes(qapp):
     for system in range(2):
         top = HEADER_H + system * system_h
         ink = _ink(view, x0=view._notes_x(lay) + 5, y0=top - 14, y1=top + 4 * S + 8)
-        assert ink > 40, f"système {system + 1} vide (aucune note dessinée)"
+        assert ink > 40, f"system {system + 1} empty (no note drawn)"
 
 
 def test_live_view_scrolls_to_the_newest_notes(qapp):
@@ -164,8 +164,8 @@ def test_live_clear_removes_everything(qapp):
 
 
 def test_score_engraves_the_breaths_between_phrases(qapp):
-    """Les silences du cœur se gravent entre les phrases : la phrase 2
-    commence après la respiration, pas collée à la première note."""
+    """The core's rests engrave between the phrases: phrase 2 starts after
+    the breath, not glued to the first note."""
     from v2m.core.rests import Rest
 
     notes = [
@@ -179,13 +179,13 @@ def test_score_engraves_the_breaths_between_phrases(qapp):
     lay = view.layout()
     assert len(lay.rests) == 1
     assert lay.rests[0].shape == "pause"
-    assert lay.notes[1].onset == 5.0     # 1 noire + 4 temps de pause
+    assert lay.notes[1].onset == 5.0     # 1 quarter + 4 beats of rest
     assert _ink(view, y0=HEADER_H + int(5.4 * S), y1=HEADER_H + int(7.0 * S)) > 0
     assert not view.grab().isNull()
 
 
 def test_rests_without_notes_engrave_nothing(qapp):
-    """Garde-fou : pas de notes -> pas de silences, et aucun plantage."""
+    """Guard: no notes -> no rests, and no crash."""
     from v2m.core.rests import Rest
 
     view = StaffView()

@@ -96,10 +96,10 @@ def test_tr_figure_translates_for_display():
 
 
 def test_tr_figure_covers_the_whole_catalogue_vocabulary():
-    """Chaque nom du CATALOGUE (figures, silences, pointés, triolets) est
-    traduit sans résidu français — une valeur ajoutée au catalogue sans
-    passer par la table d'affichage échoue ici, au lieu de fuir en FR
-    dans une UI anglaise."""
+    """Every CATALOGUE name (figures, rests, dots, triplets) is translated
+    with no French residue — a value added to the catalogue without going
+    through the display table fails HERE, instead of leaking FR into an
+    English UI."""
     from v2m.core.grid import CATALOGUE
 
     names = {c.name for c in CATALOGUE} | {c.rest for c in CATALOGUE}
@@ -112,20 +112,20 @@ def test_tr_figure_covers_the_whole_catalogue_vocabulary():
     set_language("en")
     for name in sorted(names):
         en = tr_figure(name)
-        assert en != name, f"« {name} » non traduit"
-        assert not residue.search(en), f"« {name} » -> « {en} » : résidu français"
+        assert en != name, f"'{name}' not translated"
+        assert not residue.search(en), f"'{name}' -> '{en}' : French residue"
 
 
 def test_every_catalogue_figure_has_a_non_identity_english_translation():
-    """La table d'affichage couvre la grille : tout nom que le CATALOGUE peut
-    émettre (figure, silence, pointé, triolet) a une traduction EN qui n'est
-    PAS le nom lui-même, portée par _FIGURE_EN et non par le fallback.
+    """The display table covers the grid: every name the CATALOGUE can emit
+    (figure, rest, dotted, triplet) has an EN translation that is NOT the
+    name itself, carried by _FIGURE_EN and not by the fallback.
 
-    L'identité passerait inaperçue à l'utilisateur (le fallback renvoie le
-    nom canonique, même rendu) : ce test force la preuve par la table —
-    _FIGURE_EN[name] doit exister et différer, directement ou par la
-    composition triolet. Toute valeur ajoutée au catalogue sans sa ligne
-    dans la table échoue ICI.
+    Identity would go unnoticed by the user (the fallback returns the
+    canonical name, same rendering): this test forces the proof through
+    the table — _FIGURE_EN[name] must exist and differ, directly or via
+    the triplet composition. Any catalogue value added without its line
+    in the table fails HERE.
     """
     from v2m.core.grid import CATALOGUE
     from v2m.core.i18n import _FIGURE_EN
@@ -139,18 +139,18 @@ def test_every_catalogue_figure_has_a_non_identity_english_translation():
 
     missing = sorted(n for n in plain if n not in _FIGURE_EN)
     assert not missing, (
-        "figures sans traduction EN dans _FIGURE_EN : " + ", ".join(missing)
+        "figures without an EN translation in _FIGURE_EN : " + ", ".join(missing)
     )
     for name in plain:
         en = _FIGURE_EN[name]
-        assert en != name, f"« {name} » traduit par lui-même : pas une traduction"
+        assert en != name, f"'{name}' translated by itself: not a translation"
     set_language("en")
     for name in triplets:
         base = name[len("triolet de "):]
-        assert base in _FIGURE_EN, f"triolet « {name} » : valeur de base non traduite"
+        assert base in _FIGURE_EN, f"triplet '{name}' : base value not translated"
         en = _FIGURE_EN[base]
         assert tr_figure(name) == f"triplet of {en}", (
-            f"« {name} » mal composé depuis « {base} » -> « {en} »"
+            f"'{name}' wrongly composed from '{base}' -> '{en}'"
         )
 
 
@@ -163,19 +163,19 @@ def test_tr_key_label():
 
 
 def test_tr_chord_label_translates_the_whole_label():
-    """Le traducteur whole-label : racine solfège + qualité française.
+    """The whole-label translator: sol-fa root + French quality.
 
-    Remplace le tr_chord_quality supprimé (ADR 0004) : la traduction par
-    suffixe rendait « Am » pour un lecteur français qui lit « La mineur ».
-    La racine est parsée contre la table anglaise (les accords sont construits
-    par chords.py avec NOTE_NAMES) — deux caractères d'abord, sinon 'C#m'
-    serait 'C' + '#m' — et AFFICHÉE en solfège.
+    Replaces the removed tr_chord_quality (ADR 0004): the suffix-based
+    translation rendered "Am" for a French reader reading "La mineur".
+    The root is parsed against the English table (chords.py builds the
+    chords with NOTE_NAMES) — two characters first, else 'C#m' would be
+    'C' + '#m' — and DISPLAYED in sol-fa.
     """
     set_language("fr")
     assert tr_chord_label("Am") == "La mineur"
     assert tr_chord_label("C") == "Do majeur"
     assert tr_chord_label("Cmaj7") == "Do septième majeure"
-    assert tr_chord_label("C#m") == "Do# mineur"    # racine deux caractères
+    assert tr_chord_label("C#m") == "Do# mineur"    # two-character root
     assert tr_chord_label("Gdim") == "Sol diminué"
     # EN stays canonical (storage is canonical, display translates)
     set_language("en")
@@ -183,20 +183,20 @@ def test_tr_chord_label_translates_the_whole_label():
 
 
 def test_tr_chord_label_covers_the_detection_vocabulary():
-    """Toute qualité de chords.CHORD_TEMPLATES a son mot d'affichage.
+    """Every quality of chords.CHORD_TEMPLATES has its display word.
 
-    Dérivé du producteur — le dict que _classify itère : une qualité
-    ajoutée là sans passer par _CHORD_QUALITY_FR fuirait en code (« Am9 »)
-    dans une UI française, et ce test l'attrape au lieu de l'utilisateur.
-    Un label inconnu ou mal formé revient inchangé (vocabulaire fermé,
-    même contrat que tr_figure) — jamais à moitié traduit.
+    Derived from the producer — the dict _classify iterates: a quality
+    added there without going through _CHORD_QUALITY_FR would leak as
+    code ("Am9") in a French UI, and this test catches it instead of the
+    user. An unknown or malformed label comes back unchanged (closed
+    vocabulary, same contract as tr_figure) — never half-translated.
     """
     from v2m.core.chords import CHORD_TEMPLATES
 
     set_language("fr")
     for quality in CHORD_TEMPLATES:
         assert tr_chord_label(f"C{quality}") != f"C{quality}", (
-            f"qualité « {quality} » non traduite"
+            f"quality '{quality}' not translated"
         )
         # the root word is translated, the label is NOT left as code
         assert not tr_chord_label(f"C{quality}").startswith("C{0}".format(quality))
@@ -206,18 +206,19 @@ def test_tr_chord_label_covers_the_detection_vocabulary():
 
 
 def test_tr_key_label_covers_the_detection_vocabulary():
-    """Tout mode produit par la détection a sa traduction d'affichage.
+    """Every mode produced by the detection has its display translation.
 
-    Dérivé de keys.KEY_PROFILES — la source de vérité que detect_key
-    itère : un mode ajouté là sans passer par _MODE_FR fuirait en anglais
-    dans une UI française, et ce test l'attrape au lieu de l'utilisateur.
+    Derived from keys.KEY_PROFILES — the source of truth detect_key
+    iterates: a mode added there without going through _MODE_FR would
+    leak as English in a French UI, and this test catches it instead of
+    the user.
     """
     from v2m.core.keys import KEY_PROFILES
 
     set_language("fr")
     for mode in KEY_PROFILES:
         assert tr_key_label(f"C {mode}") != f"C {mode}", (
-            f"mode « {mode} » non traduit"
+            f"mode '{mode}' not translated"
         )
         # the tonic word is preserved, only the mode translates
         assert tr_key_label(f"C {mode}").startswith("C ")
@@ -232,15 +233,15 @@ def test_tr_falls_back_to_key():
 
 
 def test_tr_debug_wrapper_logs_missing_keys(capsys):
-    """En DEBUG, une clé absente est loggée sur stderr — le filet des sites
-    dynamiques.
+    """In DEBUG, a missing key is logged on stderr — the net for dynamic
+    call sites.
 
-    Le fallback ne lève JAMAIS (contrat épinglé ci-dessus), donc une clé
-    mal orthographiée dans un appel NON littéral (variable, f-string)
-    échappe à la garde statique et part en production muette : l'utilisateur
-    lit la clé brute sans erreur nulle part. Le wrapper (set_debug(True),
-    ou V2M_DEBUG_TR=1 à l'import) logge chaque manquage — c'est ce que la
-    garde AST ne peut pas voir.
+    The fallback NEVER raises (contract pinned above), so a misspelled
+    key in a NON-literal call (variable, f-string) escapes the static
+    guard and ships silently to production: the user reads the raw key
+    with no error anywhere. The wrapper (set_debug(True), or
+    V2M_DEBUG_TR=1 at import) logs every miss — what the AST guard
+    cannot see.
     """
     import io
 
@@ -251,10 +252,10 @@ def test_tr_debug_wrapper_logs_missing_keys(capsys):
         set_debug(True)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            assert tr("key absent x") == "key absent x"   # fallback inchangé
+            assert tr("key absent x") == "key absent x"   # unchanged fallback
         assert "key absent x" in err.getvalue()
         assert "fr" in err.getvalue()
-        # une clé PRÉSENTE ne logge rien
+        # a PRESENT key logs nothing
         err2 = io.StringIO()
         with contextlib.redirect_stderr(err2):
             assert tr("key tempo") == "Tempo"
@@ -263,7 +264,7 @@ def test_tr_debug_wrapper_logs_missing_keys(capsys):
         err3 = io.StringIO()
         with contextlib.redirect_stderr(err3):
             tr("key absent x")
-        assert err3.getvalue() == ""   # mode muet par défaut
+        assert err3.getvalue() == ""   # silent mode by default
     finally:
         set_debug(False)
 

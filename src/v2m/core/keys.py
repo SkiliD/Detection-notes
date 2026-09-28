@@ -129,12 +129,12 @@ def snap_to_key(notes, key: KeyCandidate, dev_attr: str = "deviation") -> int:
             continue  # not ambiguous: a chromatic shade keeps its semitone
         lean = 1 if dev > 0 else -1
         if n.midi % 12 in scale:
-            n.deviation = 0.0  # re-anchored on its degree
+            setattr(n, dev_attr, 0.0)  # re-anchored on its degree
             changed += 1
             continue
         target = n.midi + lean
         if target % 12 in scale:
             n.midi = target
-            n.deviation = 0.0
+            setattr(n, dev_attr, 0.0)
             changed += 1
     return changed

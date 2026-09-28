@@ -58,11 +58,11 @@ def test_no_harmony_without_progression():
 
 
 def test_translated_chord_words_next_to_the_harmony():
-    """Le chiffrage porte son NOM LISIBLE au-dessus de la portée : la
-    traduction whole-label de i18n (« La mineur »), la même que la GUI et
-    le CLI. Le <harmony> garde le symbole canonique (Am) — la structure
-    harmonique du fichier reste anglaise ; les <words> sont un affichage.
-    Sans progression : ni harmony ni words."""
+    """The chord carries its READABLE name above the staff: i18n's
+    whole-label translation ("La mineur"), the same as the GUI and the
+    CLI. The <harmony> keeps the canonical symbol (Am) — the file's
+    harmonic structure stays English; the <words> are a display.
+    Without a progression: neither harmony nor words."""
     prog = [(1, 2, ChordCandidate("A", "m", 0.8))]
     root = _parse(build_score_xml(_notes_one_beat(), GRID, KEY_C, chord_progression=prog))
     words = root.findall("part/measure/direction/direction-type/words")

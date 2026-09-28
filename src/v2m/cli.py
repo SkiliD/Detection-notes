@@ -21,6 +21,7 @@ from .core.pdf_export import PdfExportError, PdfToolMissing
 from .core.notes import DEFAULT_MIN_NOTE_S
 from .core.pipeline import FILE_CONF, LIVE_CONF, AnalyzeOptions, analyze_file
 from .core.report import engrave_pdf, export_result
+from .core.takes import ARTIFACTS as ARTIFACT_EXTENSIONS
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -88,7 +89,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     figs = rep["figures_summary"]
     if figs:
         print(f"{tr('key figures')}   : {', '.join(f'{tr_figure(k)} ×{v}' for k, v in figs.items())}")
-    exports = f"{stem}.mid, {stem}.musicxml, {stem}.json, {stem}.csv"
+    # one owner for the artifact set (report.ARTIFACT_EXTENSIONS): the summary
+    # announces what the export wrote, PDF appended when it was engraved
+    exports = ", ".join(f"{stem}{ext}" for ext in ARTIFACT_EXTENSIONS)
     if pdf_written:
         exports += f", {stem}.pdf"
     print(f"{tr('key export label')} : {exports}")
@@ -144,6 +147,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--transpose", type=int, default=0, help="Transpose in semitones")
 
     p_gui = sub.add_parser("gui", help="Launch the graphical interface")
+
+    p_wk = sub.add_parser(
+        "weekly", help="Weekly recap: real-time health, best practice time of day, days"
+    )
+    p_wk.add_argument(
+        "root", nargs="?", default=None,
+        help="Take folder (default: prises_live)",
+    )
+    p_wk.add_argument(
+        "--pdf", action="store_true",
+        help="Also engrave the recap to PDF (needs MuseScore or LilyPond)",
+    )
     return parser
 
 
@@ -161,8 +176,45 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_live(args)
     if args.command == "gui":
         return _cmd_gui(args)
+    if args.command == "weekly":
+        return _cmd_weekly(args)
     parser.print_help()
     return 1
+
+
+def _cmd_weekly(args: argparse.Namespace) -> int:
+    """The weekly recap: text always, PDF on request (same split as analyze)."""
+    from .core import weekly as wk
+    from .core.weekly_pdf import (
+        WeeklyPdfExportError,
+        WeeklyPdfToolMissing,
+        engrave_weekly_pdf,
+    )
+    from .core.coherence import prune_observations, prune_takes
+
+    root = Path(args.root) if args.root else None
+    data = wk.build_weekly(root)
+    # the retention runs where the user asked for a recap: the folder is
+    # looked at, its size is the moment to trim (the journal keeps history)
+    pruned = prune_observations(root or Path("prises_live"))
+    if pruned:
+        print(tr("cli weekly pruned caches").format(n=pruned))
+    text = wk.weekly_text(data)
+    out = sys.stdout.buffer if hasattr(sys.stdout, "buffer") else sys.stdout
+    out.write(text.encode("utf-8", errors="replace") if hasattr(out, "write") else text)  # type: ignore[union-attr]
+    out.flush()
+    if args.pdf:
+        stem = (root or Path("prises_live")) / "recap_hebdo"
+        try:
+            path = engrave_weekly_pdf(data, stem)
+            print(tr("cli weekly pdf ok").format(path=path))
+        except WeeklyPdfToolMissing:
+            print(tr("err pdf no tool").format(hint=""))
+            return 0  # a missing tool is a skip, not a failure (the analyze rule)
+        except (WeeklyPdfExportError, PdfExportError) as e:
+            print(tr("err ui pdf").format(e=e), file=sys.stderr)
+            return 2
+    return 0
 
 
 if __name__ == "__main__":

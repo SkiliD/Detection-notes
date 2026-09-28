@@ -1,4 +1,4 @@
-"""Tests export MusicXML : XML valide, mesures, armure, ties, triolets, silences."""
+"""MusicXML export tests: valid XML, measures, key signature, ties, triplets, rests."""
 
 import xml.etree.ElementTree as ET
 
@@ -26,7 +26,7 @@ KEY_EB = KeyResult(KeyCandidate("Eb", "major", 0.8), [])
 
 
 def _parse(xml: str) -> ET.Element:
-    # le DOCTYPE pointe vers une DTD externe : on le retire pour le parsing
+    # the DOCTYPE points to an external DTD: strip it before parsing
     body = xml.split("?>", 1)[1]
     return ET.fromstring(body)
 
@@ -46,13 +46,13 @@ def test_valid_xml_and_structure():
 
 
 def test_measures_fill_total_duration():
-    # 4 noires = 1 mesure 4/4
+    # 4 quarters = 1 measure of 4/4
     notes = [Note(start=i * 0.5, end=(i + 1) * 0.5, midi=60 + i, confidence=0.9) for i in range(4)]
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
     measures = root.findall("part/measure")
     assert len(measures) == 1
-    # 4 notes, pas de silences
+    # 4 notes, no rests
     rest = root.findall("part/measure/note/rest")
     assert len(rest) == 0
 
@@ -61,12 +61,12 @@ def test_key_fifths_mapping():
     assert _key_fifths("C", "major") == 0
     assert _key_fifths("G", "major") == 1
     assert _key_fifths("Eb", "major") == -3
-    assert _key_fifths("A", "minor") == 0      # relative de C major
+    assert _key_fifths("A", "minor") == 0      # C major's relative
     assert _key_fifths("Em", "minor") == 0 if False else _key_fifths("E", "minor") == 1
 
 
 def test_long_note_tied_across_beats():
-    # blanche (2 temps) -> deux notes liées
+    # half note (2 beats) -> two tied notes
     notes = [Note(start=0.0, end=1.0, midi=60, confidence=0.9),
              Note(start=1.0, end=1.5, midi=60, confidence=0.9)]
     xml = build_score_xml(notes, GRID, KEY_C)
@@ -79,7 +79,7 @@ def test_long_note_tied_across_beats():
 
 
 def test_triplet_group_rendered():
-    # triolet de noire ×3 (2 temps) : 3 notes de figure "triolet de noire"
+    # quarter triplet x3 (2 beats): 3 notes of figure "triolet de noire"
     td = (2 / 3) * 0.5
     notes = [Note(start=i * td, end=(i + 1) * td, midi=60 + i, confidence=0.9) for i in range(3)]
     for n in notes:
@@ -92,23 +92,23 @@ def test_triplet_group_rendered():
     assert text_of(tm[0].find("normal-notes")) == "2"
     tuplets = root.findall("part/measure/note/notations/tuplet")
     sides = [t.get("type") for t in tuplets]
-    assert sides == ["start", "stop"]  # le milieu n'a pas de bracket
-    # le bloc total = 2 temps = 48 divisions -> 16 par note, puis les deux
-    # temps libres ferment la mesure
+    assert sides == ["start", "stop"]  # the middle has no bracket
+    # the block totals 2 beats = 48 divisions -> 16 per note, then the two
+    # free beats close the measure
     durations = [int(text_of(n.find("duration"))) for n in root.findall("part/measure/note")]
     assert durations[:3] == [16, 16, 16]
-    assert sum(durations) == 96  # une mesure 4/4 à 24 divisions par temps
+    assert sum(durations) == 96  # one 4/4 measure at 24 divisions per beat
 
 
 def test_rests_fill_silences():
-    # note au 5e temps (2.0-2.5 s) : 2 mesures (5 temps -> 4+1)
+    # note on beat 5 (2.0-2.5 s): 2 measures (5 beats -> 4+1)
     notes = [Note(start=2.0, end=2.5, midi=60, confidence=0.9)]
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
     measures = root.findall("part/measure")
     assert len(measures) == 2
-    # mesure 1 entière silencieuse -> UNE pause entière (pas 4 soupirs) ;
-    # mesure 2 : la note au beat 0, puis 3 temps silencieux -> une blanche pointée
+    # measure 1 entirely silent -> ONE whole rest (not 4 quarter rests);
+    # measure 2: the note on beat 0, then 3 silent beats -> a dotted half
     m1_rests = [n for n in measures[0].findall("note") if n.find("rest") is not None]
     assert [(text_of(n.find("type")), len(n.findall("dot"))) for n in m1_rests] == [("whole", 0)]
     m2_rests = [n for n in measures[1].findall("note") if n.find("rest") is not None]
@@ -119,7 +119,7 @@ def test_rests_fill_silences():
 
 
 def test_leading_rest_uses_a_whole_rest_per_empty_measure():
-    # note au 5e temps : la mesure 1 entière est silencieuse -> une pause
+    # note on beat 5: measure 1 is entirely silent -> a whole rest
     notes = [Note(start=2.0, end=2.5, midi=60, confidence=0.9)]
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
@@ -129,7 +129,7 @@ def test_leading_rest_uses_a_whole_rest_per_empty_measure():
 
 
 def test_breath_rest_between_phrases_is_a_quarter_rest():
-    # 0,5 s de respiration (1 temps à 120 BPM) -> soupir, pas silence générique
+    # 0.5 s of breath (1 beat at 120 BPM) -> quarter rest, not a generic silence
     from v2m.core.rests import Rest
 
     notes = [
@@ -146,24 +146,24 @@ def test_breath_rest_between_phrases_is_a_quarter_rest():
 
 
 def test_unlabeled_rest_still_engraves_its_duration():
-    # un silence sans figure (tempo inconnu) se grave d'après sa durée
+    # a figure-less rest (unknown tempo) is engraved from its duration
     from v2m.core.rests import Rest
 
     notes = [
         Note(start=0.0, end=0.5, midi=60, confidence=0.9),
         Note(start=1.5, end=2.0, midi=62, confidence=0.9),
     ]
-    rests = [Rest(start=0.5, end=1.5)]          # 2 temps, figure inconnue
+    rests = [Rest(start=0.5, end=1.5)]          # 2 beats, unknown figure
     xml = build_score_xml(notes, GRID, KEY_C, rests=rests)
     root = _parse(xml)
     rest_notes = [n for n in root.findall("part/measure/note") if n.find("rest") is not None]
-    assert len(rest_notes) == 1                           # fusionnée, pas fragmentée
-    assert text_of(rest_notes[0].find("duration")) == "48"    # 2 temps = 48 divisions
-    assert text_of(rest_notes[0].find("type")) == "half"      # vraie valeur, pas générique
+    assert len(rest_notes) == 1                           # merged, not fragmented
+    assert text_of(rest_notes[0].find("duration")) == "48"    # 2 beats = 48 divisions
+    assert text_of(rest_notes[0].find("type")) == "half"      # the real value, not generic
 
 
-# ------------------------------------------- ce que les prises n'exercent pas
-BEAT, SLOT = 0.5, 0.75          # 120 BPM : un temps noir, un temps pointé
+# ------------------------------------------- what the takes never exercise
+BEAT, SLOT = 0.5, 0.75          # 120 BPM: a quarter beat, a dotted beat
 GRID_44 = BeatGrid(BPM)
 GRID_68 = BeatGrid(BPM, Meter(6, 8))
 
@@ -172,8 +172,8 @@ def _note(midi: int, start: float, end: float, figure: str | None = None) -> Not
     return Note(start=start, end=end, midi=midi, confidence=0.9, figure=figure)
 
 
-# Chaque cas doit se refermer et ne dire que des durées qu'il peut remplir ;
-# le contrat est vérifié par `scorexml.assert_measures_close`.
+# Every case must close and only state durations it can fill; the
+# contract is checked by `scorexml.assert_measures_close`.
 SYNTHETIC = {
     "4/4 plein": lambda: (GRID_44, [_note(60 + i, i * BEAT, (i + 1) * BEAT) for i in range(4)]),
     "4/4 note tenue": lambda: (GRID_44, [_note(60, 0.0, 2 * BEAT)]),
@@ -195,19 +195,18 @@ SYNTHETIC = {
 
 @pytest.mark.parametrize("label", sorted(SYNTHETIC))
 def test_a_synthetic_score_closes_and_its_types_do_not_lie(label):
-    """Le contrat vaut aussi là où les deux prises ne vont pas : mesure 6/8 de
-    deux temps pointés (36 divisions), triolet (deux tiers de durée), durées
-    courtes. Un 6/8 gravé sur six temps au lieu de deux sortait trois fois trop
-    long et ne se refermait pas."""
+    """The contract also holds where the two takes never go: a 6/8 measure of
+    two dotted beats (36 divisions), a triplet (two thirds of a duration),
+    short durations. A 6/8 engraved over six beats instead of two came out
+    three times too long and did not close."""
     grid, notes = SYNTHETIC[label]()
     assert_measures_close(score_root(build_score_xml(notes, grid, KEY_C)), label)
 
 
 def test_the_snapped_score_writes_no_duration_below_a_sixteenth():
-    """Le trente-deuxième (3 divisions à 24 par temps) est exprimable, mais le
-    chemin arrimé n'y descend pas : les bornes tombent sur des quarts de temps,
-    donc la plus courte valeur écrite est un seizième (6 divisions) et le type
-    n'apparaît jamais."""
+    """The 32nd (3 divisions at 24 per beat) is expressible, but the snapped
+    path never goes there: boundaries sit on quarter beats, so the shortest
+    written value is a sixteenth (6 divisions) and the type never appears."""
     for label, make in sorted(SYNTHETIC.items()):
         grid, notes = make()
         root = score_root(build_score_xml(notes, grid, KEY_C))
@@ -217,9 +216,9 @@ def test_the_snapped_score_writes_no_duration_below_a_sixteenth():
 
 
 def test_the_closure_property_refuses_a_type_that_lies_about_its_duration():
-    """Un filet non éprouvé ne prouve rien : trois noires et une blanche se
-    referment (96 divisions), donc seule la cohérence type/durée peut refuser
-    cette dernière — et elle doit le faire."""
+    """An unexercised net proves nothing: three quarters and a half close
+    (96 divisions), so only the type/duration coherence can reject the
+    latter — and it must."""
     forged = (
         '<?xml version="1.0"?><score-partwise><part><measure number="1">'
         "<attributes><divisions>24</divisions><time><beats>4</beats>"
@@ -229,7 +228,7 @@ def test_the_closure_property_refuses_a_type_that_lies_about_its_duration():
         + "</measure></part></score-partwise>"
     )
     with pytest.raises(AssertionError, match="half pour 24 divisions"):
-        assert_measures_close(score_root(forged), "cas forgé")
+        assert_measures_close(score_root(forged), "cas forgé")  # forged case label (data)
 
 
 def test_save_musicxml_writes_file(tmp_path):
@@ -250,13 +249,13 @@ def test_metronome_mark():
     assert per_minute is not None and per_minute.text == "117.5"
 
 
-# ------------------------------------- la table des durées EST le catalogue
+# ------------------------------------- the durations table IS the catalogue
 @pytest.mark.parametrize("steps", sorted(_TYPE_BY_STEPS))
 def test_the_export_types_a_duration_the_way_the_grid_writes_it(steps):
-    """Un seul arbitre de la valeur écrite : la table des divisions est le
-    catalogue de la Grille (`DRAWABLE`) en divisions. Seuls les triolets (le
-    catalogue n'en connaît aucun) et le trente-deuxième, plus court que son
-    plancher au seizième, sont énoncés par l'export."""
+    """One arbiter of the written value: the divisions table is the Grid's
+    catalogue (`DRAWABLE`) in divisions. Only the triplets (the catalogue
+    knows none) and the 32nd, shorter than its sixteenth floor, are
+    stated by the export."""
     beats = steps / DIVISIONS
     written = GRID.written(GRID.seconds(beats))
     if abs(written.beats - beats) < 1e-9:
@@ -266,10 +265,11 @@ def test_the_export_types_a_duration_the_way_the_grid_writes_it(steps):
 
 
 def test_a_dotted_sixteenth_is_written_on_the_staff_but_snapped_in_the_file():
-    """Le seizième pointé vaut 9 divisions, que la grille sait écrire ; mais
-    l'arrimage, lui, reste au seizième (6 divisions), donc le fichier reçoit
-    une croche là où la portée — qui n'arrime pas — écrit un seizième pointé.
-    Et jamais un triolet : 4 divisions ne sortent que d'un bloc de triolets."""
+    """A dotted sixteenth is 9 divisions, which the grid can write; but the
+    snap stays at the sixteenth (6 divisions), so the file receives an
+    eighth where the staff — which does not snap — writes a dotted
+    sixteenth. And never a triplet: 4 divisions only come out of a
+    triplet block."""
     notes = [
         Note(start=0.0, end=GRID.seconds(0.375), midi=60, confidence=0.9),
         Note(start=GRID.seconds(0.625), end=GRID.seconds(1.0), midi=62, confidence=0.9),
@@ -281,27 +281,28 @@ def test_a_dotted_sixteenth_is_written_on_the_staff_but_snapped_in_the_file():
     sounding = [n for n in _parse(xml).findall("part/measure/note") if n.find("rest") is None]
     assert [text_of(n.find("type")) for n in sounding] == ["eighth", "eighth"]
     assert [int(text_of(n.find("duration"))) for n in sounding] == [12, 12]
-    assert "<time-modification>" not in xml       # donc aucun triolet
+    assert "<time-modification>" not in xml       # hence no triplet
     assert 0.375 * DIVISIONS in _TYPE_BY_STEPS    # 9 : la valeur est exprimable
 
 
 def test_an_isolated_short_note_keeps_its_duration_and_rests_the_beat():
-    """Une note courte isolée garde sa durée écrite : ce qui reste de son temps
-    devient un silence, au lieu d'être absorbé par un temps entier inventé."""
+    """An isolated short note keeps its written duration: what remains of
+    its beat becomes a rest, instead of being absorbed by an invented whole
+    beat."""
     notes = [Note(start=0.0, end=GRID.seconds(0.5), midi=60, confidence=0.9)]
     written = [
         (text_of(n.find("type")), int(text_of(n.find("duration"))),
          "silence" if n.find("rest") is not None else "note")
         for n in _parse(build_score_xml(notes, GRID, KEY_C)).findall("part/measure/note")
     ]
-    # croche chantée + croche de silence + blanche pointée pour le reste
+    # sung eighth + eighth rest + dotted half for the remainder
     assert written == [("eighth", 12, "note"), ("eighth", 12, "silence"),
                        ("half", 72, "silence")]
 
 
 def test_a_silent_compound_measure_closes_on_a_dotted_half_rest():
-    """Une mesure 6/8 vaut trois noires (72 divisions), pas six temps : un seul
-    silence de blanche pointée la remplit."""
+    """A 6/8 measure is three quarters (72 divisions), not six beats: a
+    single dotted half rest fills it."""
     xml = build_score_xml([], BeatGrid(BPM, Meter(6, 8)), KEY_C)
     rests = [
         (text_of(n.find("type")), len(n.findall("dot")), int(text_of(n.find("duration"))))

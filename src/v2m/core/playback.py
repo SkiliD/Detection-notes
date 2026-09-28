@@ -36,6 +36,22 @@ except Exception:  # pragma: no cover - no audio device in CI
 
 _CHUNK = 1024  # ~23 ms at 44.1 kHz: stop latency stays imperceptible
 
+# --- Pedal & brightness (2026-09-25, user request) ------------------------
+# A HELD note keeps ringing after the key is lifted: the damper is up
+# (pedal down), the string decays through its own partials and only the
+# tail fade ends it. Below HELD_MIN_S the note is a short one: the damper
+# still lifts the key early (the old behavior, pinned by a test).
+HELD_MIN_S = 0.35
+PEDAL_TAIL_FACTOR = 0.30   # tail length = factor x written duration
+PEDAL_TAIL_MAX_S = 0.90    # a pedal never rings forever
+# Brightness: the partial AMPLITUDE exponent is velocity-dependent. A soft
+# key excites mostly the fundamental (expo 2.1, dark); a hard hammer also
+# excites the upper partials (expo 1.3, bright) — measured direction of a
+# real piano's strike. The decay ranking (higher ranks die faster) is
+# unchanged, so the brightness is strongest at the attack.
+DARK_EXPO = 2.1
+BRIGHT_EXPO = 1.3
+
 
 @dataclass(frozen=True)
 class Timeline:
@@ -91,19 +107,21 @@ def render_notes(
     mixing against another source (e.g. the singer's own voice).
 
     The performance is deliberately NOT mechanical (the metronome-piano
-    feedback): velocities follow the take's own accents (`_note_velocity`),
-    a soft key strikes slower than a loud one, notes are placed a few ms
-    off the grid (later when weak), keyed a few cents apart, released a
-    touch before the next onset, and everything sits in a light room
-    (short noise IR). All deterministic: same notes -> same render.
+    feedback): velocities follow the take's own accents (`_note_velocity`)
+    and brighten the tone (a loud key rings with more upper partials), a
+    soft key strikes slower than a loud one, notes are placed a few ms
+    off the grid (later when weak), keyed a few cents apart, and HELD
+    notes ring through a pedal tail after the key lift (a short note
+    still has its damper). Everything sits in a light room (short noise
+    IR). All deterministic: same notes -> same render.
     """
     if not notes:
         return np.zeros(0, dtype=np.float32)
-    length = int(max(n.end for n in notes) * sr) + sr // 10
+    length = int(max(n.end for n in notes) * sr) + int(PEDAL_TAIL_MAX_S * sr) + sr // 10
     y = np.zeros(length, dtype=np.float64)
     t_axis_cache: dict[int, np.ndarray] = {}
 
-    def tone(freq: float, n: int, vel: float) -> np.ndarray:
+    def tone(freq: float, n: int, vel: float, lift_s: float | None = None) -> np.ndarray:
         # `n` is the EXACT slice length in samples: re-deriving it from a
         # duration in seconds (int(dur * sr)) loses one sample on ~9% of
         # durations (float round-trip) and misshapes the += into a crash.
@@ -114,18 +132,37 @@ def render_notes(
         env = np.ones(n)
         a = min(n, max(1, int((0.003 + 0.009 * (1.0 - vel)) * sr)))
         env[:a] = np.linspace(0.0, 1.0, a, endpoint=False)
-        # key-lift fade; the decay itself lives on each partial below
-        # (higher partials die faster, like a string)
+        # velocity -> brightness: a hard hammer leaves more energy in the
+        # upper partials (a softer exponent), a soft one sounds darker
+        expo = DARK_EXPO - (DARK_EXPO - BRIGHT_EXPO) * vel
+        # key-lift fade for a SHORT note: the damper sits on the string
+        # and the decay is cut. A HELD note (lift_s given) instead steps
+        # down softly to the string's own resonance level — the pedal lets
+        # it ring — and fades only at the tail's end.
         r = min(n - a, int((0.06 + 0.04 * (1.0 - vel)) * sr))
-        if r > 0:
-            env[n - r :] *= np.linspace(1.0, 0.0, r)
+        if lift_s is None:
+            if r > 0:
+                env[n - r :] *= np.linspace(1.0, 0.0, r)
+        else:
+            lift = min(n, int(lift_s * sr))
+            if lift < n:
+                # the hammer's direct sound stops; the string rings on at
+                # ~60% of its current level, then the tail fades out over
+                # its second half (a pedal lift, not a damper slam)
+                step = min(n - lift, max(1, int(0.025 * sr)))
+                env[lift : lift + step] *= np.linspace(1.0, 0.60, step)
+                env[lift + step :] *= 0.60
+                rest = n - lift - step
+                if rest > 0:
+                    half = rest // 2
+                    env[lift + step + half :] *= np.linspace(1.0, 0.0, rest - half, endpoint=False)
         wave = np.zeros(n)
         for k in range(1, 7):
             fk = freq * k * np.sqrt(1.0 + 0.0004 * k * k)
             if fk > sr / 2:
                 break
             tau = 0.9 / k**0.8
-            wave += k**-1.7 * np.exp(-idx / tau) * np.sin(2 * np.pi * fk * idx)
+            wave += k**-expo * np.exp(-idx / tau) * np.sin(2 * np.pi * fk * idx)
         return (0.25 + 0.75 * vel) * env * wave
 
     for n in notes:
@@ -136,15 +173,18 @@ def render_notes(
         # random walk of the tuning, so the render stays reproducible
         start = n.start + 0.018 * (1.0 - vel)
         # the damper sits the key a touch early; the duration keeps its
-        # proportion from the actual (shifted) onset
+        # proportion from the actual (shifted) onset. A HELD note keeps
+        # ringing past the lift (pedal): its tail is written too.
         dur = max(0.03, n.duration * 0.97)
-        end = start + dur
+        held = n.duration >= HELD_MIN_S
+        tail = min(PEDAL_TAIL_MAX_S, PEDAL_TAIL_FACTOR * n.duration) if held else 0.0
+        end = start + dur + tail
         cents = 4.0 * np.sin(n.start * 12.9898) + 2.5 * np.sin(n.start * 4.898)
         f = float(440.0 * 2.0 ** ((int(n.midi) + transpose - 69 + cents / 100.0) / 12.0))
         i0, i1 = max(0, int(start * sr)), min(length, int(end * sr))
         if i1 <= i0:
             continue
-        y[i0:i1] += tone(f, i1 - i0, vel)
+        y[i0:i1] += tone(f, i1 - i0, vel, lift_s=(dur if held else None))
     peak = float(np.max(np.abs(y))) if len(y) else 0.0
     if peak > 0:
         y *= 0.85 / peak
