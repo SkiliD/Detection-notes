@@ -114,8 +114,8 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         # on the scrolling staff
         seg = live_thread.segmenter
         assert seg is not None and seg.notes, "no note detected during live"
-        assert win.piano_live._bar_items, "the live piano roll stayed empty"
-        assert win.staff_live.layout().notes, "the live staff stayed empty"
+        assert win.page_live.piano_live._bar_items, "the live piano roll stayed empty"
+        assert win.page_live.staff_live.layout().notes, "the live staff stayed empty"
 
         win.on_stop_live()
         assert _pump_until(qapp, lambda: win.result is not None, timeout=60), (
@@ -176,11 +176,11 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
         # the live staff engraves the consumed grid (the staff reads
         # grid.bpm — any drift of the publication would show here)
         assert _pump_until(
-            qapp, lambda: win.staff_live._grid is win._live_grid, timeout=5
+            qapp, lambda: win.page_live.staff_live._grid is win._live_grid, timeout=5
         ), "the live staff did not receive the published grid"
         # the published meter reaches the status label, next to the beat count
-        assert win._live_grid.meter.label in win.label_live_status.text(), (
-            f"meter absent from the live status : {win.label_live_status.text()}"
+        assert win._live_grid.meter.label in win.page_live.label_status.text(), (
+            f"meter absent from the live status : {win.page_live.label_status.text()}"
         )
         # clean stop: the take finishes its analysis during THIS test,
         # else the queued event delivers during the next test
@@ -215,26 +215,26 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
         # empty, so a widget count says nothing) — the big name flips
         # between answer and invite as the fake singer breathes, it is not
         # pumpable
-        assert _pump_until(qapp, lambda: len(win.finder_session.history) > 0, timeout=60), (
+        assert _pump_until(qapp, lambda: len(win.page_finder.session.history) > 0, timeout=60), (
             "no note confirmed by the note finder"
         )
         # the lit key is the fake melody's (A3 C4 D4 E4), never a number:
         # the piano keyboard is the only displayed answer
-        assert win.finder_keys._active <= {57, 60, 62, 64}
-        assert win.label_finder_note.text() != ""
-        assert "🎹" in win.finder_history.item(0).text()
+        assert win.page_finder.keys._active <= {57, 60, 62, 64}
+        assert win.page_finder.label_note.text() != ""
+        assert "🎹" in win.page_finder.history.item(0).text()
 
         win.on_close_finder()
         assert win.stack.currentWidget() is win.page_home
-        assert win.finder_thread is None
-        assert win.finder_keys._active == set()
-        assert win.label_finder_note.text() == tr("ui finder idle")
+        assert win.page_finder.thread is None
+        assert win.page_finder.keys._active == set()
+        assert win.page_finder.label_note.text() == tr("ui finder idle")
         assert not exported, "the note finder must not export anything"
         assert win.result is None, "the note finder must not analyze anything"
     finally:
-        if win.finder_thread is not None and win.finder_thread.isRunning():
-            win.finder_thread.stop()
-            win.finder_thread.wait(3000)
+        if win.page_finder.thread is not None and win.page_finder.thread.isRunning():
+            win.page_finder.thread.stop()
+            win.page_finder.thread.wait(3000)
 
 
 def test_metronome_follows_detected_bpm(qapp):
@@ -247,17 +247,17 @@ def test_metronome_follows_detected_bpm(qapp):
         notes = []
         for i in range(5):
             notes.append(type("N", (), {"start": i * 0.5})())
-        win.chk_metronome.setChecked(True)  # builds the Metronome
+        win.page_live.chk_metronome.setChecked(True)  # builds the Metronome
         try:
             assert win.metronome is not None
             win._follow_detected_bpm(120.0)
             assert win.metronome.bpm == 120.0
-            assert win.spin_bpm.value() == 120
+            assert win.page_live.spin_bpm.value() == 120
             # the spin box is a silent follower: dragging it still works
-            win.spin_bpm.setValue(100)
+            win.page_live.spin_bpm.setValue(100)
             assert win.metronome.bpm == 100.0
         finally:
-            win.chk_metronome.setChecked(False)
+            win.page_live.chk_metronome.setChecked(False)
             assert win.metronome is None
     finally:
         win.close()
@@ -429,15 +429,15 @@ def test_live_accuracy_history_is_displayed(qapp):
 
     win = mw.MainWindow()
     try:
-        assert win.label_live_accuracy.text() != ""
+        assert win.page_live.label_accuracy.text() != ""
         win._on_live_note((60.1, 262.0))
         win._on_live_note((60.2, 263.0))
-        txt = win.label_live_accuracy.text()
+        txt = win.page_live.label_accuracy.text()
         # mean of 10 and 20 cents on C4: any language, no history-dependence
         assert ("C4 / Do4" in txt or "Do4 / C4" in txt) and "15" in txt
         win.accuracy.reset()
         win._refresh_live_accuracy()
-        assert win.label_live_accuracy.text() == tr("ui accuracy empty")
+        assert win.page_live.label_accuracy.text() == tr("ui accuracy empty")
     finally:
         win.close()
 
@@ -599,13 +599,13 @@ def test_live_keyboard_marks_expected_pitch(qapp):
         win._live_t = 0.5
         win._on_live_note((60.0, 261.63))
         # dead-on pitch -> green (tuning feedback, not only the expected match)
-        assert win.piano_live_keys._active_colors[60] == MATCH_COLOR
+        assert win.page_live.piano_live_keys._active_colors[60] == MATCH_COLOR
 
         win._on_live_note((62.0, 293.66))
         # wrong note: red however pure
-        assert win.piano_live_keys._active_colors[62] == MISMATCH_COLOR
+        assert win.page_live.piano_live_keys._active_colors[62] == MISMATCH_COLOR
         # +20 cents on the right note: amber (NEAR), not a binary match
         win._on_live_note((60.2, 264.6))
-        assert win.piano_live_keys._active_colors[60] == AMBER_COLOR
+        assert win.page_live.piano_live_keys._active_colors[60] == AMBER_COLOR
     finally:
         win.close()

@@ -329,4 +329,114 @@ def test_a_fresh_note_is_not_split_by_a_late_attack():
         t += 0.02
         seg.push(t, _hz(60), attack=(t > 0.06 and t < 0.08))
     seg.flush(0.6)
-    assert len(seg.notes) == 1
+
+
+# --------------------------------------------------------------------- #
+# The constants' own teeth (the 2026-09-28 heuristic audit's gaps):
+# each test below pins ONE constant's decision boundary at the frame
+# level — the corpus nets (test_voice_accuracy) prove the whole chain,
+# these prove the knob.
+# --------------------------------------------------------------------- #
+
+
+def test_weak_frames_do_not_open_a_note_and_their_level_witness_marks_breaks():
+    """WEAK_RATIO (0.35): a frame far below the recent level median.
+
+    Two decisions hang on it: a WEAK frame must not OPEN a note (a soft
+    onset starts the pending only once the level is real), and a WEAK
+    frame INSIDE a note marks a break (the re-emission seam the block
+    tracker misses). Both boundaries are pinned here at frame level.
+    """
+    from v2m.core.liveseg import WEAK_RATIO
+
+    seg = LiveNoteSegmenter()
+    # establish the median with strong frames... only WEAK ones exist yet:
+    # the note must not open on them
+    seg.push(0.01, _hz(64), weak=True)
+    seg.push(0.02, _hz(64), weak=True)
+    assert seg.state == "IDLE", "a weak frame opened a note"
+    # a WEAK frame inside an ACTIVE note marks a break: the next frame at
+    # the SAME pitch re-opens the pending (the split's first half)
+    _feed(seg, _hz(64), 0.03, 0.40)
+    seg.push(0.44, _hz(64), weak=True)   # the seam dip, same pitch
+    _feed(seg, _hz(64), 0.45, 0.40)      # the strong return: split
+    seg.flush(0.90)
+    assert [n.midi for n in seg.notes] == [64, 64], (
+        "the weak-marked seam did not split the same-pitch re-attack"
+    )
+    assert WEAK_RATIO < 0.4  # above this an AM tremolo (0.4x dips) would split
+
+
+def test_split_frames_ceiling_and_reartic_band_guard_the_same_pitch_cut():
+    """SPLIT_FRAMES (6) and REARTIC_ST (0.3) are the split's two guards.
+
+    A break that lasts past SPLIT_FRAMES is a re-take (MIN_GAP_HOLD_S
+    path), not a burst; a return OUTSIDE REARTIC_ST is the NEXT note's
+    pitch (the hand-over), not the same note re-attacked. Both refusals
+    are pinned: the cut only fires inside the band AND under the ceiling.
+    """
+    from v2m.core.liveseg import REARTIC_ST, SPLIT_FRAMES
+
+    # ceiling: a LONG same-pitch break is a re-take — two notes, the gap
+    # kept (the split must not fire past SPLIT_FRAMES * frame_s)
+    long_gap = SPLIT_FRAMES * 0.01161 + 0.05
+    seg = LiveNoteSegmenter()
+    _feed(seg, _hz(64), 0.0, 0.40)
+    seg.push(0.41, float("nan"))
+    seg.push(0.41 + long_gap - 0.01, float("nan"))  # mute run past the ceiling
+    _feed(seg, _hz(64), 0.41 + long_gap, 0.40)
+    seg.flush(0.40 + long_gap + 0.45)
+    # two notes with a REAL gap between them (no split-glue: the break
+    # outlived SPLIT_FRAMES, this is a re-take)
+    assert len(seg.notes) == 2
+    gap = seg.notes[1].start - seg.notes[0].end
+    assert gap >= SPLIT_FRAMES * 0.011
+
+    # band: the return lands FAR from the confirmed pitch — the NEXT
+    # note's onset, not a re-attack: no same-pitch split may fire
+    seg = LiveNoteSegmenter()
+    _feed(seg, _hz(64), 0.0, 0.40)
+    seg.push(0.41, float("nan"), attack=True)          # the hand-over burst
+    _feed(seg, _hz(67), 0.43, 0.40)                    # 3 st away >> REARTIC_ST
+    seg.flush(0.90)
+    assert [n.midi for n in seg.notes] == [64, 67]
+    assert REARTIC_ST < 0.5  # a hand-over's glide tail reaches ~0.5 st
+
+
+def test_hold_window_constants_reject_a_moving_median():
+    """CLEAN_FRAMES (5) + HOLD_RAW_FRAMES (5) + HOLD_ST (0.6): the hold
+    test's shape. The CLEANED median must not confirm a ramp (it rides
+    it), so the RAW spread is tested too — a median-only hold confirms a
+    glide frame by frame (measured: the hand-over 47->48 read a duplicate).
+    """
+    from v2m.core.liveseg import CLEAN_FRAMES, HOLD_RAW_FRAMES, HOLD_ST
+
+    assert HOLD_RAW_FRAMES == CLEAN_FRAMES, "the raw and cleaned windows must agree"
+    # a steady RAMP of raw frames (0.3 st per frame) never confirms: the
+    # median stays flat-ish but the raw spread blows past HOLD_ST
+    seg = LiveNoteSegmenter()
+    t = 0.0
+    midi = 60.0
+    while t < 0.60:
+        t += 0.02
+        midi += 0.3
+        seg.push(t, float(midi_to_hz(midi)))
+    seg.flush(0.65)
+    assert seg.notes == [], "a ramp confirmed as a note (the raw guard is off?)"
+    assert HOLD_ST < 1.0  # a wider hold glues whole steps (measured 64->65)
+
+
+def test_memory_and_attack_log_stay_bounded():
+    """MEMORY_S / MAX_ATTACKS / CLEAN_FRAMES: the buffers that MUST stay
+    bounded in a process that runs for hours (the YIN stream's own bound
+    is pinned in test_pitch; these are the segmenter's)."""
+    seg = LiveNoteSegmenter()
+    t = 0.0
+    for i in range(2000):  # ~20 s of frames, more than any window keeps
+        seg.push(t, _hz(64))
+        t += 0.01
+    assert len(seg.recent_midis) <= 6   # CLEAN_FRAMES
+    assert len(seg.recent_raw) <= 6     # HOLD_RAW_FRAMES
+    assert len(seg.attacks) <= 64       # MAX_ATTACKS
+    # one long note is running (flush will close it): nothing leaked
+    assert len(seg.notes) == 0

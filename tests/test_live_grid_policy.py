@@ -108,7 +108,7 @@ def test_cli_adapter_does_not_rederive_the_grid(monkeypatch):
     on the pre-dedup code, `_on_event` called `estimate_bpm_live` itself
     and this test failed.
     """
-    import v2m.live as live_mod
+    import v2m.cli as live_mod  # the CLI live adapter lives there now
 
     calls: list[str] = []
     monkeypatch.setattr(

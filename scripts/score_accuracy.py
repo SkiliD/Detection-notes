@@ -50,6 +50,14 @@ import numpy as np
 
 import v2m
 from v2m.core import audio_io
+from v2m.core.audit import (
+    compare_fingerprints,
+    golden_path,
+    load_golden,
+    replay_fingerprint,
+    save_golden,
+    segmentation_fingerprint,
+)
 from v2m.core.i18n import tr_figure
 from v2m.core.notes import ATTACK_TOL_S, MIN_UNCONFIRMED_S
 from v2m.core.onsets import detect_attacks
@@ -295,61 +303,11 @@ def truth_accuracy(path: str, truth_path: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-def segmentation_fingerprint(result) -> dict:
-    """The segmentation numbers that must stay stable from one pass to the next.
+# The audit engine (fingerprints, golden I/O, comparison) lives in
+# `v2m.core.audit` — the FROZEN format is core, the script only prints
+# it. Imported at the top like every other v2m piece.
+# --------------------------------------------------------------------------- #
 
-    Tuples become lists: the fingerprint also goes to JSON (--golden) and
-    must survive the json.dumps/json.loads round-trip.
-    """
-    return {
-        "tempo_bpm": result.tempo.bpm if result.tempo else None,
-        "meter": result.meter.label if result.meter else None,
-        "key": result.key.best.label if result.key else None,
-        "notes": [
-            [round(n.start, 4), round(n.duration, 4), n.midi, n.figure, round(n.strength, 6)]
-            for n in result.notes
-        ],
-        "rests": [
-            [round(r.start, 4), round(r.duration, 4), r.figure]
-            for r in (getattr(result, "rests", None) or [])
-        ],
-    }
-
-
-def golden_path(audio: str) -> Path:
-    """A take's golden fingerprint lives beside it: <audio>.golden.json."""
-    return Path(audio).with_suffix(".golden.json")
-
-
-def load_golden(audio: str) -> dict | None:
-    """The recorded fingerprint, None when it does not exist yet."""
-    path = golden_path(audio)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def replay_fingerprint(path: str, use_attacks: bool) -> dict:
-    """A full second pass (re-decoding included, no artifact written)."""
-    y = audio_io.load_file(path)
-    result = analyze_signal(y, audio_io.SR, source=path, opts=AnalyzeOptions(use_attacks=use_attacks))
-    return segmentation_fingerprint(result)
-
-
-def compare_fingerprints(first: dict, second: dict) -> list[str]:
-    """The differences between two passes, as readable lines (empty = stable)."""
-    lines = []
-    for field in ("tempo_bpm", "meter", "key"):
-        if first[field] != second[field]:
-            lines.append(f"  {field} : {first[field]} -> {second[field]}")
-    for label, key in (("note", "notes"), ("respiration", "rests")):
-        if len(first[key]) != len(second[key]):
-            lines.append(f"  {key} : {len(first[key])} -> {len(second[key])}")
-            continue
-        for i, (a, b) in enumerate(zip(first[key], second[key])):
-            if a != b:
-                lines.append(f"  {label} {i + 1} : {a} -> {b}")
-    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -410,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         current = segmentation_fingerprint(result)
         if golden is None:
             # first visit: TODAY's fingerprint becomes the reference
-            golden_path(args.audio).write_text(json.dumps(current, indent=2), encoding="utf-8")
+            save_golden(args.audio, current)
             print("")
             print(f"Golden fingerprint created: {golden_path(args.audio)}")
         else:

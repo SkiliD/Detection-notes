@@ -2,31 +2,63 @@
 
 The script does not re-implement the stages: it reads them from the
 `progress` callback of `analyze_signal`. This test therefore compares
-the labels the pipeline ACTUALLY publishes to what the script shows —
-if a stage is renamed or added, the table follows (and the test checks
-it), with no list to maintain here.
+the labels the pipeline ACTUALLY published — read from the script's own
+JSON — to the table printed for the SAME run.
 
-A single script call covers the rich case (mean + cProfile + JSON):
-every run pays the interpreter and the numba compilation, so the suite
-keeps to a few seconds.
+The script runs IN THIS PROCESS: `main()` is imported from
+`scripts/profile_analysis.py` and called directly, no subprocess. Two
+reasons, both measured:
+- the conftest language sandbox is process-local, so a subprocess read
+  the user's real `~/.v2m_lang` and could answer in English while this
+  file's assertions assume one language — the structural hazard behind
+  the single failure of `test_table_json_and_profiler` under load;
+- the expected labels come from the script's own JSON (`data["stages"]`),
+  so ONE analysis chain feeds both sides where the old test re-ran
+  `analyze_signal` a second time just to collect labels.
+
+A single `main()` call covers the rich case (mean + cProfile + JSON) in
+a few seconds; the 2 s discarded warm-up stays (it is part of the run
+the table describes).
+
+The "Heaviest stage: …" trailer repeats one row's label on purpose; the
+body filter must drop it by its REAL prefix, else the heaviest PIPELINE
+stage (pYIN, on a loaded machine) counts twice and fails "duplicated".
+The filter used to match a French prefix the script never printed —
+dead code whose double count stayed hidden only because `file decoding`
+(a script row, not a pipeline label) kept winning.
 """
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import json
-import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 import pytest
 import soundfile as sf
 
 from conftest import SR, silence, sine_note
-from v2m.core.audio_io import SR as ANALYSIS_SR
-from v2m.core.pipeline import analyze_signal
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "profile_analysis.py"
+
+
+def _load_script() -> ModuleType:
+    """Import the script as a module: `main()` runs in THIS process."""
+    spec = importlib.util.spec_from_file_location("profile_analysis", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import the profiling script: {SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+profile_script = _load_script()
 
 
 def _wav(tmp_path) -> str:
@@ -39,92 +71,102 @@ def _wav(tmp_path) -> str:
     return str(path)
 
 
-def _run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(SCRIPT.parents[1]),
-    )
-
-
-def _pipeline_stages(wav: str) -> list[str]:
-    """The stages the pipeline announces on this file, closing callback dropped.
-
-    The last call (fraction 1.0, "Done") only closes the last stage: the
-    timer drops it, hence `[:-1]`.
-    """
-    labels: list[str] = []
-    y, _ = sf.read(wav, dtype="float32")
-    from v2m.core.i18n import tr
-
-    analyze_signal(y, ANALYSIS_SR, progress=lambda f, m: labels.append(m))
-    assert labels[-1] == tr("progress done")  # the closing callback, any language
-    return labels[:-1]
+def _run_main(*args: str) -> tuple[int, str, str]:
+    """Run the script's main() in-process; capture what it prints."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = profile_script.main(list(args))
+    return rc, out.getvalue(), err.getvalue()
 
 
 def test_table_json_and_profiler(tmp_path):
     wav = _wav(tmp_path)
     report = tmp_path / "mesures.json"
-    proc = _run(wav, "--repeat", "2", "--profile", "--top", "3", "--json", str(report))
-    assert proc.returncode == 0, proc.stderr
-    out = proc.stdout
+    rc, out, err = _run_main(
+        wav, "--repeat", "2", "--profile", "--top", "3", "--json", str(report)
+    )
+    data = json.loads(report.read_text(encoding="utf-8"))
 
-    # stage table: every one of the pipeline's, one row each
-    assert "Stage" in out and "TOTAL" in out and "Heaviest stage" in out
-    assert "file decoding" in out
-    assert "export (5 artifacts" in out
-    assert "warm-up" in out, "the default warm-up must be announced"
-    assert "mean over 2 runs" in out
-    # each stage occupies ONE table row — the TOTAL row
-    # "Heaviest stage : <label>" repeats a label on purpose, it
-    # must not count as a second stage (timing flake otherwise: depending
-    # on the machine, any stage can be the heaviest).
+    # The FLAKE CAPTURE: this test failed once under machine load (green
+    # again on re-run and -p no:randomly — environment, not the code). To
+    # capture its state at the NEXT failure, every assertion below goes
+    # through `_expect(cond, msg)`: at the first broken condition the full
+    # state (return code, stdout, stderr, JSON) is dumped in the message.
+    def _expect(cond: bool, msg: str) -> None:
+        if not cond:
+            raise AssertionError(
+                f"FLAKE CAPTURE — {msg}\n"
+                f"--- returncode={rc}\n"
+                f"--- stderr:\n{err[-2000:]}\n"
+                f"--- stdout:\n{out}\n"
+                f"--- json:\n{json.dumps(data, ensure_ascii=False, indent=1)}"
+            )
+
+    _expect(rc == 0, "main returned 0")
+    # stage table: every one of the pipeline's, one row each. The labels
+    # come from the script's own JSON — the SAME run that printed the
+    # table (no second analysis, no subprocess re-reading the language).
+    _expect("Stage" in out and "TOTAL" in out and "Heaviest stage" in out, "table header")
+    _expect("file decoding" in out, "file decoding row")
+    _expect("export (5 artifacts" in out, "export row")
+    _expect("warm-up" in out, "the default warm-up must be announced")
+    _expect("mean over 2 runs" in out, "mean over 2 runs")
+    # each stage occupies ONE table row — the "Heaviest stage:" trailer
+    # repeats a label on purpose, the body filter drops it (see module
+    # docstring: timing flake otherwise, any stage can be the heaviest).
     body_lines = [
-        line for line in out.splitlines() if not line.startswith("Étape la plus lourde")
+        line for line in out.splitlines() if not line.startswith("Heaviest stage")
     ]
-    for label in _pipeline_stages(wav):
-        assert sum(label in line for line in body_lines) == 1, (
-            f"stage missing or duplicated : {label}"
+    for label in (row["label"] for row in data["stages"]):
+        _expect(
+            sum(label in line for line in body_lines) == 1,
+            f"stage missing or duplicated : {label}",
         )
-    assert "Done" not in out  # closing callback: never a row
-    assert "20%" in out  # the fractions come from the callback, not a copy
+    _expect("Done" not in out, "closing callback: never a row")
+    _expect("20%" in out, "fractions come from the callback, not a copy")
 
     # cProfile: project code on one side, libraries on the other
-    assert "Project code" in out and "Libraries" in out
+    _expect("Project code" in out and "Libraries" in out, "cProfile sections")
 
     # per-stage memory peak (tracemalloc, Python allocations): the column
     # is in the table, the total in the JSON — the profile covers CPU
     # AND memory
-    assert "Mem peak" in out and "Mem peak" in out
-    data = json.loads(report.read_text(encoding="utf-8"))
-    assert data["runs"] == 2
-    assert data["audio_s"] == pytest.approx(1.5, abs=0.05)
-    assert data["n_notes"] >= 3
-    assert data["total_s"] > 0
-    assert data["peak_mib"] > 0
+    _expect("Mem peak" in out, "Mem peak column")
+    _expect(data["runs"] == 2, "runs == 2")
+    _expect(data["audio_s"] == pytest.approx(1.5, abs=0.05), f"audio_s {data['audio_s']}")
+    _expect(data["n_notes"] >= 3, f"n_notes {data['n_notes']}")
+    _expect(data["total_s"] > 0, "total_s > 0")
+    _expect(data["peak_mib"] > 0, "peak_mib > 0")
     stages = data["stages"]
-    assert stages[0]["label"] == "file decoding"
+    _expect(stages[0]["label"] == "file decoding", "first stage is decoding")
     # >= 0: a nearly free stage (rest detection) may
     # measure under the JSON's write resolution — 0.0 is legitimate.
-    assert all(row["seconds"] >= 0 for row in stages)
+    _expect(all(row["seconds"] >= 0 for row in stages), "negative stage seconds")
     # the decoding, outside the trace, carries a null peak; the analyzed
     # stages (pYIN at least) carry a positive one
-    assert stages[0]["peak_mib"] == 0.0
-    assert any(row["peak_mib"] > 0 for row in stages[1:-1])
-    assert sum(row["share_pct"] for row in stages) == pytest.approx(100.0, abs=0.5)
-    assert any(row["fraction"] is not None for row in stages)
-    assert data["profile"] and isinstance(data["profile"][0]["project_code"], bool)
+    _expect(stages[0]["peak_mib"] == 0.0, f"decoding peak {stages[0]['peak_mib']}")
+    _expect(
+        any(row["peak_mib"] > 0 for row in stages[1:-1]),
+        "no analyzed stage carries a memory peak",
+    )
+    _expect(
+        sum(row["share_pct"] for row in stages) == pytest.approx(100.0, abs=0.5),
+        f"share sum {sum(row['share_pct'] for row in stages)}",
+    )
+    _expect(any(row["fraction"] is not None for row in stages), "no fraction published")
+    _expect(
+        bool(data["profile"]) and isinstance(data["profile"][0]["project_code"], bool),
+        "profile rows carry project_code",
+    )
 
 
 def test_bad_inputs_exit_cleanly(tmp_path):
-    missing = _run(str(tmp_path / "absent.wav"))
-    assert missing.returncode == 1
-    assert "introuvable" in missing.stderr
+    rc, _out, err = _run_main(str(tmp_path / "absent.wav"))
+    assert rc == 1
+    assert "introuvable" in err
 
     text_file = tmp_path / "notes.txt"
     text_file.write_text("pas de l'audio", encoding="utf-8")
-    wrong = _run(str(text_file))
-    assert wrong.returncode == 1
-    assert "Format non pris en charge" in wrong.stderr
+    rc, _out, err = _run_main(str(text_file))
+    assert rc == 1
+    assert "Format non pris en charge" in err

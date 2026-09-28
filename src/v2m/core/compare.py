@@ -32,6 +32,11 @@ alone outlined most notes of a take the engine read identically.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from v2m.core.liveseg import LiveNote
+    from v2m.core.notes import Note
 
 # The live segmenter's dating lead, in seconds (see module docstring).
 LIVE_DATING_LEAD_S = 0.10
@@ -50,8 +55,8 @@ class Move:
     else — a real pitch change or an onset beyond the match window.
     """
 
-    live: object
-    final: object
+    live: "LiveNote"
+    final: "Note"
     onset_shift_s: float
     reason: str
 

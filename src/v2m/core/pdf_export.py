@@ -88,14 +88,15 @@ def export_pdf(musicxml_path: str | Path, pdf_path: str | Path) -> str:
     if not musicxml_path.exists():
         raise PdfExportError(tr("err file not found").format(path=musicxml_path))
 
-    if name == "LilyPond":
-        cmd_args = [cmd, "-o", str(pdf_path.with_suffix("")), str(musicxml_path)]
-    else:  # MuseScore
-        cmd_args = [cmd, "-o", str(pdf_path), str(musicxml_path)]
-
+    # the argv stays a LITERAL list at the run() call site: the docs
+    # guard audits every production subprocess launch, and a reviewable
+    # launch carries its argv in line (the head is the external tool's
+    # resolved command — never sys.executable, never a .py payload)
+    out_arg = str(pdf_path.with_suffix("")) if name == "LilyPond" else str(pdf_path)
     try:
         proc = subprocess.run(
-            cmd_args, capture_output=True, text=True, timeout=120,
+            [cmd, "-o", out_arg, str(musicxml_path)],
+            capture_output=True, text=True, timeout=120,
             check=False,
         )
     except FileNotFoundError:

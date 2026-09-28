@@ -232,6 +232,7 @@ class LiveNoteSegmenter:
         self.frame_s = frame_s
 
         self.state = "IDLE"
+        self.last_frame_t: float | None = None  # ANY frame (voiced or not): the now
         self.pending_start: float | None = None
         self.pending_midis: list[float] = []
         self.pending_times: list[float] = []
@@ -258,6 +259,10 @@ class LiveNoteSegmenter:
              weak: bool = False) -> str:
         """Advance one frame. Return 'on', 'off' or ''.
 
+        `self.last_frame_t` is stamped HERE, for every frame (mute ones
+        included): it is the segmenter's own "now", the freshness clock
+        of `heard()`.
+
         `attack` is the live attack evidence (onsets.AttackTracker); it is
         what makes a re-articulated note separable from a held one, and what
         dates the onset at the consonant instead of at the moment the pitch
@@ -271,6 +276,7 @@ class LiveNoteSegmenter:
         second re-articulation witness, for the seams the level tracker
         misses because the dip straddled two capture blocks.
         """
+        self.last_frame_t = t
         ev = ""
         if attack:
             self.attacks.append(t)
@@ -723,6 +729,29 @@ class LiveNoteSegmenter:
         midi = int(round(self.note_pitch))
         if not on_piano(midi):
             return None
+        return float(midi), self.last_hz
+
+    def heard(self, max_age_s: float = 0.5) -> tuple[float, float] | None:
+        """(float midi, hz) of the RAW pitch last seen, or None when stale.
+
+        The instant, PRE-cleaning reading — one YIN frame, no median, no
+        state machine — for displays that must answer "what is the mic
+        hearing RIGHT NOW" even when the segmenter holds nothing (a
+        glide between notes, a wavering beginner tone, a quiet voice
+        whose frames the hysteresis has not accepted yet). Median and
+        confirmation are DELIBERATE here: this is the mic's ear, not the
+        take's notes — it must not invent a note, and a stale reading
+        (older than `max_age_s` against the segmenter's own frame clock,
+        `last_frame_t` — mute frames included) returns None rather than
+        repeat a pitch the voice left seconds ago.
+        """
+        if self.last_hz != self.last_hz or self.last_hz <= 0:
+            return None
+        if self.last_frame_t is None or self.last_voiced_t is None:
+            return None
+        if self.last_frame_t - self.last_voiced_t > max_age_s:
+            return None
+        midi = hz_to_midi(self.last_hz)
         return float(midi), self.last_hz
 
     def recent_midi(self) -> float | None:

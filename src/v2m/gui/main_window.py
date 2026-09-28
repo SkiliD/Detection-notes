@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
@@ -39,9 +38,10 @@ from ..core.playback import NotePlayer, PlaybackSession
 from ..core.report import engrave_pdf, export_result
 from ..core import takes
 from ..core.takes import live_export_dir, live_take_name
-from .finder_session import FinderSession
+from .finder_page import FinderPage
+from .live_page import LIVE_SILENCE_WARN_S, LivePage
 from .live_session_controller import LiveSessionController
-from .pages import build_analyze_page, build_finder_page, build_home_page, build_live_page
+from .pages import build_analyze_page, build_home_page
 from .widgets import (
     MISMATCH_COLOR,
     NOTE_TEXT_COLOR,
@@ -53,12 +53,6 @@ from .widgets import (
 )
 
 AUDIO_EXTS = audio_io.AUDIO_EXTS  # single source of truth (core.audio_io)
-
-# The finder's one answer, in two states: a recognised note is large and in
-# the accent tint, the invite to sing stays calm — the same waiting style the
-# rest of the app uses (`#6a7480`, italic) so it never reads as a result.
-FINDER_NOTE_STYLE = f"font-size: 34pt; font-weight: bold; color: {NOTE_TEXT_COLOR};"
-FINDER_IDLE_STYLE = "font-size: 15pt; font-style: italic; color: #6a7480;"
 
 
 def audio_filter() -> str:
@@ -232,8 +226,6 @@ class LiveThread(QThread):
 class MainWindow(QMainWindow):
     playbackFailed = pyqtSignal(str)
     label_file: QLabel
-    label_live_status: QLabel
-    piano_live: Any
     result: AnalysisResult | None
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -244,21 +236,14 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.result = None            # last AnalysisResult
-        # the live take's render state has ONE owner (LiveRenderState): a
-        # NEW take swaps the whole object, so a stale value from the previous
-        # take is structurally impossible — the `win._live_*` readers (the
-        # tests included) keep their faces through the properties below
         self._live = LiveRenderState()
         self.analyze_thread: AnalysisThread | None = None
         self.live_thread: LiveThread | None = None
-        self.finder_thread: LiveThread | None = None   # note finder (no take kept)
+        # the note finder's state lives IN the page (finder_page.FinderPage:
+        # session + thread) — the window keeps no finder mirror
         self.source_path: str | None = None
         self._signal_cache: dict[str, np.ndarray] = {}  # source -> decoded audio
-        # the finder's readings and memory: one deep module (what the big
-        # name shows, what the history keeps), the window renders it
-        self.finder_session = FinderSession()
         self.accuracy = AccuracyHistory()  # per-note mean |cents|, live take
-        self._accuracy_plot_target: str = "live"  # where a plot click seeks
         self._last_take_entry: dict | None = None  # persisted accuracy entry
         self._analysis_started_at: float = 0.0  # cache-status timing (perf_counter)
         self._replay_worker = None  # ReplayWorker: the take's own cross-check
@@ -275,11 +260,6 @@ class MainWindow(QMainWindow):
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(33)  # ~30 fps playhead updates
         self._play_timer.timeout.connect(self._on_play_tick)
-        # live follow: ~20 fps scrolling window + cursor (the audio thread is
-        # far too uneven to drive the view directly)
-        self._live_timer = QTimer(self)
-        self._live_timer.setInterval(50)
-        self._live_timer.timeout.connect(self._on_live_tick)
 
         # Single error banner shown above every page (no modal error popups).
         self.stack = QStackedWidget()
@@ -294,8 +274,33 @@ class MainWindow(QMainWindow):
 
         self.page_home = build_home_page(self)
         self.page_analyze = build_analyze_page(self)
-        self.page_live = build_live_page(self)
-        self.page_finder = build_finder_page(self)
+        # The live page is a Page module (ADR 0010's full shape): it owns
+        # its widgets AND its behavior — the window composes it, injecting
+        # the callables it cannot own. All widget readers (tests, smoke
+        # script, the window itself) go through `page_live.<widget>`;
+        # `_live_timer` is the page's timer.
+        self.page_live = LivePage(
+            self,
+            state_getter=lambda: self._live,
+            thread_getter=lambda: self.live_thread,
+            on_stop=self.on_stop_live,
+            toggle_metronome=self.on_metronome_toggled,
+            metronome_bpm_changed=self.on_metronome_bpm_changed,
+            piano_volume_changed=self.on_piano_volume_changed,
+            expected_note=self._expected_midi,
+            silence_message=lambda msg: self.statusBar().showMessage(msg, 2_500),
+            gate_rms=lambda: audio_io.GATE_RMS,
+        )
+        # The finder page is a Page module (ADR 0010's shape): it owns its
+        # widgets AND its behavior — window dependencies injected (where
+        # home is, where errors go), thread injected as a factory. The
+        # window composes; it keeps no finder mirror.
+        self.page_finder = FinderPage(
+            thread_factory=LiveThread,
+            go_home=lambda: self.stack.setCurrentWidget(self.page_home),
+            show_error=self._on_error,
+            clear_error=self.error_banner.clear,
+        )
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_analyze)
         self.stack.addWidget(self.page_live)
@@ -439,32 +444,18 @@ class MainWindow(QMainWindow):
         self.label_volume.setText(tr("ui volume"))
         self.slider_volume.setToolTip(tr("ui volume tooltip"))
         self.label_play_pos.setText(tr("ui play pos"))
-        self.btn_stop_live.setText(tr("ui stop live"))
+        self.page_live.btn_stop_live.setText(tr("ui stop live"))
         self.btn_finder.setText(tr("ui finder button"))
-        self.btn_finder_back.setText(tr("ui back home"))
-        self.label_finder_hint.setText(tr("ui finder hint"))
-        self.label_finder_history.setText(tr("ui finder history"))
-        self._refresh_finder_history()
-        self.live_indicator.retranslate()
-        self.label_live_hint.setText(tr("ui live hint"))
+        self.page_finder.retranslate()
+        self.page_live.retranslate()
         self._refresh_live_accuracy()
-        self.chk_metronome.setText(tr("ui metronome"))
-        self.label_bpm.setText(tr("ui bpm unit"))
-        self.spin_bpm.setToolTip(tr("ui metronome tooltip"))
-        self.chk_record_audio.setText(tr("ui record audio"))
-        self.chk_record_audio.setToolTip(tr("ui record audio tooltip"))
-        if self.chk_metronome.isChecked():
-            self.label_beat.setText(tr("ui beat count").format(beat="—"))
-        else:
-            self.label_beat.setText("")
         self._refresh_expected_note(self._live_t)
-        self._refresh_finder_state()
-        for view in (self.staff, self.staff_live):
+        for view in (self.staff, self.page_live.staff_live):
             view.setToolTip(tr("ui staff tooltip"))
-        for roll in (self.piano, self.piano_live):
+        for roll in (self.piano, self.page_live.piano_live):
             roll.set_axis_labels(tr("ui axis note"), tr("ui axis time"))
         if self.live_thread is None or not self.live_thread.isRunning():
-            self.label_live_status.setText(tr("ui mic preparing"))
+            self.page_live.label_status.setText(tr("ui mic preparing"))
         self.results.retranslate()
 
     # ------------------------------------------------------------------
@@ -1014,7 +1005,7 @@ class MainWindow(QMainWindow):
         self.accuracy.reset()
         # the audio box is read HERE (before the capture starts): the choice
         # belongs to the take, not to the moment its export happens
-        self._live.record_audio = self.chk_record_audio.isChecked()
+        self._live.record_audio = self.page_live.chk_record_audio.isChecked()
         # the NEW capture is the DSP priority: a replay running (its
         # real-time wait loop costs the same drain as the capture) is
         # BROKEN HERE, not joined — the worker skips the rest of its take
@@ -1034,106 +1025,68 @@ class MainWindow(QMainWindow):
         # reset the live state BEFORE the status label: the meter shown at
         # start must be the new take's fallback, not the previous take's
         self._live_grid = BeatGrid(120.0)  # until the take publishes its own
-        self.label_live_status.setText(
+        self.page_live.label_status.setText(
             tr("ui live progress").format(
                 t="00:00", notes=0, meter=self._live_grid.meter.label
             )
         )
         # live pitch curve on the scrolling piano roll (drop the previous take's)
-        self.piano_live.begin_live()
-        self.piano_live.set_notation_mode(True)
-        self.staff_live.clear()
+        self.page_live.piano_live.begin_live()
+        self.page_live.piano_live.set_notation_mode(True)
+        self.page_live.staff_live.clear()
         if self._live_curve is not None:
-            self.piano_live.removeItem(self._live_curve)
-        self._live_curve = self.piano_live.plot(
+            self.page_live.piano_live.removeItem(self._live_curve)
+        self._live_curve = self.page_live.piano_live.plot(
             [], [], pen=None, symbol="o", symbolSize=3, symbolBrush=(120, 200, 255, 180)
         )
         self.live_thread = LiveThread()
-        self.live_thread.blockStats.connect(self._on_live_block)
-        self.live_thread.pitchFrame.connect(self._on_live_pitch)
-        self.live_thread.noteFrame.connect(self._on_live_note)
+        self.live_thread.blockStats.connect(self.page_live.on_block)
+        self.live_thread.pitchFrame.connect(self.page_live.on_pitch)
+        self.live_thread.noteFrame.connect(self.page_live.on_note)
         self.live_thread.gridChanged.connect(self._on_live_grid)
         self.live_thread.analysisFinished.connect(self._on_live_analysis_done)
-        self.live_thread.failed.connect(self._on_live_failed)
+        self.live_thread.failed.connect(self.page_live.on_failed)
         self.live_thread.start()
-        self._live_timer.start()
+        self.page_live.start_timer()
         # clicking a plot point seeks the live roll to that note
         try:
-            self.accuracy_plot.pointClicked.disconnect()
+            self.page_live.accuracy_plot.pointClicked.disconnect()
         except TypeError:
             pass
-        self.accuracy_plot.pointClicked.connect(self._on_accuracy_point_clicked)
+        self.page_live.accuracy_plot.pointClicked.connect(self._on_accuracy_point_clicked)
+
+    # The live page's behavior lives in gui/live_page.py (LivePage): the
+    # 50 ms tick, the note render, the pitch cloud, the silence watch and
+    # the accuracy history. The window keeps the `_on_live_*` names the
+    # metronome wire-up and the tests use — thin delegations; the timer
+    # itself is created and owned by the page.
+    LIVE_SILENCE_WARN_S = LIVE_SILENCE_WARN_S  # re-exported for the tests
 
     def _on_live_block(self, t: float, rms: float) -> None:
-        """Telemetry from each captured block: capture time + input level."""
-        self._live_t = t
-        self.live_indicator.update_rms(rms)
-        self._watch_live_silence(t, rms)
-
-    # silence longer than this during a capture is told to the singer (the
-    # "am I being heard?" check): a phrase gap of a take's own character
-    # sits well under it (~0.36 s on chant.wav, up to the 2 s rest case in
-    # the truth corpus) — past 2 s the mic is mute, slipped or facing away
-    LIVE_SILENCE_WARN_S = 2.0
+        self.page_live.on_block(t, rms)
 
     def _watch_live_silence(self, t: float, rms: float) -> None:
-        """Warn the singer when the capture hears NOTHING for over 2 s.
+        self.page_live.watch_silence(t, rms)
 
-        A voiced block resets the clock silently. Past the threshold the
-        status bar says WHEN the sound stopped and for HOW LONG — checked
-        at block rate (~46 ms), so the message stops growing with the
-        next block and the take itself is never touched (an advisory, not
-        a fault). State lives on LiveRenderState (the take's render
-        state): one swap per take, nothing to forget in `on_start_live`.
-        """
-        live = self._live
-        if rms > audio_io.GATE_RMS:
-            live.silence_since = None
-            return
-        if live.silence_since is None:
-            live.silence_since = t
-            return
-        silent_for = t - live.silence_since
-        if silent_for < self.LIVE_SILENCE_WARN_S:
-            return
-        self.statusBar().showMessage(
-            tr("ui live silence").format(s=int(silent_for)),
-            2_500,  # refreshed by the next block's message anyway
-        )
+    def _on_live_tick(self) -> None:
+        self.page_live.on_tick()
+
+    def _on_live_note(self, cur) -> None:
+        self.page_live.on_note(cur)
+
+    def _on_live_pitch(self, t: float, hz: float) -> None:
+        self.page_live.on_pitch(t, hz)
+
+    def _refresh_live_accuracy(self) -> None:
+        self.page_live.refresh_accuracy()
+
+    def _on_live_failed(self, msg: str) -> None:
+        self.page_live.on_failed(msg)
 
     def _on_live_grid(self, grid) -> None:
         """Consume the take's live grid (published by its owner, LiveTake)."""
         self._live_grid = grid
         self._sync_metronome_to_take(grid)
-
-    def _on_live_tick(self) -> None:
-        """Live follow (~20 fps): render the take, scroll, move the cursor.
-
-        Single owner of the live rendering: the audio thread only publishes
-        notes, so the roll stays in sync even if a block or an event is late.
-        """
-        thr = self.live_thread
-        if thr is None or thr.segmenter is None:
-            return
-        t = self._live_t or thr.elapsed()
-        notes = thr.segmenter.notes
-        preview = thr.segmenter.active_note(t)
-        self.piano_live.set_notes(notes)
-        self.piano_live.set_live_preview(preview)
-        midis = [n.midi for n in notes[-64:]]
-        if preview is not None:
-            midis.append(preview.midi)
-        self.piano_live.set_live_pitch_range(midis)
-        self.piano_live.set_live_cursor(t)
-        self.staff_live.set_live(notes, preview, grid=self._live_grid)
-        self._refresh_expected_note(t)
-        # the big counter answers "is it following me?" at a glance
-        self.live_indicator.set_note_count(len(notes))
-        self.label_live_status.setText(
-            tr("ui live progress").format(
-                t=clock(t), notes=len(notes), meter=self._live_grid.meter.label
-            )
-        )
 
     def _on_accuracy_point_clicked(self, t: float) -> None:
         """A plot point is a way back into the take: seek the right roll.
@@ -1148,75 +1101,7 @@ class MainWindow(QMainWindow):
             return
         if self.live_thread is not None and self.live_thread.isRunning() and t < self._live_t:
             self.stack.setCurrentWidget(self.page_live)
-            self.piano_live.set_live_cursor(max(0.0, t))
-
-    def _on_live_note(self, cur: LiveFrame) -> None:
-        """Render the recognition state published by the live engine."""
-        midi = int(round(cur[0])) if cur else None
-        hz = cur[1] if cur else float("nan")
-        # the deviation shown is the INSTANTANEOUS one (last smoothed
-        # frames): correcting the pitch mid-note must move the needle now
-        seg = self.live_thread.segmenter if self.live_thread else None
-        inst = seg.recent_midi() if seg is not None else None
-        cents_inst = cents_deviation(inst) if inst is not None else None
-        self.live_indicator.update_note(cur[0] if cur else None, hz, cents_inst)
-        midi = midi if midi is not None and on_piano(midi) else None
-        cents = cents_deviation(cur[0]) if cur else None
-        onset = None
-        if seg is not None:
-            onset = seg.note_start if seg.note_start is not None else seg.pending_start
-        self.accuracy.add(midi, cents, onset=onset if onset is not None else self._live_t)
-        # the key carries the tuning feedback: a wrong note is red however
-        # pure, a right/unknown one is green/amber/red by its cents error
-        color = None
-        if midi is not None:
-            expected = self._expected_midi(self._live_t)
-            if expected is not None and midi != expected:
-                color = MISMATCH_COLOR
-            else:
-                # instantaneous when the stream provides it, note median
-                # otherwise (no info must not read as "out of tune")
-                color = tuning_color(cents_inst if cents_inst is not None else cents)
-        self.piano_live_keys.set_pressed(
-            {midi} if midi is not None else (),
-            colors=({midi: color} if color is not None else None),
-        )
-        self._refresh_live_accuracy()
-
-    def _refresh_live_accuracy(self) -> None:
-        """Per-note mean deviation so far: the text line and the plot.
-
-        Both views read the same `AccuracyHistory`, so they can never
-        disagree; the line shows the last six notes, the plot the whole take
-        in singing order. Each plot point carries its note's onset so a
-        click seeks the roll there (live) or to the results playhead (after
-        the final analysis).
-        """
-        items = list(self.accuracy.points)
-        self.accuracy_plot.set_points(items, times=self.accuracy.onsets)
-        if not items:
-            self.label_live_accuracy.setText(tr("ui accuracy empty"))
-            return
-        parts = "  ".join(
-            f"{note_display_pair(m)} {v:.0f}¢" for m, v in reversed(items[-6:])
-        )
-        self.label_live_accuracy.setText(tr("ui accuracy title") + " " + parts)
-
-    def _on_live_pitch(self, t: float, hz: float) -> None:
-        if hz == hz and hz > 0:  # NaN check
-            self._live_pitch_t.append(t)
-            self._live_pitch_m.append(69 + 12 * np.log2(hz / 440.0))
-            # keep the pitch cloud inside the scrolling window
-            while self._live_pitch_t and t - self._live_pitch_t[0] > self.piano_live.LIVE_SPAN:
-                self._live_pitch_t.pop(0)
-                self._live_pitch_m.pop(0)
-            if self._live_curve is not None:
-                self._live_curve.setData(self._live_pitch_t, self._live_pitch_m)
-
-    def _on_live_failed(self, msg: str) -> None:
-        self._live_timer.stop()
-        self.label_live_status.setText(tr("ui mic preparing"))
-        self._on_error(msg)
+            self.page_live.piano_live.set_live_cursor(max(0.0, t))
 
     def _on_live_analysis_done(self, res, signal_bytes: bytes = b"") -> None:
         """The shared LiveTake finished its final analysis: show and export it.
@@ -1240,10 +1125,10 @@ class MainWindow(QMainWindow):
             # previous take's signal", the 2026-09-26 stale-WAV family
         )
         if verdict.keep_timer:
-            self._live_timer.start()  # a newer capture owns the view: keep it
+            self.page_live.start_timer()  # a newer capture owns the view: keep it
         else:
-            self._live_timer.stop()
-        self.piano_live.set_live_preview(None)
+            self.page_live.stop_timer()
+        self.page_live.piano_live.set_live_preview(None)
         self.result = res
         # LIVE vs FINAL, made visible: the notes the live segmenter had
         # confirmed are compared to the offline reading of the same take
@@ -1357,7 +1242,7 @@ class MainWindow(QMainWindow):
         stem_name = self.take_ctl.pump_replay(
             capture_running=self.live_thread is not None
             and self.live_thread.isRunning(),
-            timer_running=self._live_timer.isActive(),
+            timer_running=self.page_live.timer_active(),
             worker_running=(
                 self._replay_worker is not None and self._replay_worker.isRunning()
             ),
@@ -1407,7 +1292,7 @@ class MainWindow(QMainWindow):
             moves = compare_match(live_notes, res.notes, res.grid)
             self._last_take_live_notes = live_notes  # for the report block
             for mv in moves:
-                self.piano_live.outline_note(
+                self.page_live.piano_live.outline_note(
                     mv.live.start, mv.live.end, mv.live.midi, ACCENT
                 )
         except Exception:  # a display nicety must never break the results
@@ -1442,13 +1327,13 @@ class MainWindow(QMainWindow):
         )
 
     def on_stop_live(self) -> None:
-        self._live_timer.stop()
-        self.piano_live.set_live_preview(None)
-        self.piano_live_keys.set_pressed()
-        self.staff_live.clear()
+        self.page_live.stop_timer()
+        self.page_live.piano_live.set_live_preview(None)
+        self.page_live.piano_live_keys.set_pressed()
+        self.page_live.staff_live.clear()
         if self.metronome is not None:
             self.metronome.stop()
-            self.label_beat.setText(tr("ui beat count").format(beat="—"))
+            self.page_live.label_beat.setText(tr("ui beat count").format(beat="—"))
         if self.live_thread is not None:
             # the final analysis arrives QUEUED (AnalysisThread), i.e. AFTER
             # this handler returns and the capture reference is gone: the
@@ -1461,7 +1346,7 @@ class MainWindow(QMainWindow):
             if seg is not None and seg.notes:
                 self._closed_live_notes = list(seg.notes)
             if self.live_thread.isRunning():
-                self.label_live_status.setText(tr("ui stopping"))
+                self.page_live.label_status.setText(tr("ui stopping"))
                 self.live_thread.stop()
                 # the capture thread also drains its queued blocks: give it
                 # room before the reference goes away
@@ -1631,24 +1516,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def on_metronome_toggled(self, on: bool) -> None:
         """Start/stop the click; the spin box follows the same state."""
-        self.spin_bpm.setEnabled(on)
+        self.page_live.spin_bpm.setEnabled(on)
         if on:
-            self.clicks.start()
+            self.page_live.clicks.start()
             # the take's live grid (published by LiveTake) seeds the tempo
             bpm = self._live_grid.bpm
             if bpm and bpm != 120.0:
-                self.spin_bpm.blockSignals(True)
-                self.spin_bpm.setValue(int(round(bpm)))
-                self.spin_bpm.blockSignals(False)
-            self.metronome = Metronome(self.spin_bpm.value(), scheduler=qt_scheduler())
+                self.page_live.spin_bpm.blockSignals(True)
+                self.page_live.spin_bpm.setValue(int(round(bpm)))
+                self.page_live.spin_bpm.blockSignals(False)
+            self.metronome = Metronome(self.page_live.spin_bpm.value(), scheduler=qt_scheduler())
             self.metronome.on_beat = self._on_metronome_beat
             self.metronome.start()
         else:
             if self.metronome is not None:
                 self.metronome.stop()
                 self.metronome = None
-            self.clicks.stop()
-            self.label_beat.setText("")
+            self.page_live.clicks.stop()
+            self.page_live.label_beat.setText("")
 
     def on_metronome_bpm_changed(self, bpm: int) -> None:
         """A tempo change applies immediately, without restarting the count."""
@@ -1661,9 +1546,9 @@ class MainWindow(QMainWindow):
         The spin box stays the user's override: it is updated silently, so
         the user can still drag it away and be heard.
         """
-        self.spin_bpm.blockSignals(True)
-        self.spin_bpm.setValue(int(round(bpm)))
-        self.spin_bpm.blockSignals(False)
+        self.page_live.spin_bpm.blockSignals(True)
+        self.page_live.spin_bpm.setValue(int(round(bpm)))
+        self.page_live.spin_bpm.blockSignals(False)
         if self.metronome is not None:
             self.metronome.bpm = bpm
 
@@ -1682,100 +1567,28 @@ class MainWindow(QMainWindow):
         self.metronome.beats_per_measure = grid.meter.n_slots
 
     def _on_metronome_beat(self, beat: int, accent: bool) -> None:
-        self.clicks.play(accent)
-        self.label_beat.setText(tr("ui beat count").format(beat=beat))
+        self.page_live.clicks.play(accent)
+        self.page_live.label_beat.setText(tr("ui beat count").format(beat=beat))
 
     # ------------------------------------------------------------------
-    # Note finder: "which note is this?" on a piano keyboard, nothing else
+    # Note finder: "which note is this?" on a piano keyboard, nothing else.
+    # The page is a Page module (gui/finder_page.py): it owns its widgets,
+    # its state (session + thread) and its behavior. The window keeps the
+    # public method names the home button and the tests use — thin
+    # delegations, no finder logic left here.
     # ------------------------------------------------------------------
     def on_open_finder(self) -> None:
-        self.error_banner.clear()
         self.stack.setCurrentWidget(self.page_finder)
-        if not self._finder_running():
-            self.on_toggle_finder()
+        self.page_finder.open()
 
     def on_toggle_finder(self) -> None:
-        if self._finder_running():
-            self._stop_finder()
-            return
-        self.error_banner.clear()
-        self._set_finder_note(None)
-        self.finder_session.reset()
-        self._refresh_finder_history()
-        self.finder_thread = LiveThread()
-        self.finder_thread.noteFrame.connect(self._on_finder_note)
-        self.finder_thread.failed.connect(self._on_finder_failed)
-        self.finder_thread.start()
-        self._refresh_finder_state()
+        self.page_finder.toggle()
 
     def on_close_finder(self) -> None:
-        """Leave the finder: the capture is dropped, never analysed nor exported."""
-        self._stop_finder()
-        self.stack.setCurrentWidget(self.page_home)
+        self.page_finder.leave()
 
-    def _finder_running(self) -> bool:
-        return self.finder_thread is not None and self.finder_thread.isRunning()
-
-    def _stop_finder(self) -> None:
-        if self.finder_thread is not None and self.finder_thread.isRunning():
-            self.finder_thread.stop()
-            self.finder_thread.wait(6000)
-        self.finder_thread = None
-        self._refresh_finder_state()
-
-    def _refresh_finder_state(self) -> None:
-        """The finder's chrome for the current language and mic state.
-
-        One writer for the three things that must agree: the button (its
-        label, and its weight — the inviting action is the filled one), the
-        state line, and the note area, which falls back on the invite when
-        nothing is being sung.
-        """
-        running = self._finder_running()
-        self.btn_finder_toggle.setText(
-            tr("ui finder stop") if running else tr("ui finder start")
-        )
-        self.btn_finder_toggle.setStyleSheet(action_button_style(primary=not running))
-        self.label_finder_state.setText(tr("ui finder live") if running else tr("ui finder off"))
-        if not running:
-            self._set_finder_note(None)
-
-    def _on_finder_note(self, cur: LiveFrame) -> None:
-        """Render the note being sung, and retain only distinct recent pitches.
-
-        Two readings, two jobs. The BIG name answers "which note am I singing
-        right now" — that includes a note still CONFIRMING (the PENDING
-        window): hiding it read as "the mic is ignored" (user report),
-        because a singer sees nothing between the instant they start a note
-        and its 90 ms confirmation. It reads `current()`, the same immediate
-        feedback the live page's indicator uses.
-        The HISTORY (and the lit key) records only notes the segmenter
-        CONFIRMED (`confirmed()`): a mic rumble slips a few periodic frames
-        but never holds, so it lights nothing and enters nothing — measured
-        on a synthetic thump train (50-400 ms): zero confirmed notes.
-        """
-        seg = self.finder_thread.segmenter if self.finder_thread is not None else None
-        confirmed = seg.confirmed() if seg is not None else None
-        midi = int(round(confirmed[0])) if confirmed else None
-        # the immediate reading for the big name (PENDING answers too)
-        forming = cur[0] if cur else None
-        forming_midi = int(round(forming)) if forming is not None else None
-        display = forming_midi if forming_midi is not None else midi
-        # TWO contracts, one tick: the NAME answers from the pending plateau
-        # ("the mic hears you" — hiding it read as "the mic is ignored"),
-        # the KEY lights on the confirmed reading only (a rumble holds no
-        # 90 ms, so it can show a flickering name and still stay dark)
-        self.finder_session.feed(forming_midi, midi)
-        self._set_finder_note(display, light=midi is not None)
-        self._refresh_finder_history()
-
-    def _refresh_finder_history(self) -> None:
-        self.finder_history.clear()
-        if not self.finder_session.history:
-            self.finder_history.addItem(QListWidgetItem(tr("ui finder history empty")))
-            return
-        for midi in reversed(self.finder_session.history):
-            self.finder_history.addItem(QListWidgetItem(f"🎹  {note_display_pair(midi)}"))
+    def _set_finder_note(self, midi_float, light: bool = True) -> None:
+        self.page_finder.set_note(midi_float, light)
 
     def _expected_midi(self, t: float) -> int | None:
         if self.result is None:
@@ -1788,35 +1601,11 @@ class MainWindow(QMainWindow):
     def _refresh_expected_note(self, t: float) -> None:
         expected = self._expected_midi(t)
         if expected is None:
-            self.label_live_expected.setText(tr("ui expected none"))
+            self.page_live.label_expected.setText(tr("ui expected none"))
         else:
-            self.label_live_expected.setText(
+            self.page_live.label_expected.setText(
                 tr("ui expected note").format(note=note_display_pair(expected))
             )
-
-    def _set_finder_note(self, midi_float, light: bool = True) -> None:
-        """Show the note as a name and, when `light`, a lit key.
-
-        The invite and the answer do not share a style: a 34 pt accent name is
-        an answer, and a first-run page must not shout one it does not have.
-        `light=False` shows the name alone: the key records only CONFIRMED
-        notes — a pending plateau must answer "the mic hears you" without
-        convincing the keyboard, and a rumble's fleeting periodic frames
-        light nothing at all (the anti-rumble contract).
-        """
-        midi = None if midi_float is None else int(round(float(midi_float)))
-        if midi is None or not on_piano(midi):
-            self.label_finder_note.setText(tr("ui finder idle"))
-            self.label_finder_note.setStyleSheet(FINDER_IDLE_STYLE)
-            self.finder_keys.set_pressed()
-            return
-        self.label_finder_note.setText(note_display_pair(midi))
-        self.label_finder_note.setStyleSheet(FINDER_NOTE_STYLE)
-        self.finder_keys.set_pressed({midi} if light else None)
-
-    def _on_finder_failed(self, msg: str) -> None:
-        self._stop_finder()
-        self._on_error(msg)
 
     # ------------------------------------------------------------------
     # Drag & drop

@@ -112,7 +112,7 @@ class Meter:
     def slot_quarters(self) -> float:
         """Duration of one displayed beat in quarter beats (6/8 -> 1.5)."""
         if self.is_compound:
-            return 3.0 * UNIT_QUARTERS[8]  # temps pointé
+            return 3.0 * UNIT_QUARTERS[8]  # dotted beat
         return UNIT_QUARTERS[self.beat_unit]
 
     @property

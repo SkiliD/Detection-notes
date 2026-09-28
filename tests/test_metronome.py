@@ -215,7 +215,7 @@ def test_metronome_beats_follow_published_grid_meter(qapp):
 
     win = mw.MainWindow()
     try:
-        win.chk_metronome.setChecked(True)
+        win.page_live.chk_metronome.setChecked(True)
         metro = win.metronome
         assert metro is not None
         try:
@@ -224,7 +224,7 @@ def test_metronome_beats_follow_published_grid_meter(qapp):
             win._sync_metronome_to_take(BeatGrid(120.0, Meter(4, 4)))
             assert metro.beats_per_measure == 4
         finally:
-            win.chk_metronome.setChecked(False)
+            win.page_live.chk_metronome.setChecked(False)
     finally:
         win.close()
 
@@ -282,10 +282,10 @@ def test_live_accuracy_line_and_plot_agree(qapp):
         win._on_live_note((60.1, 262.0))
         win._on_live_note((62.4, 295.0))
         items = list(win.accuracy.means.items())
-        assert win.accuracy_plot._points == items
-        assert len(win.accuracy_plot._points) == 2
+        assert win.page_live.accuracy_plot._points == items
+        assert len(win.page_live.accuracy_plot._points) == 2
         # each point carries its note's onset: the click-to-seek data
-        assert len(win.accuracy_plot._times) == 2
+        assert len(win.page_live.accuracy_plot._times) == 2
     finally:
         win.close()
 

@@ -3,7 +3,11 @@
 import numpy as np
 
 from conftest import SR
-from v2m.core.tempo import detect_tempo, refine_bpm_with_onsets
+from v2m.core.tempo import (
+    _REFINE_CACHE,
+    detect_tempo,
+    refine_bpm_with_onsets,
+)
 
 
 def click_track(bpm: float, dur_s: float = 20.0, sr: int = SR) -> np.ndarray:
@@ -54,6 +58,30 @@ def test_refine_bpm_keeps_close_value():
 def test_refine_bpm_too_few_onsets():
     """Fewer than 3 attacks: no refinement, BPM unchanged."""
     assert refine_bpm_with_onsets(np.array([0.0, 0.5]), 120.0) == 120.0
+
+
+def test_refine_cache_answers_identically_and_invalidates_on_change():
+    """The refine scan's cache is a no-drift device: a content hit re-answers
+    the SAME number (a fresh array from the same evidence still hits), and
+    changed onsets re-scan instead of serving a stale reading."""
+    _REFINE_CACHE.clear()
+    try:
+        onsets = np.arange(16) * (60.0 / 120.0)
+        first = refine_bpm_with_onsets(onsets, 117.5)
+        assert _REFINE_CACHE, "the first call must fill the cache"
+        # a FRESH array with the same content hits the cache: same answer
+        second = refine_bpm_with_onsets(onsets.copy(), 117.5)
+        assert second == first, "a cache hit must re-answer the same reading"
+        # changed onsets are a different key: re-scan, no stale reading. (A
+        # small or uniform shift is absorbed by the polish regression — same
+        # slope, same BPM — the refine is DESIGNED to ignore it; the drift
+        # test needs an input whose true reading moves: a second tempo.)
+        _REFINE_CACHE.clear()
+        drifted = np.concatenate([onsets[:10], 5.0 + np.arange(6) * 0.42])
+        other = refine_bpm_with_onsets(drifted, 117.5)
+        assert other != first, "changed onsets must re-scan, not serve the cached bpm"
+    finally:
+        _REFINE_CACHE.clear()  # no cross-test pollution of the one-entry cache
 
 
 def test_bpm_in_range():

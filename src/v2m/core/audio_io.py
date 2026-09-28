@@ -94,6 +94,7 @@ class LiveCapture:
     samplerate: int = 44_100          # device sample rate
     blocksize: int = 1024             # ~23 ms per block
     sr: int = SR                      # analysis sample rate
+    gate_rms: float = GATE_RMS        # the silence gate (blocks below it are mute)
     on_block: Optional[Callable[[np.ndarray, float], None]] = None
     # The InputStream opener (same contract as `sd.InputStream`). None = the
     # real device; a replay or a test injects its own fake — never by

@@ -1,7 +1,9 @@
 """Widget assembly for the application's GUI pages.
 
 Page builders create widgets and connect user actions; MainWindow owns state,
-navigation, capture, analysis, and rendering callbacks.
+navigation, capture, analysis, and rendering callbacks. The note finder is
+NOT here: its page is a Page module (`gui/finder_page.py`, FinderPage) that
+owns its widgets and behavior — the window only composes it.
 """
 
 from __future__ import annotations
@@ -17,11 +19,9 @@ import pyqtgraph as pg
 
 from ..core.pdf_export import find_notation_tool
 from ..core.i18n import tr
-from ..core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI
-from .clicks import ClickPlayer
 from .staff import StaffView
 from .widgets import (
-    ACCENT, AccuracyPlot, HINT_CARD_STYLE, LiveIndicator, PianoRoll, PianoView,
+    HINT_CARD_STYLE, PianoRoll, PianoView,
     ResultsPanel, WaveformView, action_button_style,
 )
 
@@ -235,126 +235,4 @@ def build_analyze_page(window) -> QWidget:
     right.addWidget(window.btn_open)
     body.addLayout(right, stretch=1)
     root.addLayout(body, stretch=1)
-    return page
-
-
-def build_live_page(window) -> QWidget:
-    page = QWidget()
-    root = QVBoxLayout(page)
-    top = QHBoxLayout()
-    window.btn_stop_live = QPushButton("")
-    window.btn_stop_live.clicked.connect(window.on_stop_live)
-    top.addWidget(window.btn_stop_live)
-    window.label_live_status = QLabel("")
-    top.addWidget(window.label_live_status, stretch=1)
-    window.label_live_expected = QLabel("")
-    window.label_live_expected.setStyleSheet("color: #9fb3c8; font-size: 9pt;")
-    top.addWidget(window.label_live_expected)
-    root.addLayout(top)
-
-    window.label_live_hint = QLabel("")
-    window.label_live_hint.setStyleSheet(HINT_CARD_STYLE)
-    window.label_live_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    root.addWidget(window.label_live_hint)
-
-    # optional metronome: OFF by default — a singer opens it when working on
-    # regularity, and the status line shows the count during capture
-    metro = QHBoxLayout()
-    window.chk_metronome = QCheckBox("")
-    window.chk_metronome.toggled.connect(window.on_metronome_toggled)
-    metro.addWidget(window.chk_metronome)
-    window.spin_bpm = QSpinBox()
-    window.spin_bpm.setRange(40, 208)
-    window.spin_bpm.setValue(90)
-    window.spin_bpm.valueChanged.connect(window.on_metronome_bpm_changed)
-    metro.addWidget(window.spin_bpm)
-    window.label_bpm = QLabel("")
-    metro.addWidget(window.label_bpm)
-    window.label_beat = QLabel("")
-    window.label_beat.setStyleSheet(f"color: {ACCENT}; font-weight: bold;")
-    metro.addWidget(window.label_beat, stretch=1)
-    metro.addStretch(1)
-    root.addLayout(metro)
-
-    # optional: keep the take's AUDIO beside its artifacts, only in live mode.
-    # The box is read when the take STARTS (a mid-take toggle must not change
-    # what this take writes); label and tooltip are set in `retranslate`.
-    rec = QHBoxLayout()
-    window.chk_record_audio = QCheckBox("")
-    rec.addWidget(window.chk_record_audio)
-    rec.addStretch(1)
-    root.addLayout(rec)
-
-    mid = QHBoxLayout()
-    window.live_indicator = LiveIndicator()
-    mid.addWidget(window.live_indicator, stretch=1)
-    window.piano_live = PianoRoll()
-    mid.addWidget(window.piano_live, stretch=3)
-    root.addLayout(mid, stretch=2)
-
-    # per-note mean deviation so far: the progress signal of the take
-    window.label_live_accuracy = QLabel("")
-    window.label_live_accuracy.setStyleSheet("color: #8a97a5; font-size: 9pt;")
-    root.addWidget(window.label_live_accuracy)
-    # ...and the same deviations over the take's timeline (singing order)
-    window.accuracy_plot = AccuracyPlot()
-    root.addWidget(window.accuracy_plot)
-
-    window.staff_live = StaffView(live=True)
-    root.addWidget(window.staff_live, stretch=2)
-    window.piano_live_keys = PianoView()
-    root.addWidget(window.piano_live_keys)
-    window.clicks = ClickPlayer()
-    return page
-
-
-def build_finder_page(window) -> QWidget:
-    page = QWidget()
-    root = QVBoxLayout(page)
-    top = QHBoxLayout()
-    window.btn_finder_back = QPushButton("")
-    window.btn_finder_back.setCursor(Qt.CursorShape.PointingHandCursor)
-    window.btn_finder_back.clicked.connect(window.on_close_finder)
-    top.addWidget(window.btn_finder_back)
-    window.btn_finder_toggle = QPushButton("")
-    window.btn_finder_toggle.setMinimumHeight(38)
-    window.btn_finder_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-    window.btn_finder_toggle.clicked.connect(window.on_toggle_finder)
-    top.addWidget(window.btn_finder_toggle)
-    window.label_finder_state = QLabel("")
-    window.label_finder_state.setStyleSheet("color: #8a97a5; font-size: 9pt;")
-    top.addWidget(window.label_finder_state)
-    top.addStretch(1)
-    root.addLayout(top)
-
-    window.label_finder_note = QLabel("")
-    window.label_finder_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    window.label_finder_note.setMinimumHeight(66)
-    root.addWidget(window.label_finder_note)
-
-    window.label_finder_hint = QLabel("")
-    window.label_finder_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    window.label_finder_hint.setWordWrap(True)
-    window.label_finder_hint.setMaximumWidth(560)
-    window.label_finder_hint.setStyleSheet(HINT_CARD_STYLE)
-    hint_lay = QHBoxLayout()
-    hint_lay.addStretch(1)
-    hint_lay.addWidget(window.label_finder_hint)
-    hint_lay.addStretch(1)
-    root.addLayout(hint_lay)
-
-    window.label_finder_history = QLabel("")
-    window.label_finder_history.setStyleSheet("color: #9fb3c8; font-weight: bold;")
-    root.addWidget(window.label_finder_history)
-    window.finder_history = QListWidget()
-    window.finder_history.setMaximumHeight(112)
-    window.finder_history.setStyleSheet(
-        "background: #20262e; border: 1px solid #2e3742; border-radius: 6px;"
-    )
-    root.addWidget(window.finder_history)
-    root.addStretch(1)
-
-    window.finder_keys = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
-    window.finder_keys.setMinimumHeight(150)
-    root.addWidget(window.finder_keys, stretch=2)
     return page

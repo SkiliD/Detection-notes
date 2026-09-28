@@ -78,13 +78,13 @@ def test_the_audio_box_is_read_when_the_take_starts():
 
     win = mw.MainWindow()
     try:
-        assert win.chk_record_audio.isChecked() is False  # off by default
-        win.chk_record_audio.setChecked(True)
+        assert win.page_live.chk_record_audio.isChecked() is False  # off by default
+        win.page_live.chk_record_audio.setChecked(True)
         # what `on_start_live` does with the box (no capture started here)
-        win._live_record_audio = win.chk_record_audio.isChecked()
-        win.chk_record_audio.setChecked(False)  # toggled mid-take
+        win._live_record_audio = win.page_live.chk_record_audio.isChecked()
+        win.page_live.chk_record_audio.setChecked(False)  # toggled mid-take
         assert win._live_record_audio is True, "the mid-take toggle changed the choice"
-        assert win.chk_record_audio.text()  # a label in the current language
+        assert win.page_live.chk_record_audio.text()  # a label in the current language
     finally:
         win.close()
 

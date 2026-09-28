@@ -1,6 +1,6 @@
 """The session rules have TEETH: they are pinned, not hoped for.
 
-Two contracts that so far lived only in AGENTS.md:
+Contracts that so far lived only in AGENTS.md:
 
 1. **The repo tracks NO generated artifact** (the .gitignore header:
    "ignore everything that is not a source"). The only versioned JSONs
@@ -23,7 +23,7 @@ Two contracts that so far lived only in AGENTS.md:
    pass guard 3 invisibly. Exemptions are explicit, per (file, literal)
    — an internal identifier declares its reason here.
 
-5. **The suite costs at most 90 s**: the tracking is printed at every run
+5. **The suite has a cost budget**: the tracking is printed at every run
    end (`suite cost: …`) and a GREEN run over budget fails. A slow test
    added becomes an explicit decision, not a silent drift of the dev
    loop.
@@ -32,6 +32,26 @@ Two contracts that so far lived only in AGENTS.md:
    the runtime fallback (`.get(key, key)`) renders the raw key to the
    user instead of raising, so a typo in a key can only be seen
    statically — here, on src/ and scripts/.
+
+7. **Docstrings are in ENGLISH** (2026-09-28 whole-repo sweep): a
+   docstring carrying an accented-French letter in src/ or scripts/
+   (i18n.py exempted — its tables ARE the French) is swept residue and
+   fails. Canonical vocabulary inside a docstring is exempted, as for
+   guard 3.
+
+8. **A subprocess booted by a test is AUDITED against the user's
+   `~/.v2m_lang`**: the conftest language sandbox is process-local, so
+   anything a test boots in a fresh interpreter reads/writes the REAL
+   file (one hash-diff proved the suite clean, 2026-09-28 — the guard
+   keeps it so). Every booting test file is whitelisted with its
+   justification, the booted argv must match the declared kind, and the
+   machine re-verifies the claims (the qt-free probe's module still
+   imports no i18n; a whitelisted v2m script still never calls
+   `get_language`/`set_language`). The same audit covers PRODUCTION
+   code: every `subprocess.*` launch under `src/v2m` (and `scripts/`)
+   needs a whitelisted justification per module — today the single site
+   (pdf_export) runs the user's external engraver, never an
+   interpreter, never i18n.
 """
 
 from __future__ import annotations
@@ -39,6 +59,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,7 +71,10 @@ REPO = Path(__file__).resolve().parent.parent
 # Docstrings and canonical vocabulary (figure "pointée", sol-fa "Ré"...)
 # are exempted by design: they are untenable in English.
 FRENCH_LETTERS = set("àâäéèêëîïôöùûüçœÀÂÄÉÈÊËÎÏÔÖÙÛÜÇŒ")
-CANONICAL = ("pointée", "trente-deuxième", "seizième de soupir", "Ré", "Ré#", "Do", "La")
+CANONICAL = (
+    "pointée", "trente-deuxième", "seizième de soupir", "Ré", "Ré#", "Do", "La",
+    "détaché",  # musical vocabulary quoted as a term (AGENTS.md 2026-09-28 rule)
+)
 CANONICAL_RE = tuple(re.escape(w) + r"\b" for w in CANONICAL)
 
 
@@ -93,16 +117,22 @@ def test_meter_docstring_names_its_stages():
     )
 
 
-def _iter_code_literals(source: str) -> list[tuple[int, str]]:
-    """All CODE literals of a source (docstrings excluded)."""
-    tree = ast.parse(source)
-    # docstrings are the FIRST statement (Constant) of a module/class/function
-    docs: set[int] = set()
+def _docstring_consts(tree: ast.AST) -> list[ast.Constant]:
+    """The first-statement Constants of every module/class/function (docstrings)."""
+    consts: list[ast.Constant] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             body = node.body
             if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-                docs.add(id(body[0].value))
+                consts.append(body[0].value)
+    return consts
+
+
+def _iter_code_literals(source: str) -> list[tuple[int, str]]:
+    """All CODE literals of a source (docstrings excluded)."""
+    tree = ast.parse(source)
+    # docstrings are the FIRST statement (Constant) of a module/class/function
+    docs = {id(const) for const in _docstring_consts(tree)}
     return [
         (node.lineno, node.value)
         for node in ast.walk(tree)
@@ -330,6 +360,52 @@ def _tr_key_offenders(rel: str, source: str, tables: dict) -> list[str]:
     return offenders
 
 
+def _docstring_offenders(path: Path) -> list[tuple[int, str]]:
+    """French docstrings of `path` (accented letters), canonical vocabulary exempted."""
+    hits: list[tuple[int, str]] = []
+    for const in _docstring_consts(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(const.value, str):
+            continue
+        text = const.value
+        if FRENCH_LETTERS & set(text) and not any(re.search(p, text) for p in CANONICAL_RE):
+            hits.append((const.lineno, text))
+    return hits
+
+
+def test_no_french_docstrings_outside_i18n():
+    """No French docstring in src/ or scripts/ — the mirror of guard 3."""
+    offenders: list[str] = []
+    for base in ("src/v2m", "scripts"):
+        for path in sorted((REPO / base).rglob("*.py")):
+            if path.name == "i18n.py":
+                continue
+            for lineno, text in _docstring_offenders(path):
+                offenders.append(f"{path}:{lineno}: {text[:80]!r}")
+    assert not offenders, (
+        "French docstrings in src/scripts — comments and docstrings are in "
+        "ENGLISH (session rule, 2026-09-28 sweep):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_french_docstring_guard_bites():
+    """Guard 7 has TEETH: it bites a French docstring, exempts the canonical."""
+    tmp = Path(tempfile.mkdtemp())
+    bad = tmp / "bad.py"
+    bad.write_text(
+        'def f():\n    """Renvoie le tempo détecté.\n\n    Retourne None sinon.\n    """\n    return None\n',
+        encoding="utf-8",
+    )
+    assert _docstring_offenders(bad), "the guard does not bite?"
+    # canonical vocabulary inside a docstring is exempted (as guard 3)
+    ok = tmp / "ok.py"
+    ok.write_text(
+        'def f():\n    """Label this duration as a noire pointée.\n\n    Sol-fa names stay canonical: Do, Ré, Mi.\n    """\n    return None\n',
+        encoding="utf-8",
+    )
+    assert not _docstring_offenders(ok), "canonical vocabulary must pass"
+
+
 def test_every_tr_literal_key_exists_in_both_language_tables():
     """A mistyped tr() key is seen HERE, not by the user.
 
@@ -379,3 +455,395 @@ def test_tr_key_guard_bites():
     poisoned = cli_src.replace('tr("err file not found")', 'tr("err file not foundd")', 1)
     assert poisoned != cli_src, "the probe has nothing left to inject: did cli.py change?"
     assert _tr_key_offenders("cli.py", poisoned, i18n.STRINGS)
+
+
+# --------------------------------------------------------------------------- #
+# Guard 8: every subprocess a test boots is audited against ~/.v2m_lang
+# --------------------------------------------------------------------------- #
+
+SUBPROCESS_LAUNCHERS = frozenset(
+    {"run", "Popen", "check_output", "check_call", "getoutput", "getstatusoutput"}
+)
+
+# The audited whitelist: test file -> (declared kind, why ~/.v2m_lang is
+# safe). Kinds: "git" (git plumbing only), "code" ([sys.executable, "-c",
+# payload]), "script:<name>.py" (a v2m script — its language-safety is
+# machine-checked below). A NEW subprocess in any test fails the guard
+# until it is audited and listed here; this guard file's own `git
+# ls-files` is audited like any other.
+SUBPROCESS_WHITELIST: dict[str, tuple[str, str]] = {
+    "test_docs_guard.py": (
+        "git",
+        "git ls-files plumbing only (cwd=REPO): no v2m code runs, "
+        "no language state is read or written",
+    ),
+    "test_metronome.py": (
+        "code",
+        "the qt-free proof probe: a fresh interpreter importing "
+        "v2m.core.metronome ONLY (machine-checked below) — metronome "
+        "imports no i18n, so nothing touches the persisted language",
+    ),
+}
+
+
+def _is_sys_executable(node: ast.AST | None) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "executable"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+    )
+
+
+def _subprocess_launches(source: str) -> list[tuple[int, str]]:
+    """(lineno, classified argv) of every subprocess launch in a source.
+
+    Classification is deliberately narrow: a launch the whitelist can
+    review must carry its argv as a LITERAL list whose head is a constant
+    ('git') or sys.executable followed by a constant ('-c' or a .py path).
+    Anything else comes back "unreviewed" and fails the guard — the
+    author rewrites it into a reviewable shape instead of exempting it.
+    """
+    tree = ast.parse(source)
+    launches: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in SUBPROCESS_LAUNCHERS
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+        ):
+            continue
+        argv = node.args[0] if node.args else None
+        first = argv.elts[0] if isinstance(argv, ast.List) and argv.elts else None
+        second = (
+            argv.elts[1]
+            if isinstance(argv, ast.List) and len(argv.elts) > 1
+            else None
+        )
+        if isinstance(first, ast.Constant) and first.value == "git":
+            launches.append((node.lineno, "git"))
+        elif (
+            _is_sys_executable(first)
+            and isinstance(second, ast.Constant)
+            and isinstance(second.value, str)
+        ):
+            if second.value == "-c":
+                launches.append((node.lineno, "code"))
+            elif second.value.endswith(".py"):
+                launches.append((node.lineno, f"script:{Path(second.value).name}"))
+            else:
+                launches.append((node.lineno, "unreviewed (boot target is not .py/-c)"))
+        else:
+            launches.append((node.lineno, "unreviewed (argv is not a literal list)"))
+    return launches
+
+
+def _i18n_touches(path: Path) -> bool:
+    """Does this module CALL get/set/toggle_language (the persisted state)?"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("i18n")
+        for alias in node.names
+        if alias.name in {"get_language", "set_language", "toggle_language"}
+    }
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in names
+        for node in ast.walk(tree)
+    )
+
+
+def _imports_i18n(path: Path) -> bool:
+    """Does this module import i18n AT ALL (the qt-free probe's claim)?"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return any(
+        (isinstance(node, ast.ImportFrom) and (node.module or "").endswith("i18n"))
+        or (
+            isinstance(node, ast.Import)
+            and any(alias.name.endswith("i18n") for alias in node.names)
+        )
+        for node in ast.walk(tree)
+    )
+
+
+def _subprocess_offenders_for(
+    rel: str,
+    launches: list[tuple[int, str]],
+    scripts_dir: Path,
+    whitelist: dict[str, tuple[str, str]] | None = None,
+) -> list[str]:
+    """One test file's launch audit against the whitelist (injectable for bites)."""
+    whitelist = SUBPROCESS_WHITELIST if whitelist is None else whitelist
+    if not launches:
+        return []
+    if rel not in whitelist:
+        kinds = ", ".join(sorted({kind for _, kind in launches}))
+        return [
+            f"{rel}: boots a subprocess ({kinds}) — a fresh interpreter reads/writes "
+            "the user's real ~/.v2m_lang (the conftest sandbox is process-local); "
+            "audit it, then whitelist it in SUBPROCESS_WHITELIST with justification"
+        ]
+    kind, _why = whitelist[rel]
+    offenders: list[str] = []
+    for lineno, actual in launches:
+        # for "script:" the whitelist fixes the SHAPE only — the argv's
+        # actual script is machine-checked below, whichever it names
+        shape_ok = (
+            actual == kind
+            if kind in ("git", "code")
+            else (actual.startswith("script:") and kind.startswith("script:"))
+        )
+        if not shape_ok:
+            offenders.append(
+                f"{rel}:{lineno}: boots {actual!r} but is whitelisted as {kind!r} "
+                "— update the whitelist after re-auditing"
+            )
+        elif actual.startswith("script:"):
+            script = scripts_dir / actual.split(":", 1)[1]
+            if _i18n_touches(script):
+                offenders.append(
+                    f"{rel}:{lineno}: {actual} CALLS the language state — run it "
+                    "in-process (like test_profile_analysis) or sandbox LANG_FILE"
+                )
+    return offenders
+
+
+def _whitelist_claim_offenders() -> list[str]:
+    """The justifications are re-verified, not hoped for."""
+    out: list[str] = []
+    if "test_metronome.py" in SUBPROCESS_WHITELIST and _imports_i18n(
+        REPO / "src" / "v2m" / "core" / "metronome.py"
+    ):
+        out.append(
+            "test_metronome.py's whitelist claim is void: "
+            "src/v2m/core/metronome.py now imports i18n — re-audit the probe"
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Guard 8 (production): every subprocess the PRODUCT boots is audited too
+# --------------------------------------------------------------------------- #
+
+# module path relative to src/v2m (or scripts/) -> why the launch cannot
+# touch the persisted language. The launch itself is machine-checked:
+# its argv must be a literal list whose head is a non-interpreter — a
+# bare command (an external tool), never sys.executable/-c/a .py path.
+PRODUCTION_WHITELIST: dict[str, tuple[str, str]] = {
+    "core/pdf_export.py": (
+        "external-tool",
+        "runs the user's engraver (MuseScore/LilyPond) on a .musicxml — "
+        "an external binary, never an interpreter: it cannot read or "
+        "write ~/.v2m_lang",
+    ),
+}
+
+
+def _production_launches(path: Path) -> list[tuple[int, str]]:
+    """Classify one PRODUCTION file's subprocess launches against the audit.
+
+    A production argv is auditable when its head is a CONSTANT string:
+    a bare external command (pdf_export's engraver cmd, resolved from
+    PATH/install dirs). A sys.executable/-c or a .py target is an
+    interpreter boot BY the product — refused on principle (re-derive in
+    process, or document a real interpreter need). A non-literal argv
+    (a variable, a comprehension) is refused as unreviewable: the author
+    reshapes it rather than exempting it.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in SUBPROCESS_LAUNCHERS
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+        ):
+            continue
+        argv = node.args[0] if node.args else None
+        # the list may be built by name before the call (pdf_export's
+        # engraver argv): audit the LIST NODE, wherever it was assigned —
+        # its head still decides external-tool vs interpreter boot
+        if isinstance(argv, ast.Name):
+            argv = _literal_argv(tree, argv.id)
+        first = argv.elts[0] if isinstance(argv, ast.List) and argv.elts else None
+        # external tool = a constant command OR a command VARIABLE (the
+        # resolved engraver path); interpreter boot = sys.executable, a
+        # '-c' payload or a .py target — refused on principle. Anything
+        # else (a call, a bare string argv) is unreviewable.
+        head_is_command = isinstance(first, (ast.Constant, ast.Name)) and not (
+            isinstance(first, ast.Constant)
+            and (
+                not isinstance(first.value, str)
+                or first.value == "-c"
+                or first.value.endswith(".py")
+            )
+        )
+        if head_is_command and not _is_sys_executable(first):
+            out.append((node.lineno, "external-tool"))
+        else:
+            out.append((node.lineno, "unreviewed (not a constant external command)"))
+    return out
+
+
+def _literal_argv(tree: ast.AST, name: str) -> ast.AST | None:
+    """The literal list assigned to `name` anywhere in the module (module
+    level or any function scope) — None when the argv is not a literal."""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+            and isinstance(node.value, ast.List)
+        ):
+            return node.value
+    return None
+
+
+def test_every_production_subprocess_site_is_audited():
+    """The product boots a process only for an audited, non-interpreter reason.
+
+    Mirror of the test-side guard: pdf_export's engraver is today's only
+    launch; a NEW production subprocess (a helper interpreter, a shelled
+    converter, os.system alias) fails until it earns its whitelist line.
+    """
+    offenders: list[str] = []
+    for base in (REPO / "src" / "v2m", REPO / "scripts"):
+        for path in sorted(base.rglob("*.py")):
+            rel = path.relative_to(REPO).as_posix()
+            # strip the src/v2m prefix (scripts/ paths stay whole)
+            key = rel[len("src/v2m/"):] if rel.startswith("src/v2m/") else rel
+            launches = _production_launches(path)
+            if not launches:
+                continue
+            if key not in PRODUCTION_WHITELIST:
+                kinds = ", ".join(sorted({kind for _, kind in launches}))
+                offenders.append(
+                    f"{rel}: production subprocess ({kinds}) — audit it against "
+                    "~/.v2m_lang and whitelist it in PRODUCTION_WHITELIST"
+                )
+                continue
+            kind, _why = PRODUCTION_WHITELIST[key]
+            for lineno, actual in launches:
+                if actual != kind:
+                    offenders.append(
+                        f"{rel}:{lineno}: boots {actual!r} but is whitelisted "
+                        f"as {kind!r} — re-audit and update PRODUCTION_WHITELIST"
+                    )
+    assert not offenders, (
+        "an unaudited PRODUCTION subprocess:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_production_subprocess_guard_bites():
+    """The production half of guard 8 has TEETH: stranger module, drift."""
+    # a whitelisted module that boots an INTERPRETER is refused: the
+    # product must not need a second of itself (build in memory, no CRLF
+    # coupling to the real file's line endings)
+    interpreter_probe = (
+        "import subprocess, sys\n"
+        "cmd = 'mscore'\n"
+        "argv = [sys.executable, '-c', 'print(1)']\n"
+        "subprocess.run(argv)\n"
+    )
+    tmp = Path(tempfile.mkdtemp())
+    probe = tmp / "probe.py"
+    probe.write_text(interpreter_probe, encoding="utf-8")
+    assert _production_launches(probe) == [(
+        4,
+        "unreviewed (not a constant external command)",
+    )]
+    # a stranger module with an external-tool launch is refused until whitelisted
+    stranger = tmp / "stranger.py"
+    stranger.write_text(
+        "import subprocess\nsubprocess.run(['magick', 'a.png', 'b.png'])\n",
+        encoding="utf-8",
+    )
+    stranger_launches = _production_launches(stranger)
+    assert stranger_launches and stranger_launches[0][1] == "external-tool"
+    # a NAME-built argv is followed to its literal list (pdf_export's shape)
+    named = tmp / "named.py"
+    named.write_text(
+        "import subprocess\n"
+        "cmd = 'mscore'\n"
+        "args = [cmd, '-o', 'out.pdf', 'in.musicxml']\n"
+        "subprocess.run(args)\n",
+        encoding="utf-8",
+    )
+    assert _production_launches(named) == [(4, "external-tool")]
+    # a NON-list argv is refused: unreviewable, reshape it (a command
+    # VARIABLE as list head is fine — pdf_export's shape — a shell string is not)
+    dynamic = tmp / "dynamic.py"
+    dynamic.write_text(
+        "import subprocess\n"
+        "def go(args):\n"
+        "    subprocess.run(args)\n",
+        encoding="utf-8",
+    )
+    assert _production_launches(dynamic) == [(
+        3,
+        "unreviewed (not a constant external command)",
+    )]
+    # the REAL files stay clean: pdf_export classifies as whitelisted kind
+    real = _production_launches(REPO / "src" / "v2m" / "core" / "pdf_export.py")
+    assert real and all(kind == "external-tool" for _, kind in real)
+    """Guard 8: a test boots an interpreter only for an audited reason.
+
+    The conftest language sandbox is process-local: anything booted in a
+    fresh interpreter sees the user's REAL ~/.v2m_lang (read AND write —
+    set_language persists). One md5 of that file before/after a full
+    suite proved the whole net clean (2026-09-28); this guard keeps the
+    property structural: no new boot without an audit entry.
+    """
+    offenders: list[str] = []
+    scripts_dir = REPO / "scripts"
+    for path in sorted((REPO / "tests").rglob("test_*.py")):
+        offenders += _subprocess_offenders_for(
+            path.name, _subprocess_launches(path.read_text(encoding="utf-8")), scripts_dir
+        )
+    offenders += _whitelist_claim_offenders()
+    assert not offenders, (
+        "an unaudited subprocess (the ~/.v2m_lang hazard):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_subprocess_guard_bites():
+    """Guard 8 has TEETH: stranger files, drifting kinds, void claims."""
+    tmp = Path(tempfile.mkdtemp())
+    # 1. an unlisted test file that boots a subprocess is refused
+    assert _subprocess_offenders_for("test_stranger.py", [(12, "code")], tmp)
+    # a file with no launch is never flagged
+    assert not _subprocess_offenders_for("test_stranger.py", [], tmp)
+    # 2. a whitelisted file drifting from its declared kind is refused
+    assert _subprocess_offenders_for("test_metronome.py", [(7, "git")], tmp)
+    assert not _subprocess_offenders_for("test_metronome.py", [(7, "code")], tmp)
+    # 3. a whitelisted SCRIPT that calls the language state is refused;
+    #    a script that only translates is safe (the whitelist is injected:
+    #    the guard file itself is whitelisted "git" and must stay so)
+    toucher = tmp / "toucher.py"
+    toucher.write_text(
+        "from v2m.core.i18n import set_language\nset_language('en')\n",
+        encoding="utf-8",
+    )
+    assert _i18n_touches(toucher)
+    fake_script_whitelist = {"test_x.py": ("script:probe.py", "audited probe")}
+    assert _subprocess_offenders_for(
+        "test_x.py", [(9, "script:toucher.py")], tmp, fake_script_whitelist
+    )
+    clean = tmp / "clean.py"
+    clean.write_text(
+        "from v2m.core.i18n import tr\nprint(tr('key tempo'))\n", encoding="utf-8"
+    )
+    assert not _i18n_touches(clean)
+    assert not _subprocess_offenders_for(
+        "test_x.py", [(9, "script:clean.py")], tmp, fake_script_whitelist
+    )
+    # 4. the qt-free claim is verified against the REAL metronome today
+    assert not _imports_i18n(REPO / "src" / "v2m" / "core" / "metronome.py")

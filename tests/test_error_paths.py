@@ -52,32 +52,55 @@ def _save_sung_wav(tmp_path: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def _fake_mic_env(monkeypatch):
+# The mic is a FakeMic for the WHOLE module (no real audio device): the
+# patch must live at module scope — a function-scoped monkeypatch would
+# make every fixture that needs it function-scoped too, and the shared
+# pYIN payment below must SURVIVE from test to test.
+@pytest.fixture(scope="module", autouse=True)
+def _fake_mic_module():
     from types import SimpleNamespace as NS
 
-    monkeypatch.setattr(audio_io, "sd", NS(InputStream=FakeMic))
+    saved = audio_io.sd
+    audio_io.sd = NS(InputStream=FakeMic)
+    yield
+    audio_io.sd = saved
+
+
+# ONE take, analyzed ONCE: the module's first replay pays pYIN and seeds
+# the evidence cache; both cache-path tests read that same take. Before
+# this fixture, EACH cache-path test seeded a FRESH take (the same pYIN
+# analysis paid twice for the same assertion).
+@pytest.fixture(scope="module", name="sung_wav")
+def _sung_wav_module(tmp_path_factory):
+    return _save_sung_wav(tmp_path_factory.mktemp("error_paths"))
+
+
+@pytest.fixture(scope="module")
+def fresh_replay_row(sung_wav):
+    """The WITHOUT-cache reference reading (finalize path), once per module."""
+    return replay_take(sung_wav)
+
+
+@pytest.fixture(scope="module")
+def cached_replay_row(sung_wav, fresh_replay_row):
+    """The WITH-cache reading (the fresh replay above seeded the cache)."""
+    assert sung_wav.with_suffix(".observation.npz").exists()
+    return replay_take(sung_wav)
 
 
 @pytest.mark.slow  # two full real-time replays of the take
 def test_a_cached_observation_gives_the_same_reading_as_finalize(
-    tmp_path, monkeypatch
+    fresh_replay_row, cached_replay_row
 ):
-    _fake_mic_env(monkeypatch)
-    wav = _save_sung_wav(tmp_path)
-    # reference reading, WITHOUT a cache (LiveTake.finalize path)
-    row_fresh = replay_take(wav)
-    # the replay seeded the take's evidence cache (analyze_file's auto-save
-    # twin): it exists now, and matches this WAV
-    assert wav.with_suffix(".observation.npz").exists()
-    # second replay: the cache path serves the final reading
-    row_cached = replay_take(wav)
     # the offline reading is the SAME: the cache only ever saves time
-    assert row_cached["final_notes"] == row_fresh["final_notes"]
-    assert row_cached["tempo_bpm"] == pytest.approx(row_fresh["tempo_bpm"], abs=1.0)
+    assert cached_replay_row["final_notes"] == fresh_replay_row["final_notes"]
+    assert cached_replay_row["tempo_bpm"] == pytest.approx(
+        fresh_replay_row["tempo_bpm"], abs=1.0
+    )
 
 
-def test_a_corrupt_observation_cache_falls_back_without_error(tmp_path, monkeypatch):
-    _fake_mic_env(monkeypatch)
+def test_a_corrupt_observation_cache_falls_back_without_error(tmp_path):
+    # its OWN take: the test must BREAK a cache, not inherit a good one
     wav = _save_sung_wav(tmp_path)
     wav.with_suffix(".observation.npz").write_bytes(b"not an npz at all")
     # the corrupt cache is worth a missing one: no crash, a full audit
@@ -87,12 +110,14 @@ def test_a_corrupt_observation_cache_falls_back_without_error(tmp_path, monkeypa
     assert wav.with_suffix(".observation.npz").stat().st_size > 100
 
 
-def test_interpret_only_path_agrees_with_the_grid_reading(tmp_path, monkeypatch):
+# `slow` like its sibling: it reads the SAME module fixtures (fresh
+# replay + pYIN + cached replay — the real-time chain IS the evidence),
+# so leaving it in the quick loop made that loop pay the whole chain for
+# one test while its sibling was deselected.
+@pytest.mark.slow
+def test_interpret_only_path_agrees_with_the_grid_reading(cached_replay_row):
     """The cache path produces notes aligned on the grid."""
-    _fake_mic_env(monkeypatch)
-    wav = _save_sung_wav(tmp_path)
-    replay_take(wav)  # seeds the cache
-    row = replay_take(wav)  # cache path
+    row = cached_replay_row
     assert 0.0 <= row["rate"] <= 1.0
     assert row["moved"] + row["off1"] == row["contours"]
 
@@ -172,9 +197,8 @@ def test_the_export_announcement_lists_only_files_that_exist(qapp, monkeypatch, 
         win.close()
 
 
-def test_a_corrupt_coherence_journal_is_reinitialized(qapp, monkeypatch, tmp_path):
+def test_a_corrupt_coherence_journal_is_reinitialized(qapp, tmp_path):
     """An unreadable journal restarts at {}: aggregation never blocked."""
-    _fake_mic_env(monkeypatch)
     (tmp_path / coh.JOURNAL_NAME).write_bytes(b"{corrupted json")
     stem = "live_20260921_090000"
     d = tmp_path / stem

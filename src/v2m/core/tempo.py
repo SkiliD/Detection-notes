@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import librosa
@@ -10,6 +11,10 @@ import numpy as np
 from .meter import dotted_pulse_tempo
 
 BPM_RANGE = (60.0, 180.0)  # beat-track fallback range (a lone voice halves/doubles)
+
+# The refine scan's one-entry cache (see refine_bpm_with_onsets): a repeated
+# call with unchanged onsets/parameters re-answers without re-scanning.
+_REFINE_CACHE: dict[bytes, float] = {}
 
 
 @dataclass
@@ -94,15 +99,31 @@ def refine_bpm_with_onsets(
 
     The scan is VECTORIZED by batches: candidates are stacked so the inner
     loop runs in NumPy over a (batch, n_onsets) block instead of one Python
-    iteration per BPM candidate (~640 candidates on a refine — the heaviest
-    project function on a long take, AGENTS.md's profile note). The tie
+    iteration per BPM candidate (~36 000 candidates on a refine at the
+    default step — the heaviest project function on a long take, but still
+    ~11 ms, under 1 % of a file analysis). The tie
     rules match the sequential version exactly: first candidate wins an
     equal score (min on the first best), and candidates with too few hits
     are excluded before scoring, as before.
+
+    The scan is CACHED for exact repeated calls (the replay and the
+    reinterpretation re-derive a take's reading with unchanged inputs:
+    same onsets, same bpm, same span). The key is the CONTENT (a sha1 of
+    the onsets + the parameters), not identity — so a hit is by
+    construction the same computation, and a fresh array from the same
+    evidence still hits. One entry: two takes alternating would thrash,
+    but every real consumer refines one take at a time.
     """
     if bpm <= 0 or len(onsets) < min_hits:
         return float(bpm)
     onsets = np.asarray(onsets, dtype=float)
+    key = hashlib.sha1(
+        onsets.tobytes()
+        + f"{bpm!r}|{span_rel!r}|{step!r}|{min_hits!r}".encode()
+    ).digest()
+    cached = _REFINE_CACHE.get(key)
+    if cached is not None:
+        return cached
     lo, hi = bpm * (1.0 - span_rel), bpm * (1.0 + span_rel)
     cands = np.arange(lo, hi + step / 2, step)
     if len(cands) == 0:
@@ -144,5 +165,7 @@ def refine_bpm_with_onsets(
             # guardrail: stay within the relative scan span
             if bpm * (1 - span_rel - 0.02) <= refined <= bpm * (1 + span_rel + 0.02):
                 best_bpm = refined
+    _REFINE_CACHE.clear()
+    _REFINE_CACHE[key] = best_bpm
     return best_bpm
 

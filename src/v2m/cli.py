@@ -6,22 +6,27 @@ import argparse
 import sys
 from pathlib import Path
 
+import time
+
 from . import __version__
 from .core.audio_io import AUDIO_EXTS
 from .core.i18n import (
     get_language,
     note_display,
+    note_display_pair,
     set_language,
     tr,
     tr_chord_label,
     tr_figure,
     tr_key_label,
 )
+from .core.live_session import LiveEvent, LiveTake
 from .core.pdf_export import PdfExportError, PdfToolMissing
 from .core.notes import DEFAULT_MIN_NOTE_S
 from .core.pipeline import FILE_CONF, LIVE_CONF, AnalyzeOptions, analyze_file
 from .core.report import engrave_pdf, export_result
 from .core.takes import ARTIFACTS as ARTIFACT_EXTENSIONS
+from .core.takes import live_export_dir, live_take_name
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -98,9 +103,82 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0 if not pdf_failed else 2
 
 
-def _cmd_live(args: argparse.Namespace) -> int:
-    from .live import LiveSession
+class LiveSession:
+    """The `v2m live` adapter: print a shared LiveTake, export its result.
 
+    Lived in `v2m/live.py` until 2026-09-28 — two modules answered to
+    "the live session" (this CLI adapter and the core's `LiveTake`, the
+    actual owner) and the name could not be trusted when navigating.
+    The adapter is thin by construction (~60 lines of printing and the
+    export call): it is absorbed here, and "live session" now names ONE
+    module — `core/live_session.py`. Consumption-only, per ADR 0001.
+    """
+
+    def __init__(self, min_conf: float = LIVE_CONF, transpose: int = 0, out_stem: str | None = None):
+        self.min_conf = min_conf
+        self.transpose = transpose
+        self.out_stem = out_stem or live_take_name()
+        self.take = LiveTake(min_conf=min_conf, on_event=self._on_event)
+
+    def _on_event(self, event: LiveEvent) -> None:
+        if event.kind == "note_closed" and event.note is not None:
+            note = event.note
+            # The figures are already labeled by LiveTake (the policy's
+            # single owner) BEFORE this event is emitted: the adapter only
+            # prints them.
+            fig = f"  [{tr_figure(note.figure)}]" if note.figure else ""
+            print(f"  ♪ {note_display_pair(note.midi)}  ({note.duration:.2f} s){fig}")
+
+    def run(self) -> None:
+        print(tr("cli live banner"))
+        self.take.start()
+        try:
+            while True:
+                time.sleep(0.1)
+                seg = self.take.segmenter
+                if seg is None:
+                    continue
+                cur = seg.display_text()
+                total = len(seg.notes)
+                print(
+                    f"\r  {self.take.elapsed:7.1f} s | {cur:>24} | {total} notes ",
+                    end="",
+                    flush=True,
+                )
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.take.stop()
+        print(tr("cli stop capture"))
+        self.export()
+
+    def export(self) -> str | None:
+        if self.take.state != "stopped":
+            self.take.stop()
+        if self.take.result is None and self.take.signal.size < self.take.sr // 2:
+            print(tr("cli too short"))
+            return None
+        print(tr("key final analysis"))
+        # The analysis has ONE path: LiveTake.finalize owns the drain, the
+        # length gate and the idempotency; the adapter only exports what it
+        # returns (a short take re-raises the take's own 'failed' error).
+        res, _ = self.take.finalize()
+        if res.tempo is None or res.key is None:
+            raise ValueError(tr("err live incomplete"))
+        take_dir = live_export_dir(self.out_stem)
+        export_result(res, take_dir / self.out_stem, transpose=self.transpose)
+        print(f"{tr('key tempo')}    : {res.tempo.bpm} BPM")
+        print(f"{tr('key key label')} : {tr_key_label(res.key.best.label)}")
+        if res.chord:
+            print(f"{tr('key chord label')} : {tr_chord_label(res.chord.best.label)}")
+        print(f"{tr('key notes label')} : {len(res.notes)}")
+        stem_path = take_dir / self.out_stem
+        listed = ", ".join(f"{stem_path}{ext}" for ext in ARTIFACT_EXTENSIONS)
+        print(f"{tr('key export label')} : {listed}")
+        return str(take_dir / f"{self.out_stem}.mid")
+
+
+def _cmd_live(args: argparse.Namespace) -> int:
     try:
         session = LiveSession(min_conf=args.min_conf, transpose=args.transpose)
         session.run()

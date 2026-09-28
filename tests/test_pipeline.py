@@ -106,7 +106,7 @@ def test_the_take_name_grammar_round_trips_through_its_owner():
 
 def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch):
     """The CLI path `v2m live` ends in the dedicated sub-folder, like the GUI."""
-    from v2m.live import LiveSession
+    from v2m.cli import LiveSession
 
     monkeypatch.chdir(tmp_path)  # the take lands under tmp, not the repo root
     session = LiveSession()

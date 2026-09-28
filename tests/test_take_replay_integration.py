@@ -193,13 +193,13 @@ def test_a_replay_never_starts_while_a_capture_is_running(qapp, monkeypatch, tmp
         # the singer STARTED the next take BEFORE this one exported: its
         # render timer ticks and its capture thread runs — the export must
         # therefore QUEUE the cross-check, not start it
-        win._live_timer.start()
+        win.page_live.start_timer()
 
         class RunningThread:
             def isRunning(self):
                 return True
 
-        win.live_thread = RunningThread()
+        win.live_thread = cast(Any, RunningThread())
         win.result = cast(Any, _fake_live_result())
         win._live_signal = np.zeros(audio_io.SR, dtype=np.float32)
         win._export_results()  # mints the stem, QUEUES (guards hold)
@@ -208,7 +208,7 @@ def test_a_replay_never_starts_while_a_capture_is_running(qapp, monkeypatch, tmp
         # but the deferred take is QUEUED, not lost
         assert win.take_ctl.replay_queue() == [win.take_ctl.take_stem()]
     finally:
-        win._live_timer.stop()
+        win.page_live.stop_timer()
         win.close()
 
 
@@ -230,8 +230,8 @@ def test_the_queue_drains_when_the_capture_stops(qapp, monkeypatch, tmp_path):
     try:
         # the chained-takes case: the NEXT capture is already live when
         # this take exports — its cross-check is deferred into the queue
-        win._live_timer.start()
-        win.live_thread = RunningThread()
+        win.page_live.start_timer()
+        win.live_thread = cast(Any, RunningThread())
         win.result = cast(Any, _fake_live_result())
         win._live_signal = np.zeros(audio_io.SR, dtype=np.float32)
         win._export_results()
@@ -242,16 +242,16 @@ def test_the_queue_drains_when_the_capture_stops(qapp, monkeypatch, tmp_path):
         # here: creating a real LiveThread would open the real mic) — the
         # QUEUE must survive it (the deferred take is exported; its stem
         # lives in the queue, not in the take's state)
-        win._live_timer.stop()
+        win.page_live.stop_timer()
         win.take_ctl.begin_take()
         assert win.take_ctl.replay_queue() == [deferred_stem]
         # the singer stops that take: the pump may now run
-        win.live_thread = StoppedThread()
+        win.live_thread = cast(Any, StoppedThread())
         win.on_stop_live()
         assert FakeWorker.started == [deferred_stem]
         assert win.take_ctl.replay_queue() == []
     finally:
-        win._live_timer.stop()
+        win.page_live.stop_timer()
         win.close()
 
 
@@ -266,23 +266,23 @@ def test_a_newer_capture_keeps_its_live_render(qapp, monkeypatch, tmp_path):
     _redirect(monkeypatch, mw, tmp_path)
     win = mw.MainWindow()
     try:
-        win._live_timer.start()
+        win.page_live.start_timer()
 
         class RunningThread:
             def isRunning(self):
                 return True
 
-        win.live_thread = RunningThread()
+        win.live_thread = cast(Any, RunningThread())
         win._on_live_analysis_done(_queued_result(), b"")
-        assert win._live_timer.isActive(), (
+        assert win.page_live.timer_active(), (
             "the in-progress take's rendering must stay alive"
         )
         # ...and when NO capture is running, the timer stops (normal end)
         win.live_thread = None
         win._on_live_analysis_done(_queued_result(), b"")
-        assert not win._live_timer.isActive()
+        assert not win.page_live.timer_active()
     finally:
-        win._live_timer.stop()
+        win.page_live.stop_timer()
         win.close()
 
 

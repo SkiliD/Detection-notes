@@ -38,12 +38,15 @@ class FinderSession:
     history: list[int] = field(default_factory=list)
     _last_confirmed: int | None = None
     display: int | None = None
+    last_reading: float | None = None  # tick time of the last segmenter reading
 
-    def feed(self, cur_midi: int | None, confirmed_midi: int | None) -> int | None:
+    def feed(self, cur_midi: int | None, confirmed_midi: int | None, t: float | None = None) -> int | None:
         """One tick: decide the display, keep the confirmed history."""
         # the big name answers from the IMMEDIATE reading (a confirming
         # note counts — hiding it read as "the mic is ignored")
         self.display = cur_midi
+        if cur_midi is not None or confirmed_midi is not None:
+            self.last_reading = t
         # the history records CONFIRMED piano notes only, no repeats: a
         # rumble holds no confirmation window, so it enters nothing
         if (
@@ -56,8 +59,13 @@ class FinderSession:
             self._last_confirmed = confirmed_midi
         return self.display
 
+    def note_idle(self) -> None:
+        """One tick with NO reading at all: the mic heard nothing."""
+        self.last_reading = None
+
     def reset(self) -> None:
         """The finder restarted: nothing is remembered."""
         self.history.clear()
         self._last_confirmed = None
         self.display = None
+        self.last_reading = None

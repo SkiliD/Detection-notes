@@ -70,11 +70,11 @@ def test_the_audio_box_choice_is_read_at_take_start(qapp, monkeypatch):
 
     win = mw.MainWindow()
     try:
-        win.chk_record_audio.setChecked(True)
+        win.page_live.chk_record_audio.setChecked(True)
         win.on_start_live()
         assert win._live.record_audio is True
         # a mid-take toggle must not change what THIS take writes
-        win.chk_record_audio.setChecked(False)
+        win.page_live.chk_record_audio.setChecked(False)
         assert win._live.record_audio is True
     finally:
         win.on_stop_live()

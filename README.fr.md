@@ -141,6 +141,7 @@ scripts/
 ├── profile_analysis.py  # diagnostic : temps par étape d'analyse + cProfile
 ├── score_accuracy.py    # diagnostic : ce que la transcription a fait d'une prise réelle
 ├── confirm_s_sweep.py   # diagnostic : balayage du seuil confirm_s live, multi-graines
+├── liveseg_sweep.py     # diagnostic : balayage HOLD_ST x REARTIC_ST live, multi-graines
 ├── guide_capture.py     # enregistrement guidé note par note d'une prise vérifiée
 ├── coherence_summary.py # diagnostic : agréger les coherence.csv des prises, par session
 ├── replay_takes.py      # diagnostic : rejouer les WAV des prises via la chaîne GUI
@@ -211,6 +212,12 @@ Deux outils complètent le travail de corpus :
 # l'archive des valeurs mesurées vit dans AGENTS.md
 ./.venv/Scripts/python.exe scripts/confirm_s_sweep.py
 
+# balayage du segmenteur live : HOLD_ST x REARTIC_ST sur les mêmes cas plus
+# deux cas de vibrato débutant (+/-0,5 st), plusieurs graines par cellule —
+# décide si le vibrato d'un débutant mérite une tenue plus large (verdict
+# mesuré archivé dans AGENTS.md)
+./.venv/Scripts/python.exe scripts/liveseg_sweep.py
+
 # enregistrement guidé d'une prise vérifiée : chanter, annoter note par note,
 # les bornes sont raffinées sur la courbe de hauteur, écrit sous prises_verite/
 ./.venv/Scripts/python.exe scripts/guide_capture.py prise_verite.wav
@@ -219,7 +226,7 @@ Deux outils complètent le travail de corpus :
 ./.venv/Scripts/python.exe scripts/guide_capture.py prise_verite.wav --audit
 ```
 
-`--values` du balayage restreint les valeurs de seuil scannées (séparées par des virgules) et `--seeds` les graines de synthèse (un cas peut n'échouer que sur UNE graine : le grain de bruit remplit la fenêtre de tenue quelques ms autrement) ; `--audit` de la capture relit une prise existante au lieu d'en enregistrer une.
+`--values` du balayage restreint les valeurs de seuil scannées (séparées par des virgules) et `--seeds` les graines de synthèse (un cas peut n'échouer que sur UNE graine : le grain de bruit remplit la fenêtre de tenue quelques ms autrement) ; `--holds`/`--reartics` du balayage du segmenteur restreignent ses deux axes de la même façon ; `--audit` de la capture relit une prise existante au lieu d'en enregistrer une.
 
 Un dernier outil suit les sessions dans le temps :
 
@@ -277,15 +284,15 @@ Le suivi de `--changed` est automatisé par un script : `engine_drift_watch.py` 
 pytest tests/ -v
 ```
 
-660+ tests : pitch (YIN/pYIN sur sinus connus, **flux YIN par blocs** : temps absolus monotones et mémoire bornée), segmentation, tempo (clics + raffinement sur attaques), tonalité, **accords** (triades, septièmes, basse, segments), **progression par mesure**, figures, **mesure par accents (2/4, 3/4 vs 4/4) et 6/8 temps pointés**, tempo ×1,5 corrigé live et offline, MusicXML (+ **accords/paroles/couleurs**), noms de notes FR/EN, **rendu audio de contrôle**, **clavier PianoView**, **notation** (orthographe en armure, armures, durées écrites, mise en page mesure/système), **portée** (rendu offscreen, systèmes, défilement live), erreurs de chargement audio, export MIDI (meta-events relus), segmenteur live (+ **note en cours** pour le suivi temps réel), **suivi live du piano roll** (fenêtre glissante, preview, bande de hauteur stable, recoloration après étiquetage), **mode live de bout en bout** (micro factice → capture → analyse finale → export), **capture live hors callback** (file + thread, blocs jamais perdus, erreur d'appelant non fatale), **moteur de rejeu** (chaîne réelle à l'horloge réelle, flux injecté — jamais de remplacement global —, archive du worker, annulation), **explication live/final**, **tendances de cohérence** (sparkline, tendance hebdo des contours lue du journal), **CLI `--pdf`** (outil absent → PDF ignoré, exit 0 ; conversion ratée → exit 2, artefacts et résumé toujours conservés), **enveloppe min/max de la waveform**, **i18n de la boîte de sélection de fichier** (et parité des clés fr/en), **script de diagnostic** (tableau des étapes aligné sur le pipeline réel, moyennes, cProfile, JSON, erreurs d'entrée), pipeline E2E WAV → artefacts, **justesse de transcription sur voix de synthèse** (19 cas, hors ligne exacts, preuve d'attaque jamais pire que la géométrie, aucune note inventée dans une note chantée, temps réel exact sur les phrases articulées, **respirations jamais notées** : reprises d'air, souffle isolé, tenue soufflée), **attaques** (couverture des onsets chantés, une tenue avec vibrato ne produit plus 19 attaques, flux temps réel conservateur), **règles de transition** (glissando absorbé, vraie note courte préservée, hauteur d'arrivée), **mesure fantôme** (une ligne 4/4 n'est pas transcrite en 6/8), **politique unique des seuils** (`FILE_CONF`/`LIVE_CONF`, aucun défaut réécrit localement).
+720+ tests : pitch (YIN/pYIN sur sinus connus, **flux YIN par blocs** : temps absolus monotones et mémoire bornée), segmentation, tempo (clics + raffinement sur attaques), tonalité, **accords** (triades, septièmes, basse, segments), **progression par mesure**, figures, **mesure par accents (2/4, 3/4 vs 4/4) et 6/8 temps pointés**, tempo ×1,5 corrigé live et offline, MusicXML (+ **accords/paroles/couleurs**), noms de notes FR/EN, **rendu audio de contrôle**, **clavier PianoView**, **notation** (orthographe en armure, armures, durées écrites, mise en page mesure/système), **portée** (rendu offscreen, systèmes, défilement live), erreurs de chargement audio, export MIDI (meta-events relus), segmenteur live (+ **note en cours** pour le suivi temps réel), **suivi live du piano roll** (fenêtre glissante, preview, bande de hauteur stable, recoloration après étiquetage), **mode live de bout en bout** (micro factice → capture → analyse finale → export), **capture live hors callback** (file + thread, blocs jamais perdus, erreur d'appelant non fatale), **moteur de rejeu** (chaîne réelle à l'horloge réelle, flux injecté — jamais de remplacement global —, archive du worker, annulation), **explication live/final**, **tendances de cohérence** (sparkline, tendance hebdo des contours lue du journal), **CLI `--pdf`** (outil absent → PDF ignoré, exit 0 ; conversion ratée → exit 2, artefacts et résumé toujours conservés), **enveloppe min/max de la waveform**, **i18n de la boîte de sélection de fichier** (et parité des clés fr/en), **script de diagnostic** (tableau des étapes aligné sur le pipeline réel, moyennes, cProfile, JSON, erreurs d'entrée), pipeline E2E WAV → artefacts, **justesse de transcription sur voix de synthèse** (19 cas, hors ligne exacts, preuve d'attaque jamais pire que la géométrie, aucune note inventée dans une note chantée, temps réel exact sur les phrases articulées, **respirations jamais notées** : reprises d'air, souffle isolé, tenue soufflée), **attaques** (couverture des onsets chantés, une tenue avec vibrato ne produit plus 19 attaques, flux temps réel conservateur), **règles de transition** (glissando absorbé, vraie note courte préservée, hauteur d'arrivée), **mesure fantôme** (une ligne 4/4 n'est pas transcrite en 6/8), **politique unique des seuils** (`FILE_CONF`/`LIVE_CONF`, aucun défaut réécrit localement).
 
-Boucle rapide pendant l'itération — évite les 4 tests `slow` (emprises dorées / empreintes) :
+Boucle rapide pendant l'itération — évite les tests marqués `slow` (les rejeux temps réel et les empreintes dorées) :
 
 ```bash
 pytest tests/ -m "not slow"
 ```
 
-Mesuré : ~47 s pour le run complet face au budget de 90 s de la suite, ~31 s pour la boucle rapide (environ 16 s gagnées, le tiers du run). Chaque run affiche son coût (`suite cost: ...`) ; un run vert au-delà de 90 s échoue volontairement : ajouter un test lent reste une décision explicite. Les tests `slow` restent dans le run par défaut — CI lance la suite complète, la boucle rapide est pour la boucle locale.
+Mesuré : ~81 s pour le run complet face au budget de 150 s de la suite, ~34 s pour la boucle rapide (environ 47 s gagnées, plus de la moitié du run). Chaque run affiche son coût (`suite cost: ...`) ; un run vert au-delà de 150 s échoue volontairement : ajouter un test lent reste une décision explicite. Les tests `slow` restent dans le run par défaut — CI lance la suite complète, la boucle rapide est pour la boucle locale.
 
 Smoke test GUI headless :
 

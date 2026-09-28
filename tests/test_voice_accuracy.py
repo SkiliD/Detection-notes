@@ -588,19 +588,20 @@ def test_real_take_segmentation_does_not_drift():
     The take is gitignored: skipped when absent.
     """
     from v2m.core import audio_io
-    from v2m.core.pipeline import AnalyzeOptions, analyze_signal
-    from scripts.score_accuracy import (  # type: ignore[import-not-found]
+    from v2m.core.audit import (
         compare_fingerprints,
         load_golden,
         segmentation_fingerprint,
     )
+    from v2m.core.pipeline import AnalyzeOptions, analyze_signal
 
     audio = Path(__file__).resolve().parents[1] / "chant.wav"
     if not audio.exists():
         pytest.skip("chant.wav absent (gitignored, regenerable) — drift not replayed")
     golden = load_golden(str(audio))
-    if golden is None:
+    if golden is None:  # narrowed to dict by the skip (pyright: assert)
         pytest.skip("no golden fingerprint for chant.wav — run the script --golden once")
+    assert golden is not None
     res = analyze_signal(
         audio_io.load_file(str(audio)), audio_io.SR,
         source=str(audio), opts=AnalyzeOptions(),

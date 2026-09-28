@@ -1010,6 +1010,8 @@ TEXT_DIM = "#8b98a8"      # secondary text, hints
 TEXT_FAINT = "#6a7686"    # disabled, idle placeholders
 ACCENT_SOFT = "#274059"   # quiet accent wash (selections, hovered rows)
 NOTE_TEXT_COLOR = "#7cd0ff"  # the recognized note, wherever it is written large
+# The finder page's hint card (and any other page that wants the same
+# "explaining, not acting" frame): grey rounded panel.
 HINT_CARD_STYLE = (
     f"color: {TEXT_DIM}; font-size: 9pt;"
     f"background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 10px;"

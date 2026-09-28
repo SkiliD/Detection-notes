@@ -14,6 +14,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from typing import Any, cast
+
 import pytest
 
 from v2m.core.compare import Move
@@ -51,13 +53,13 @@ def test_the_mark_outlines_only_the_moved_notes(qapp, monkeypatch):
     win = mw.MainWindow()
     try:
         live = [LiveNote(0.0, 0.5, 69), LiveNote(0.6, 1.1, 71)]
-        win.live_thread = _Thread(live)
+        win.live_thread = cast(Any, _Thread(live))
         win._closed_live_notes = []
         win.result = _res()
         win._mark_live_final_diff()
         # one final note at the same place (69) and one a semitone off (71
         # live vs 72 final): exactly ONE outline
-        assert len(win.piano_live._diff_items) == 1
+        assert len(win.page_live.piano_live._diff_items) == 1
     finally:
         win.live_thread = None
         win.result = None

@@ -91,23 +91,23 @@ def main() -> int:
     print("piano keyboard ok", flush=True)
 
     # note finder: 88 keys built, labels translated, no capture started here
-    assert not win.finder_thread
-    assert len(win.finder_keys._whites) == 52
-    win.finder_keys.set_pressed({57})
-    assert win.finder_keys._active == {57}
+    assert not win.page_finder.thread
+    assert len(win.page_finder.keys._whites) == 52
+    win.page_finder.keys.set_pressed({57})
+    assert win.page_finder.keys._active == {57}
     assert win.btn_finder.text() == _tr("ui finder button")
-    assert win.label_finder_hint.text() == _tr("ui finder hint")
-    assert win.label_finder_note.text() == _tr("ui finder idle")
+    assert win.page_finder.label_hint.text() == _tr("ui finder hint")
+    assert win.page_finder.label_note.text() == _tr("ui finder idle")
     # first run must read as states, not as a blank page: the mic says whether
     # it is open, and the invite is not styled like an answer
-    assert win.btn_finder_toggle.text() == _tr("ui finder start")
-    assert win.label_finder_state.text() == _tr("ui finder off")
-    idle_style = win.label_finder_note.styleSheet()
+    assert win.page_finder.btn_toggle.text() == _tr("ui finder start")
+    assert win.page_finder.label_state.text() == _tr("ui finder off")
+    idle_style = win.page_finder.label_note.styleSheet()
     win._set_finder_note(60)
-    assert win.label_finder_note.text() != _tr("ui finder idle")
-    assert win.label_finder_note.styleSheet() != idle_style
+    assert win.page_finder.label_note.text() != _tr("ui finder idle")
+    assert win.page_finder.label_note.styleSheet() != idle_style
     win._set_finder_note(None)
-    assert win.label_finder_note.styleSheet() == idle_style
+    assert win.page_finder.label_note.styleSheet() == idle_style
     print("note finder ok", flush=True)
 
     # language toggle: fr -> en -> fr, labels must follow
@@ -128,28 +128,28 @@ def main() -> int:
     print("language toggle ok", flush=True)
 
     # tuning meter: the cents needle follows the sung pitch, clamped at ±50
-    win.live_indicator.update_note(60.2, 265.0)
-    assert win.live_indicator.tuning._cents == pytest.approx(20.0, abs=0.5)
-    win.live_indicator.update_note(None, float("nan"))
-    assert win.live_indicator.tuning._cents is None
-    assert not win.live_indicator.tuning.grab().isNull()
+    win.page_live.live_indicator.update_note(60.2, 265.0)
+    assert win.page_live.live_indicator.tuning._cents == pytest.approx(20.0, abs=0.5)
+    win.page_live.live_indicator.update_note(None, float("nan"))
+    assert win.page_live.live_indicator.tuning._cents is None
+    assert not win.page_live.live_indicator.tuning.grab().isNull()
     print("tuning meter ok", flush=True)
 
     # metronome: opt-in, tempo editable, beat counter runs on the Qt loop
     assert win.metronome is None  # off by default
-    win.chk_metronome.setChecked(True)
+    win.page_live.chk_metronome.setChecked(True)
     assert win.metronome is not None
-    assert win.spin_bpm.isEnabled()
+    assert win.page_live.spin_bpm.isEnabled()
     win.on_metronome_bpm_changed(120)
     assert win.metronome.bpm == 120
     t0 = time.monotonic()
     while time.monotonic() - t0 < 0.35:
         app.processEvents()
-    beat_text = win.label_beat.text()
+    beat_text = win.page_live.label_beat.text()
     assert _tr("ui beat count").split("{")[0] in beat_text
-    win.chk_metronome.setChecked(False)
+    win.page_live.chk_metronome.setChecked(False)
     assert win.metronome is None
-    assert win.label_beat.text() == ""
+    assert win.page_live.label_beat.text() == ""
     print("metronome ok", flush=True)
 
     return 0

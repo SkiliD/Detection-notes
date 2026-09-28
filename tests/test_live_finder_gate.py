@@ -84,15 +84,15 @@ def test_pending_plateau_names_without_lighting(qapp, monkeypatch):
     try:
         # PENDING: the name answers, the key stays dark
         win._set_finder_note(69.0, light=False)
-        assert win.label_finder_note.text() != tr("ui finder idle")
-        assert win.finder_keys._active == set(), "an unconfirmed note lit the key"
+        assert win.page_finder.label_note.text() != tr("ui finder idle")
+        assert win.page_finder.keys._active == set(), "an unconfirmed note lit the key"
         # CONFIRMED: both the name AND the key answer
         win._set_finder_note(69.0, light=True)
-        assert win.finder_keys._active == {69}
+        assert win.page_finder.keys._active == {69}
         # nothing at all: the prompt and a dark keyboard
         win._set_finder_note(None)
-        assert win.label_finder_note.text() == tr("ui finder idle")
-        assert win.finder_keys._active == set()
+        assert win.page_finder.label_note.text() == tr("ui finder idle")
+        assert win.page_finder.keys._active == set()
     finally:
         win.close()
 
@@ -180,21 +180,21 @@ def test_the_finder_stays_dark_on_a_mic_rumble(qapp, monkeypatch):
         win.on_open_finder()
         captured = _pump_until(
             qapp,
-            lambda: win.finder_thread is not None and win.finder_thread.elapsed() >= 1.3,
+            lambda: win.page_finder.thread is not None and win.page_finder.thread.elapsed() >= 1.3,
             timeout=60,
         )
         assert captured, "the fake mic delivered nothing to the Finder"
-        assert not win.finder_keys._active, (
-            f"key(s) lit by mic noise : {sorted(win.finder_keys._active)}"
+        assert not win.page_finder.keys._active, (
+            f"key(s) lit by mic noise : {sorted(win.page_finder.keys._active)}"
         )
-        assert not win.finder_keys._spans, "a Finder key carries a note in progress"
-        assert win.finder_session.history == [], "noise entered the history"
+        assert not win.page_finder.keys._spans, "a Finder key carries a note in progress"
+        assert win.page_finder.session.history == [], "noise entered the history"
         assert win.error_banner.isHidden(), win.error_banner.text()
     finally:
         win.on_close_finder()
-        if win.finder_thread is not None and win.finder_thread.isRunning():
-            win.finder_thread.stop()
-            win.finder_thread.wait(3000)
+        if win.page_finder.thread is not None and win.page_finder.thread.isRunning():
+            win.page_finder.thread.stop()
+            win.page_finder.thread.wait(3000)
         win.close()
 
 
@@ -216,11 +216,11 @@ def test_the_finder_shows_the_note_while_it_confirms(qapp, monkeypatch):
         win.on_open_finder()
         captured = _pump_until(
             qapp,
-            lambda: win.finder_thread is not None and win.finder_thread.elapsed() >= 1.3,
+            lambda: win.page_finder.thread is not None and win.page_finder.thread.elapsed() >= 1.3,
             timeout=60,
         )
         assert captured, "the fake mic delivered nothing to the Finder"
-        thread = win.finder_thread
+        thread = win.page_finder.thread
         assert thread is not None
         seg = thread.segmenter
         assert seg is not None
@@ -228,8 +228,8 @@ def test_the_finder_shows_the_note_while_it_confirms(qapp, monkeypatch):
             qapp,
             lambda: (
                 seg.current() is not None
-                and win.label_finder_note.text() not in ("", None)
-                and "…" not in win.label_finder_note.text()
+                and win.page_finder.label_note.text() not in ("", None)
+                and "…" not in win.page_finder.label_note.text()
                 and seg.confirmed() is None
             )
             or seg.confirmed() is not None,
@@ -242,14 +242,14 @@ def test_the_finder_shows_the_note_while_it_confirms(qapp, monkeypatch):
             assert pending_seen, "the name does not follow the confirming note"
         history = _pump_until(
             qapp,
-            lambda: len(win.finder_session.history) >= 2,
+            lambda: len(win.page_finder.session.history) >= 2,
             timeout=10,
         )
         assert history, "no confirmed note entered the history"
-        assert all(48 <= m <= 84 for m in win.finder_session.history)
+        assert all(48 <= m <= 84 for m in win.page_finder.session.history)
     finally:
         win.on_close_finder()
-        if win.finder_thread is not None and win.finder_thread.isRunning():
-            win.finder_thread.stop()
-            win.finder_thread.wait(3000)
+        if win.page_finder.thread is not None and win.page_finder.thread.isRunning():
+            win.page_finder.thread.stop()
+            win.page_finder.thread.wait(3000)
         win.close()

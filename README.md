@@ -141,6 +141,7 @@ scripts/
 ├── profile_analysis.py  # diagnostics: analysis time per stage + cProfile
 ├── score_accuracy.py    # diagnostics: what the transcription did to a real take
 ├── confirm_s_sweep.py   # diagnostics: live confirm_s threshold sweep, multi-seed
+├── liveseg_sweep.py     # diagnostics: live HOLD_ST x REARTIC_ST sweep, multi-seed
 ├── guide_capture.py     # guided note-by-note recording of a hand-checked take
 ├── coherence_summary.py # diagnostics: aggregate every take's coherence.csv per session
 ├── replay_takes.py      # diagnostics: replay the takes' WAVs through the GUI chain
@@ -213,6 +214,12 @@ Two more tools complete the corpus work:
 # the archive of measured values lives in AGENTS.md
 ./.venv/Scripts/python.exe scripts/confirm_s_sweep.py
 
+# live segmenter sweep: HOLD_ST x REARTIC_ST over the same cases plus two
+# beginner-vibrato (+/-0.5 st) cases, several seeds per cell — decides
+# whether a beginner's vibrato deserves a wider hold (measured verdict
+# archived in AGENTS.md)
+./.venv/Scripts/python.exe scripts/liveseg_sweep.py
+
 # guided recording of a hand-checked take: sing, annotate note by note,
 # the bounds are refined on the pitch curve, written under prises_verite/
 ./.venv/Scripts/python.exe scripts/guide_capture.py prise_verite.wav
@@ -221,7 +228,7 @@ Two more tools complete the corpus work:
 ./.venv/Scripts/python.exe scripts/guide_capture.py prise_verite.wav --audit
 ```
 
-The sweep's `--values` narrows the threshold values scanned (comma-separated) and `--seeds` the synthesis seeds (a case can fail on ONE seed only: the noise grain fills the hold window a few ms differently); the capture's `--audit` re-reads an existing take instead of recording one.
+The confirm_s sweep's `--values` narrows the threshold values scanned (comma-separated) and `--seeds` the synthesis seeds (a case can fail on ONE seed only: the noise grain fills the hold window a few ms differently); the segmenter sweep's `--holds`/`--reartics` narrow the two hold axes the same way; the capture's `--audit` re-reads an existing take instead of recording one.
 
 One more tool follows the sessions over time:
 
@@ -279,15 +286,15 @@ The `--changed` follow-up is automated by one script: `engine_drift_watch.py` re
 pytest tests/ -v
 ```
 
-660+ tests: pitch (YIN/pYIN on known sines, **block YIN stream**: monotonic absolute times and bounded memory), segmentation, tempo (clicks + refinement on attacks), key, **chords** (triads, sevenths, bass, segments), **per-measure progression**, figures, **meter by accents (2/4, 3/4 vs 4/4) and dotted-pulse 6/8**, ×1.5 tempo corrected live and offline, MusicXML (+ **chords/lyrics/colors**), FR/EN note names, **audio rendering**, **PianoView keyboard**, **notation** (spelling in key signature, key signatures, written values, measure/system layout), **staff** (offscreen render, systems, live scrolling), audio-loading errors, MIDI export (meta-events re-read), live segmenter (+ **current note** for real-time tracking), **live piano roll tracking** (sliding window, preview, stable pitch band, recoloring after labeling), **end-to-end live mode** (fake mic → capture → final analysis → export), **live capture off the callback** (queue + thread, blocks never lost, caller error non-fatal), **replay engine** (real chain at the real clock, injected stream — never a global swap —, worker archive, cancellation), **live-vs-final explainer**, **coherence trends** (sparkline, journal-fed weekly contour trend), **CLI `--pdf`** (tool missing → PDF skipped, exit 0; conversion failed → exit 2, artifacts and summary always kept), **min/max waveform envelope**, **file-dialog i18n** (and fr/en key parity), **diagnostics script** (stage table aligned on the real pipeline, averages, cProfile, JSON, input errors), E2E WAV → artifacts pipeline, **transcription accuracy on synthetic voice** (19 cases, offline exact, attack evidence never worse than geometry, no note invented inside a sung note, real time exact on articulated phrases, **breaths never notated**: air intakes, isolated breath, breathy held note), **attacks** (sung onset coverage, a held note with vibrato no longer produces 19 attacks, conservative real-time flux), **transition rules** (glissando absorbed, genuine short note preserved, arrival pitch), **phantom meter** (a 4/4 line is not transcribed as 6/8), **single threshold policy** (`FILE_CONF`/`LIVE_CONF`, no locally rewritten default).
+720+ tests: pitch (YIN/pYIN on known sines, **block YIN stream**: monotonic absolute times and bounded memory), segmentation, tempo (clicks + refinement on attacks), key, **chords** (triads, sevenths, bass, segments), **per-measure progression**, figures, **meter by accents (2/4, 3/4 vs 4/4) and dotted-pulse 6/8**, ×1.5 tempo corrected live and offline, MusicXML (+ **chords/lyrics/colors**), FR/EN note names, **audio rendering**, **PianoView keyboard**, **notation** (spelling in key signature, key signatures, written values, measure/system layout), **staff** (offscreen render, systems, live scrolling), audio-loading errors, MIDI export (meta-events re-read), live segmenter (+ **current note** for real-time tracking), **live piano roll tracking** (sliding window, preview, stable pitch band, recoloring after labeling), **end-to-end live mode** (fake mic → capture → final analysis → export), **live capture off the callback** (queue + thread, blocks never lost, caller error non-fatal), **replay engine** (real chain at the real clock, injected stream — never a global swap —, worker archive, cancellation), **live-vs-final explainer**, **coherence trends** (sparkline, journal-fed weekly contour trend), **CLI `--pdf`** (tool missing → PDF skipped, exit 0; conversion failed → exit 2, artifacts and summary always kept), **min/max waveform envelope**, **file-dialog i18n** (and fr/en key parity), **diagnostics script** (stage table aligned on the real pipeline, averages, cProfile, JSON, input errors), E2E WAV → artifacts pipeline, **transcription accuracy on synthetic voice** (19 cases, offline exact, attack evidence never worse than geometry, no note invented inside a sung note, real time exact on articulated phrases, **breaths never notated**: air intakes, isolated breath, breathy held note), **attacks** (sung onset coverage, a held note with vibrato no longer produces 19 attacks, conservative real-time flux), **transition rules** (glissando absorbed, genuine short note preserved, arrival pitch), **phantom meter** (a 4/4 line is not transcribed as 6/8), **single threshold policy** (`FILE_CONF`/`LIVE_CONF`, no locally rewritten default).
 
-Quick loop while iterating — skips the 4 `slow` golden/fingerprint tests:
+Quick loop while iterating — skips the `slow`-marked tests (the real-time replays and the golden fingerprints):
 
 ```bash
 pytest tests/ -m "not slow"
 ```
 
-Measured: ~47 s for the full run against the 90 s suite budget, ~31 s for the quick loop (about 16 s saved, roughly a third of the run). Every run prints its own cost (`suite cost: ...`); a green run past 90 s fails on purpose, so adding a slow test stays an explicit decision. The `slow` tests stay in the default run — CI runs the full suite, the quick loop is for the local loop.
+Measured: ~81 s for the full run against the 150 s suite budget, ~34 s for the quick loop (about 47 s saved, well over half of the run). Every run prints its own cost (`suite cost: ...`); a green run past 150 s fails on purpose, so adding a slow test stays an explicit decision. The `slow` tests stay in the default run — CI runs the full suite, the quick loop is for the local loop.
 
 Headless GUI smoke test:
 

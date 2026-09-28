@@ -1,13 +1,13 @@
-# ===== Voix -> MIDI — ignorer tout ce qui n'est pas une source =====
+# ===== Voix -> MIDI — ignore everything that is not a source =====
 
-# --- Environnements virtuels ---
+# --- Virtual environments ---
 .venv/
 venv/
 env/
 .venv.*/
 ENV/
 
-# --- Cache Python ---
+# --- Python cache ---
 __pycache__/
 *.py[cod]
 *$py.class
@@ -25,7 +25,7 @@ wheels/
 *.whl
 pip-wheel-metadata/
 
-# --- Couverture & outils qualité ---
+# --- Coverage & quality tools ---
 .coverage
 .coverage.*
 htmlcov/
@@ -33,10 +33,10 @@ htmlcov/
 .nox/
 coverage.xml
 
-# --- Freebuff (données locales de l'assistant) ---
+# --- Freebuff (assistant local data) ---
 .freebuff/
 
-# --- Artefacts audio générés (analyse, démo, tests) ---
+# --- Generated audio artifacts (analysis, demo, tests) ---
 *.wav
 *.mp3
 *.flac
@@ -47,26 +47,26 @@ coverage.xml
 *.midi
 /live_*
 prises_live/
-# observations vocales persistées (<prise>.observation.npz, scripts/reinterpret.py)
+# persisted vocal observations (<take>.observation.npz, scripts/reinterpret.py)
 *.npz
 
-# --- Sorties d'analyse : partitions + rapports (export_result) ---
-# Tout ce que le pipeline écrit avec un préfixe arbitraire :
-# .musicxml / .pdf (gravure MuseScore-LilyPond) / .json / .csv
+# --- Analysis outputs: scores + reports (export_result) ---
+# Everything the pipeline writes with an arbitrary prefix:
+# .musicxml / .pdf (MuseScore-LilyPond engraving) / .json / .csv
 *.musicxml
 *.pdf
 *.json
 *.csv
-# NB : le repo ne versionne aucun .json/.csv/.pdf aujourd'hui ; si un jour
-# un fichier de config JSON doit être suivi, le négocier ici avec un !.
+# NB: the repo tracks no .json/.csv/.pdf today; should a JSON config file
+# ever be tracked, negotiate it here with a !.
 
-# exceptions : garder un éventuel audio d'exemple versionné, et la référence
-# des artefacts de test (tests/reference/artifacts.json, voir AGENTS.md) :
-# c'est une empreinte, pas une sortie d'analyse — elle doit être versionnée.
+# exceptions: keep a possibly versioned sample audio, and the test
+# artifacts reference (tests/reference/artifacts.json, see AGENTS.md):
+# it is a fingerprint, not an analysis output — it must be tracked.
 !tests/data/*.wav
 !tests/reference/*.json
 
-# --- IDE / éditeurs ---
+# --- IDE / editors ---
 .idea/
 .vscode/
 *.sublime-project
@@ -79,14 +79,14 @@ prises_live/
 Thumbs.db
 desktop.ini
 
-# --- Docker (fichiers locaux, images exportées) ---
+# --- Docker (local files, exported images) ---
 *.tar
 docker-compose.override.yml
 
-# --- Notes personnelles ---
+# --- Personal notes ---
 *.log
 
-# --- Exécution locale (fichiers racine jetables de validation) ---
+# --- Local runs (throwable root validation files) ---
 /demo_out.*
 /test68.*
 /demo_docker.*
@@ -95,7 +95,7 @@ docker-compose.override.yml
 /demo_dbg.*
 /_ours.pdf
 /_via_py.pdf
-# captures et logs temporaires des vérifications GUI / PDF
+# temporary captures and logs of the GUI / PDF checks
 /shot_*.png
 /_*.txt
 /_dbg.log
@@ -104,8 +104,8 @@ adr/
 docs/
 docs/adr/
 /out*
-# prises_verite : les PRISES et vérités restent personnelles (wav/json), mais
-# le README engageant le format et les fingerprints de non-dérive sont suivis
+# prises_verite: the TAKES and truths stay personal (wav/json), but the
+# README committing the format and the non-drift fingerprints are tracked
 /prises_verite/*
 !/prises_verite/README.md
 !/prises_verite/*.fingerprint.json

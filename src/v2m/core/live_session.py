@@ -139,9 +139,12 @@ class LiveTake:
         if self.capture is None:
             return
         if self.stream is None:
+            # gate_rms getattr: the capture is the injected seam (fakes in
+            # tests may predate the attribute — the class default is the
+            # one policy, audio_io.GATE_RMS)
             self.stream = LivePitchStream(
                 self.capture.samplerate,
-                gate_rms=audio_io.GATE_RMS,
+                gate_rms=getattr(self.capture, "gate_rms", audio_io.GATE_RMS),
             )
         before = self.stream.elapsed_notes()
         rms, frames = self.stream.feed(block, t)

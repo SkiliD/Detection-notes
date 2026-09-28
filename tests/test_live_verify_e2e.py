@@ -40,7 +40,7 @@ def test_recorded_take_passes_verify_and_coherence(
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
-    written: list[str] = {}
+    written: dict[str, str] = {}
 
     def fake_export(res, stem, **kw):
         written["stem"] = str(stem)
@@ -53,7 +53,7 @@ def test_recorded_take_passes_verify_and_coherence(
 
     win = mw.MainWindow()
     try:
-        win.chk_record_audio.setChecked(True)  # the take must write its audio
+        win.page_live.chk_record_audio.setChecked(True)  # the take must write its audio
         win.on_start_live()
         # pump until the take has captured ~1.8 s (the FakeMic sings ~1.9 s)
         captured = _pump_until(
@@ -88,12 +88,12 @@ def test_recorded_take_passes_verify_and_coherence(
         # live count of the take itself (the final analysis may read one
         # note more once it can see the whole take — that is the diff mark's
         # job to show, not the counter's)
-        assert win.live_indicator.label_note_count.text().isdigit()
-        assert win.live_indicator.label_note_count.text() != "0"
+        assert win.page_live.live_indicator.label_note_count.text().isdigit()
+        assert win.page_live.live_indicator.label_note_count.text() != "0"
         # the live-vs-final mark ran on the handed-over notes: every note
         # the final pass moved keeps its ACCENT outline on the live roll
         # (on this clean melody the two readings agree, so few outlines)
-        assert len(win.piano_live._diff_items) <= live_count
+        assert len(win.page_live.piano_live._diff_items) <= live_count
     finally:
-        win.chk_record_audio.setChecked(False)
+        win.page_live.chk_record_audio.setChecked(False)
         win.close()

@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from conftest import SR, silence, sine_note
+from conftest import SR, expect_or_dump, silence, sine_note
 from v2m import cli
 from v2m.core import audio_io, i18n, pdf_export, playback, report
 from v2m.core.i18n import set_language
@@ -72,37 +72,49 @@ def test_summary_speaks_the_selected_language(lang, tmp_path, monkeypatch, capsy
     """The full summary (progress + keys + figures) is in the requested language."""
     code = cli.main(["--lang", lang, "analyze", _wav(tmp_path), "-o", str(tmp_path / "out")])
     out, err = capsys.readouterr()
-    assert code == 0, f"the analysis failed : {err}"
+    expect_or_dump(code == 0, f"[lang={lang}] the analysis failed", out=out, err=err)
 
     lines = out.splitlines()
+
+    # every assertion below goes through `_expect`: at the first broken
+    # condition the captured stdout/stderr are dumped (see conftest's
+    # `expect_or_dump`) — the flake-capture pattern, applied where the
+    # captured streams would otherwise be lost.
+    def _expect(cond: bool, msg: str) -> None:
+        expect_or_dump(cond, f"[lang={lang}] {msg}", out=out, err=err)
+
+    _expect("Tempo" in out, "Tempo line missing")
     tempo_line = next(l for l in lines if l.startswith("Tempo"))
     meter_line = next(l for l in lines if l.startswith(("Mesure", "Meter")))
     key_line = next(l for l in lines if l.startswith(("Tonalité", "Key")))
     fig_line = next(l for l in lines if l.startswith("Figures"))
 
     # the label columns share one colon position in BOTH languages
-    assert tempo_line.index(":") == meter_line.index(":") == key_line.index(":")
+    _expect(
+        tempo_line.index(":") == meter_line.index(":") == key_line.index(":"),
+        "label columns drift apart between languages",
+    )
 
     if lang == "fr":
-        assert "Analyse de" in out and "Détection du tempo" in out
-        assert "Tonalité" in key_line and "candidat" in out
+        _expect("Analyse de" in out and "Détection du tempo" in out, "FR progress missing")
+        _expect("Tonalité" in key_line and "candidat" in out, "FR key label missing")
         # canonical French figures stay French in French mode
-        assert FR_FIGURE_RE.search(fig_line), f"FR figures missing : {fig_line!r}"
-        assert not EN_FIGURE_RE.search(fig_line), f"English figures in FR : {fig_line!r}"
-        assert not re.search(r"\b(major|minor)\b", out), f"key not translated : {out}"
-        assert "Detecting" not in out, "English progress in FR"
-        assert "not detected" not in out
+        _expect(bool(FR_FIGURE_RE.search(fig_line)), f"FR figures missing : {fig_line!r}")
+        _expect(not EN_FIGURE_RE.search(fig_line), f"English figures in FR : {fig_line!r}")
+        _expect(not re.search(r"\b(major|minor)\b", out), f"key not translated : {out}")
+        _expect("Detecting" not in out, "English progress in FR")
+        _expect("not detected" not in out, "English default meter in FR")
     else:
-        assert "Analyzing" in out and "Detecting tempo" in out
-        assert "Key" in key_line and "candidate" in out
-        assert EN_FIGURE_RE.search(fig_line), f"figures not translated: {fig_line!r}"
-        assert not FR_FIGURE_RE.search(fig_line), f"French figures in EN: {fig_line!r}"
-        assert re.search(r"\b(major|minor)\b", key_line), "key label lost in EN"
-        assert not re.search(r"\bTonalité\b", out), "FR label in EN"
+        _expect("Analyzing" in out and "Detecting tempo" in out, "EN progress missing")
+        _expect("Key" in key_line and "candidate" in out, "EN key label missing")
+        _expect(bool(EN_FIGURE_RE.search(fig_line)), f"figures not translated: {fig_line!r}")
+        _expect(not FR_FIGURE_RE.search(fig_line), f"French figures in EN: {fig_line!r}")
+        _expect(bool(re.search(r"\b(major|minor)\b", key_line)), "key label lost in EN")
+        _expect(not re.search(r"\bTonalité\b", out), "FR label in EN")
         # word boundary: "candidat" is a substring of "candidate"
-        assert not re.search(r"\bcandidat\b", out), "FR candidat in EN"
-        assert "Détection" not in out, "French progress in EN"
-        assert "non détectée" not in out
+        _expect(not re.search(r"\bcandidat\b", out), "FR candidat in EN")
+        _expect("Détection" not in out, "French progress in EN")
+        _expect("non détectée" not in out, "French default meter in EN")
 
 
 @pytest.mark.parametrize("lang", LANGS)
@@ -112,18 +124,30 @@ def test_input_validation_speaks_the_selected_language(lang, tmp_path, capsys):
 
     assert cli.main(["--lang", lang, "analyze", "nope.wav"]) == 1
     err = capsys.readouterr().err.strip()
-    assert err == _expected(lang, "err file not found", path="nope.wav")
+    expect_or_dump(
+        err == _expected(lang, "err file not found", path="nope.wav"),
+        f"[lang={lang}] file-not-found message is not the i18n key",
+        err=err,
+    )
 
     bad = tmp_path / "notes.txt"
     bad.write_text("not audio", encoding="utf-8")
     assert cli.main(["--lang", lang, "analyze", str(bad)]) == 1
     err = capsys.readouterr().err.strip()
     fmts = ", ".join(sorted(e.lstrip(".") for e in audio_io.AUDIO_EXTS))
-    assert err == _expected(lang, "err bad format", ext=".txt", fmts=fmts)
+    expect_or_dump(
+        err == _expected(lang, "err bad format", ext=".txt", fmts=fmts),
+        f"[lang={lang}] bad-format message is not the i18n key",
+        err=err,
+    )
 
     assert cli.main(["--lang", lang, "analyze", wav, "--min-conf", "1.5"]) == 1
     err = capsys.readouterr().err.strip()
-    assert err == _expected(lang, "err minconf", v=1.5)
+    expect_or_dump(
+        err == _expected(lang, "err minconf", v=1.5),
+        f"[lang={lang}] min-conf message is not the i18n key",
+        err=err,
+    )
 
 
 @pytest.mark.parametrize("lang", LANGS)
@@ -209,7 +233,7 @@ def test_every_migrated_error_message_follows_the_language(lang, tmp_path, monke
         LiveTake().finalize()  # no capture -> empty signal -> too short
     assert str(ei.value) == _expected(lang, "err ui too short")
 
-    from v2m.live import LiveSession
+    from v2m.cli import LiveSession
 
     session = LiveSession(out_stem=str(tmp_path / "take"))
     sig = np.zeros(SR, dtype=np.float32)

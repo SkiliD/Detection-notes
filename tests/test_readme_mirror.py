@@ -141,6 +141,7 @@ def _parser_flags() -> set[str]:
                     if a.option_strings:
                         flags.update(a.option_strings)
     for script in ("score_accuracy.py", "profile_analysis.py", "confirm_s_sweep.py",
+                   "liveseg_sweep.py",
                    "guide_capture.py", "reinterpret.py", "replay_takes.py",
                    "engine_drift_watch.py"):
         text = (REPO / "scripts" / script).read_text(encoding="utf-8")
@@ -164,6 +165,7 @@ def _script_flags() -> set[str]:
     """The flags the diagnostic scripts define themselves."""
     flags: set[str] = set()
     for script in ("score_accuracy.py", "profile_analysis.py", "confirm_s_sweep.py",
+                   "liveseg_sweep.py",
                    "guide_capture.py", "reinterpret.py", "replay_takes.py"):
         text = (REPO / "scripts" / script).read_text(encoding="utf-8")
         flags.update(FLAG.findall(text))

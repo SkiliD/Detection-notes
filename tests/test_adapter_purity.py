@@ -27,9 +27,12 @@ import pytest
 
 DETECTION_ENTRIES = {"estimate_bpm_live", "detect_meter", "label_notes"}
 ROOT = Path(__file__).parents[1]
+# The GUI package, plus the CLI module — the CLI live adapter
+# (`LiveSession`) was absorbed into cli.py on 2026-09-28 (v2m/live.py
+# deleted): the guard follows the adapters where they live.
 ADAPTER_FILES = [
     *sorted((ROOT / "src" / "v2m" / "gui").glob("*.py")),
-    ROOT / "src" / "v2m" / "live.py",
+    ROOT / "src" / "v2m" / "cli.py",
 ]
 
 
@@ -61,7 +64,8 @@ def _violations(source: str) -> list[str]:
 
 def test_adapters_import_no_detection_entry():
     """GUI and CLI contain NEITHER an import NOR a call of the detection entries."""
-    assert ADAPTER_FILES, "the adapter files exist"
+    missing = [p for p in ADAPTER_FILES if not p.exists()]
+    assert not missing, f"the guard scans a file that no longer exists: {missing}"
     offenders = []
     for path in ADAPTER_FILES:
         found = _violations(path.read_text(encoding="utf-8"))
@@ -81,8 +85,12 @@ def test_adapters_import_no_detection_entry():
         "from ..core.meter import detect_meter\nmeter = detect_meter(notes, bpm)\n",
         "import v2m.core.meter as m\nm.detect_meter(notes, bpm)\n",
         "from v2m.core.figures import label_notes\nlabel_notes(notes, grid)\n",
+        # the deleted adapter must not come back to life: an import of the
+        # detection entries FROM the old v2m.live path is the same smell
+        "from v2m.live import estimate_bpm_live\nestimate_bpm_live(notes)\n",
     ],
-    ids=["cli-direct", "cli-alias", "gui-direct", "gui-module-path", "gui-labels"],
+    ids=["cli-direct", "cli-alias", "gui-direct", "gui-module-path", "gui-labels",
+         "live-module-must-not-come-back"],
 )
 def test_the_guard_bites_on_the_historical_regressions(snippet):
     """The historical regressions (CLI re-labeling, GUI tick, GUI metronome
