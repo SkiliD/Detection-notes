@@ -136,10 +136,10 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         )
 
         # the results page shows the take, and nothing was flagged red
-        assert win.stack.currentWidget() is win.page_analyze
-        assert len(win.piano._bar_items) == len(result.notes)
-        assert win.piano_keys._spans
-        staff_notes = win.staff.layout().notes
+        assert win.stack.currentWidget() is win.page_results
+        assert len(win.page_results.piano._bar_items) == len(result.notes)
+        assert win.page_results.piano_keys._spans
+        staff_notes = win.page_results.staff.layout().notes
         assert len(staff_notes) == len(result.notes), "the staff does not follow the analysis"
         assert all(1 <= n.measure for n in staff_notes)
         assert win.error_banner.isHidden(), win.error_banner.text()
@@ -186,6 +186,63 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
         # else the queued event delivers during the next test
         win.on_stop_live()
         assert _pump_until(qapp, lambda: win.result is not None, timeout=60)
+    finally:
+        if win.live_thread is not None and win.live_thread.isRunning():
+            win.live_thread.stop()
+            win.live_thread.wait(3000)
+
+
+def test_a_failed_take_leaves_a_trace_in_its_folder(qapp, monkeypatch, tmp_path):
+    """ADR 0031 end to end: a take whose finalization fails (mic failure,
+    capture too short) leaves `<stem>.trace.json` in its own folder —
+    the six empty folders of the 2026-09-29 corpus are explained from
+    now on. The failure arrives through the REAL event path (the queued
+    `failed` signal), not by calling `fail_take` directly: the pin is the
+    window's wiring, not the controller's internals."""
+    import sounddevice as sd
+
+    from v2m.core import takes
+    from v2m.gui import main_window as mw
+
+    monkeypatch.setattr(sd, "InputStream", FakeMic)
+    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)  # the trace stays in the test
+
+    win = mw.MainWindow()
+    try:
+        win.on_start_live()
+        captured = _pump_until(
+            qapp,
+            lambda: win.live_thread is not None and win.live_thread.elapsed() >= 0.3,
+            timeout=60,
+        )
+        assert captured, "the fake mic delivered nothing to the live capture"
+        # make finalize() refuse the take (a capture too short): the failure
+        # event is the real queued signal the window must answer
+        win.live_thread._stop = True
+        take = win.live_thread.take
+        original_finalize = take.finalize
+
+        def finalize_too_short():
+            take._signal = np.zeros(int(take.sr * 0.2), dtype=np.float32)
+            return original_finalize()
+
+        monkeypatch.setattr(take, "finalize", finalize_too_short)
+        win.on_stop_live()
+        # the trace IS the outcome: pump on the file (the failure signal is
+        # queued — it delivers while the loop runs)
+        assert _pump_until(
+            qapp, lambda: list(tmp_path.rglob("*.trace.json")), timeout=60
+        ), "the failed take left no trace in its folder"
+        import json
+
+        payload = json.loads(
+            next(tmp_path.rglob("*.trace.json")).read_text(encoding="utf-8")
+        )
+        assert "too short" in payload["reason"]
+        assert payload["exported"] is False
+        # the failure reached the singer too: the status label says why
+        assert win.page_live.label_status.text().strip()
     finally:
         if win.live_thread is not None and win.live_thread.isRunning():
             win.live_thread.stop()
@@ -328,9 +385,9 @@ def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
 
         win.on_toggle_voice()
         assert _pump_until(
-            qapp, lambda: win.waveform._line.value() > 0.0, 5
+            qapp, lambda: win.page_results.waveform._line.value() > 0.0, 5
         ), "the playhead does not follow the voice"
-        assert win.btn_voice.text() == "■"
+        assert win.page_results.btn_voice.text() == "■"
         win.stop_playback()
         assert win.playback.mode is None
 
@@ -341,7 +398,7 @@ def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
             5,
         ), "the combined mode must sound both sources"
         win.stop_playback()
-        assert win.btn_both.text() == "🎹+🎙"
+        assert win.page_results.btn_both.text() == "🎹+🎙"
     finally:
         win.close()
 
@@ -383,7 +440,7 @@ def test_voice_transpose_shifts_without_reanalysis(qapp, monkeypatch):
         old_signal = voice_player.signal
         pos = win.playback.position()
 
-        win.spin_transpose.setValue(2)  # audible live transpose
+        win.page_results.spin_transpose.setValue(2)  # audible live transpose
         voice_player = win._voice_player
         assert voice_player is not None
         assert voice_player.signal is not old_signal
@@ -435,9 +492,29 @@ def test_live_accuracy_history_is_displayed(qapp):
         txt = win.page_live.label_accuracy.text()
         # mean of 10 and 20 cents on C4: any language, no history-dependence
         assert ("C4 / Do4" in txt or "Do4 / C4" in txt) and "15" in txt
-        win.accuracy.reset()
+        win.page_live.accuracy.reset()
         win._refresh_live_accuracy()
         assert win.page_live.label_accuracy.text() == tr("ui accuracy empty")
+    finally:
+        win.close()
+
+
+def test_live_level_bar_shows_the_silence_gate(qapp):
+    """The mic level bar on the live page (the finder's LevelMeter):
+    fed by every block, the gate drawn on it — "am I being heard?" is
+    answerable before and during a take (the 2026-09-29 corpus: the
+    weakest take carried 61% gated blocks and the worst pitch noise)."""
+    from v2m.core import audio_io
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        meter = win.page_live.level_meter
+        assert meter._gate_share > 0.02  # the gate IS drawn on the bar
+        win._on_live_block(1.0, audio_io.GATE_RMS * 6.0)  # a sung-level block
+        assert not meter._fill.isHidden()
+        win._on_live_block(1.1, 0.0)  # silence: the fill drops
+        assert meter._fill.isHidden()
     finally:
         win.close()
 
@@ -455,11 +532,11 @@ def test_piano_volume_rebuilds_player(qapp):
             notes=[Note(0.0, 1.0, 60, 0.9)], tempo=None, key=None,
         )
         win._live_signal = np.zeros(audio_io.SR, np.float32)
-        win.slider_volume.setValue(70)
+        win.page_results.slider_volume.setValue(70)
         win.on_piano_volume_changed(70)
         assert win.player is not None and len(win.player.signal) > 0
         peak70 = float(np.max(np.abs(win.player.signal)))
-        win.slider_volume.setValue(35)  # half gain
+        win.page_results.slider_volume.setValue(35)  # half gain
         win.on_piano_volume_changed(35)
         peak35 = float(np.max(np.abs(win.player.signal)))
         assert peak35 == pytest.approx(peak70 / 2, rel=0.1)
@@ -558,7 +635,7 @@ def test_reinterpret_button_rereads_evidence_without_pyin(qapp, monkeypatch):
                             lambda *a, **k: _forbidden("pYIN"))
         monkeypatch.setattr(sf, "read", lambda *a, **k: _forbidden("décodage"))
 
-        win.spin_min_note.setValue(80)
+        win.page_results.spin_min_note.setValue(80)
         win.on_reinterpret()
 
         assert win.result is not None and win.result is not before_result

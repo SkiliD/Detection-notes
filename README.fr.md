@@ -29,7 +29,8 @@ Application desktop qui **détecte les notes d'une voix** (hauteur, figures, mes
 - **Export PDF** : gravure de la partition via MuseScore ou LilyPond (détection automatique, message d'installation sinon) — `--pdf` en CLI, case à cocher en GUI
 - **Rapport JSON** (tout, y compris la courbe de hauteur, la mesure, le nombre de mesures, la position mesure:temps de chaque note, l'accord global et les segments d'accords) + **CSV** (liste de notes avec figure et position)
 - **GUI PyQt6** : interface sombre soignée, piano roll, waveform, panneau de résultats avec tableaux par note (position, figure), par segment d'accord et **ligne d'accordage**, drag & drop, **mode notation** (couleur par figure), **bannière d'erreur rouge intégrée** (pas de popups bloquants)
-- **Mode temps réel** : indicateur note/Hz/niveau, **piano roll qui suit la capture** (fenêtre glissante de 10 s, curseur de temps, horloge `mm:ss`, compteur de notes et **mesure détectée** — 3/4, 4/4, 6/8 — affichée en direct), comparaison avec une partition déjà analysée (touche verte/rouge), la note tenue s'affiche **pendant** qu'on la chante (~125 ms de latence d'affichage), figures étiquetées en direct, export à l'arrêt — le suivi de hauteur tourne **hors du callback audio** (thread dédié), donc le pilote ne perd pas de blocs. Une case **« Enregistrer l'audio de la prise »** (décochée par défaut) écrit en plus la prise en WAV 16 bits (`.wav`) dans son dossier `prises_live/<stem>/`, avant les autres artefacts — en live uniquement, une analyse de fichier ayant déjà son audio
+- **Mode temps réel** : indicateur note/Hz/niveau, **piano roll qui suit la capture** (fenêtre glissante de 10 s, curseur de temps, horloge `mm:ss`, compteur de notes et **mesure détectée** — 3/4, 4/4, 6/8 — affichée en direct), comparaison avec une partition déjà analysée (touche verte/rouge), la note tenue s'affiche **pendant** qu'on la chante (~125 ms de latence d'affichage), figures étiquetées en direct, export à l'arrêt — le suivi de hauteur tourne **hors du callback audio** (thread dédié), donc le pilote ne perd pas de blocs. Le niveau du micro est visible **avant et pendant** la prise (une jauge avec le seuil de silence dessiné dessus) : si rien ne dépasse le seuil pendant 3 s avant de commencer, l'application nomme le micro pour qu'il soit vérifié avant de chanter. Une case **« Enregistrer l'audio de la prise »** (cochée par défaut) écrit en plus la prise en WAV 16 bits (`.wav`) dans son dossier `prises_live/<stem>/`, avant les autres artefacts — en live uniquement, une analyse de fichier ayant déjà son audio
+- **Mode « répéter la phrase »** : comparer deux prises de la même phrase côte à côte — `scripts/compare_takes.py` apparie les notes par la politique unique (identique, famille d'arrondi ±1, décalée en temps, hauteur changée, manquantes/ajoutées) et lit les écarts de timing en temps de la seconde prise, pour qu'un tempo légèrement différent ne se lise pas en hésitation
 - **Trouveur de note** : reconnaissance isolée au micro, clavier de 88 touches et historique local des six dernières notes ; une touche ne s'allume que sur une **note confirmée** (jamais sur un brassage de micro), et aucune analyse ni export
 - **Écoute de contrôle** : bouton ▶ (synthé local intégré, aucun logiciel externe) avec **curseur de lecture synchronisé** sur le piano roll et la waveform ; **double-clic** sur le piano roll pour démarrer la lecture à cet endroit. Le piano suit la dynamique de la prise (un accent fort frappe plus fort qu'une note douce), frappe les touches douces plus lentement, respire de quelques millisecondes autour de la grille et sonne dans une pièce légère — déterministe, un replay sonore est identique
 
@@ -81,6 +82,8 @@ La commande `analyze` écrit `sortie.mid`, `sortie.musicxml`, `sortie.json` et `
 v2m analyze chant.wav --quantize --pdf
 ```
 
+Le module d'analyse fichier décode une fois et renvoie un `FileAnalysis` : l'`AnalysisResult`, l'audio mono float32 exact après décodage et `cache_used`. La GUI réutilise cet audio pour la waveform et ce fait de cache pour son message d'état, sans second décodage ni validation répétée. `analyze_signal` continue de renvoyer un `AnalysisResult` pour l'audio déjà en mémoire.
+
 La partition MusicXML embarque **toutes les détections** : chiffrages d'accords au-dessus de la portée (progression par mesure) avec leur nom lisible (« La mineur »), noms sol-fège (Do, Ré, Mi…) sous chaque note, têtes de note colorées selon la confiance (vert = sûre → rouge = douteuse), cartouche récapitulatif dans le titre. Tout s'ouvre dans MuseScore, Finale ou Sibelius.
 
 ### Bibliothèque
@@ -89,9 +92,12 @@ La partition MusicXML embarque **toutes les détections** : chiffrages d'accords
 from v2m.core.pipeline import analyze_file
 from v2m.core.report import export_result
 
-res = analyze_file("chant.wav")
+file_analysis = analyze_file("chant.wav")
+res = file_analysis.analysis
 print(res.tempo.bpm, res.key.best.label, len(res.notes))
 print(res.notes[0].figure)          # ex. "noire"
+print(file_analysis.cache_used)    # True si le cache d'observation validé a servi
+print(len(file_analysis.audio))    # échantillons mono float32 décodés, réutilisés par la waveform
 if res.chord:
     print(res.chord.best.label)     # ex. "Cmaj7" (None si indéterminé)
 
@@ -148,6 +154,8 @@ scripts/
 │                        #   (micro factice temps réel) et archiver l'écart live/final
 ├── engine_drift_watch.py # diagnostic : re-dérive les audits périmés et écrit un rapport
 │                        #   de non-dérive en Markdown (code 1 si une lecture bouge)
+├── compare_takes.py     # diagnostic : deux prises d'une même phrase côte à côte
+│                        #   (effectifs, hauteurs incl. la famille ±1, timing en temps)
 └── reinterpret.py       # diagnostic : réinterpréter une observation sauvegardée, sans pYIN
 
 prises_verite/          # prises vérifiées à la main : <nom>.wav + <nom>.truth.json (voir son README)
@@ -208,14 +216,13 @@ L'analyse est scindée en **deux couches** : une `VoiceObservation` (la courbe d
 Deux outils complètent le travail de corpus :
 
 ```bash
-# balayage de confirm_s : les 18 cas de vérité live x 5 graines x 0,05..0,10 s —
-# l'archive des valeurs mesurées vit dans AGENTS.md
+# balayage de confirm_s : les 18 cas de vérité live x 5 graines x 0,05..0,10 s
 ./.venv/Scripts/python.exe scripts/confirm_s_sweep.py
 
 # balayage du segmenteur live : HOLD_ST x REARTIC_ST sur les mêmes cas plus
 # deux cas de vibrato débutant (+/-0,5 st), plusieurs graines par cellule —
 # décide si le vibrato d'un débutant mérite une tenue plus large (verdict
-# mesuré archivé dans AGENTS.md)
+# mesuré)
 ./.venv/Scripts/python.exe scripts/liveseg_sweep.py
 
 # enregistrement guidé d'une prise vérifiée : chanter, annoter note par note,
@@ -226,7 +233,7 @@ Deux outils complètent le travail de corpus :
 ./.venv/Scripts/python.exe scripts/guide_capture.py prise_verite.wav --audit
 ```
 
-`--values` du balayage restreint les valeurs de seuil scannées (séparées par des virgules) et `--seeds` les graines de synthèse (un cas peut n'échouer que sur UNE graine : le grain de bruit remplit la fenêtre de tenue quelques ms autrement) ; `--holds`/`--reartics` du balayage du segmenteur restreignent ses deux axes de la même façon ; `--audit` de la capture relit une prise existante au lieu d'en enregistrer une.
+`--values` du balayage restreint les valeurs de seuil scannées (séparées par des virgules) et `--seeds` les graines de synthèse (un cas peut n'échouer que sur UNE graine : le grain de bruit remplit la fenêtre de tenue quelques ms autrement) ; `--amps` resynthétise chaque cas plus doucement (défaut `0,35,0,10,0,05` — le corpus mesuré du 29/09/2026 chantait 3 à 7× sous les prises de référence ; le 0,09 livré doit rester exact sur les cellules faibles, une amplitude basse ne doit ni coûter une note ni en inventer) ; `--holds`/`--reartics` du balayage du segmenteur restreignent ses deux axes de la même façon ; `--audit` de la capture relit une prise existante au lieu d'en enregistrer une.
 
 Un dernier outil suit les sessions dans le temps :
 
@@ -248,9 +255,20 @@ Et un outil mesure la reconnaissance temps réel elle-même, prise par prise :
 ./.venv/Scripts/python.exe -X utf8 scripts/replay_takes.py [--out rapport.json] [--take live_...] [--changed]
 ```
 
-Pour chaque prise possédant un `<stem>.wav`, le script nourrit la vraie `LiveCapture` à l'horloge réelle, lance l'analyse finale et classe chaque note live par la politique de comparaison UNIQUE (`core.compare` — le même filet que le cerclage GUI et le bloc `live_vs_final` du JSON) : identique, voisin ±1, déplacée ; le taux de contours affiché est l'indicateur de santé du temps réel. Rien n'est exporté (un rejeu n'écrase jamais les artefacts d'une prise) ; `--out fichier.json` archive le tableau ; `--take <stem>` restreint le rejeu à une prise ; `--changed` ne re-dérive que les prises dont l'audit archivé a été mesuré par un moteur ANTIÉRIEUR (le hash du code du moteur voyage dans le sidecar `<prise>.live_vs_final.json` — après une modification du moteur, re-mesurez les verdicts qu'il a pu changer). Le moteur vit dans `core.replay` (le flux est injecté — un rejeu ne remplace jamais le `sd.InputStream` global que lit le vrai micro) ; la GUI le réutilise : chaque prise est rejouée automatiquement à l'arrêt de son enregistrement, en arrière-plan, et l'audit remplace le sidecar `live_vs_final.json` de la prise. La lecture hors ligne du rejeu réutilise l'évidence en cache (`<prise>.observation.npz`, semée par le premier rejeu puis relue) pour que pYIN — l'étape la plus longue — ne tourne qu'une fois par prise ; un cache périmé ou corrompu retombe sur l'analyse complète et est re-semé, jamais cru.
+Pour chaque prise possédant un `<stem>.wav`, le script nourrit la vraie `LiveCapture` à l'horloge réelle, lance l'analyse finale et classe chaque note live par la politique de comparaison UNIQUE (`core.compare` — le même filet que le cerclage GUI et le bloc `live_vs_final` du JSON) : identique, voisin ±1, déplacée ; le taux de contours affiché est l'indicateur de santé du temps réel. Rien n'est exporté (un rejeu n'écrase jamais les artefacts d'une prise) ; `--out fichier.json` archive le tableau ; `--take <stem>` restreint le rejeu à une prise ; `--changed` ne re-dérive que les prises dont l'audit archivé a été mesuré par un moteur ANTIÉRIEUR (le hash du code du moteur voyage dans le sidecar `<prise>.live_vs_final.json` — après une modification du moteur, re-mesurez les verdicts qu'il a pu changer). Le moteur vit dans `core.replay` (le flux est injecté — un rejeu ne remplace jamais le `sd.InputStream` global que lit le vrai micro) ; la GUI le réutilise : chaque prise est rejouée automatiquement à l'arrêt de son enregistrement, en arrière-plan, et l'audit remplace le sidecar `live_vs_final.json` de la prise. Une prise qui meurt AVANT son analyse finale (micro muet, capture sous 0,5 s, capture perdue) laisse un `<stem>.trace.json` dans son propre dossier — l'échec s'explique lui-même au lieu de rester un dossier vide. La lecture hors ligne du rejeu réutilise l'évidence en cache (`<prise>.observation.npz`, semée par le premier rejeu puis relue) pour que pYIN — l'étape la plus longue — ne tourne qu'une fois par prise ; un cache périmé ou corrompu retombe sur l'analyse complète et est re-semé, jamais cru.
 
-Le suivi de `--changed` est automatisé par un script : `engine_drift_watch.py` re-dérive tous les audits périmés, compare chaque ligne fraîche au sidecar qu'elle remplace (deltas par métrique ; tout mouvement d'effectif est une dérive, une variation de taux sous 0,15 est le bruit de session honnête du moteur) et écrit un rapport de non-dérive en Markdown — code 1 quand une lecture a bougé, pour qu'un CI ou un hook pré-commit échoue bruyamment quand la dernière modification du moteur a déplacé un verdict mesuré. `--root <dossier>` vise un autre dossier de prises, `--report <fichier>` nomme le rapport (défaut `docs/engine-drift.md`) :
+Le suivi de `--changed` est automatisé par un script : `engine_drift_watch.py` re-dérive tous les audits périmés, compare chaque ligne fraîche au sidecar qu'elle remplace (deltas par métrique ; tout mouvement d'effectif est une dérive, une variation de taux sous 0,15 est le bruit de session honnête du moteur) et écrit un rapport de non-dérive en Markdown — code 1 quand une lecture a bougé, pour qu'un CI ou un hook pré-commit échoue bruyamment quand la dernière modification du moteur a déplacé un verdict mesuré. `--root <dossier>` vise un autre dossier de prises, `--report <fichier>` nomme le rapport (défaut `docs/engine-drift.md`).
+
+Et un outil répond à la boucle de travail du chanteur — chanter une phrase, écouter, la chanter à nouveau — en comparant deux prises de la MÊME phrase :
+
+```bash
+# la seconde prise a-t-elle changé quelque chose ? effectifs, hauteurs
+# (la famille d'arrondi ±1 nommée comme telle) et écarts de timing,
+# en temps de la seconde prise
+./.venv/Scripts/python.exe -X utf8 scripts/compare_takes.py live_A live_B [--json rapport.json]
+```
+
+Chaque note de la prise A s'apparie à sa note la plus proche dans B (la plus proche en attaque, un à un) et chaque appariement est classé : identique, voisin d'un demi-ton (la famille d'arrondi, pas une fausse note), décalée en temps (même hauteur au-delà de la fenêtre — hésitation), hauteur changée, plus les notes sans homologue (manquantes en B, ajoutées en B). L'écart de temps se lit en temps de la prise B, pour qu'un tempo légèrement différent n'inonde pas la comparaison de décalages ; un écart de tempo de plus de 5 % est annoncé à la place. Le moteur (`core.phrase`) lit les rapports exportés des prises (`<stem>.json`) ; un nom nu se résout dans `prises_live/`, un chemin est pris tel quel. Rien n'est écrit sans `--json` ; un rapport absent ou corrompu est nommé et le code de sortie est 2.
 
 ```bash
 # après avoir touché le moteur : les verdicts archivés sont-ils toujours vrais ?
@@ -260,9 +278,7 @@ Le suivi de `--changed` est automatisé par un script : `engine_drift_watch.py` 
 ## Documentation projet
 
 - **`v2m weekly`** — le récapitulatif hebdomadaire en texte (`--pdf` le grave avec le même outil que la partition) : la santé du temps réel sur plusieurs semaines, QUAND vous chantez le mieux (matin/après-midi/soir), les sous-totaux par jour. La même vue existe sur la page cohérence ; la rétention (`prises_live/` maintenue sous un budget de taille documenté, les prises les plus vieilles taillées en entier, l'historique conservé dans le journal) s'exécute quand le récapitulatif ou un export touche le dossier.
-- **`CONTEXT.md`** — glossaire du domaine (Analyse, Note, Tempo, Tonalité, Accord, Figure, Mesure, Export, Rapport) et conventions (langues, erreurs) : la référence pour toute évolution du code.
 - **`core/i18n.py`** — catalogue des chaînes utilisateur (fr/en) : toute nouvelle chaîne visible y passe par `tr()` ; les noms de notes suivent la langue (`note_display`), les figures stockées restent canoniques (`tr_figure` traduit à l'affichage).
-- **`AGENTS.md`** — apprentissages techniques et **règles de session** (non-régression, mise à jour des docs, lisibilité) pour les agents outillés ; lu automatiquement si l'option est activée dans le client.
 
 ## Qualité & limites
 

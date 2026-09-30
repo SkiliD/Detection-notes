@@ -52,6 +52,13 @@ Contracts that so far lived only in AGENTS.md:
    needs a whitelisted justification per module — today the single site
    (pdf_export) runs the user's external engraver, never an
    interpreter, never i18n.
+
+9. **A Qt widget is constructed only where its screen is owned** (ADR
+   0010's pattern, complete): the shared library (gui/widgets.py,
+   gui/staff.py), a Page module (results/live/finder), the home builder,
+   or the composition window. A widget born in a helper, a dialog or a
+   fourth place re-opens "who owns this screen?" and fails until it
+   joins a Page (or earns its allowlist line with a reason).
 """
 
 from __future__ import annotations
@@ -847,3 +854,130 @@ def test_subprocess_guard_bites():
     )
     # 4. the qt-free claim is verified against the REAL metronome today
     assert not _imports_i18n(REPO / "src" / "v2m" / "core" / "metronome.py")
+
+
+# --- guard 9: a widget is constructed where its screen is owned -------------
+# ADR 0010's pattern, complete (results, live, finder are Page modules):
+# the construction sites stay auditable by MODULE. A widget born in a
+# helper, a dialog or any fourth place re-opens "who owns this screen?"
+# — the drift the three-slice extraction just closed.
+WIDGET_OWNERS = {
+    # the shared library: every reusable view, its helpers and its styles
+    "gui/widgets.py": "shared widget library",
+    "gui/staff.py": "shared staff view (vector, no music font)",
+    # the Page modules: widgets + behavior in one place
+    "gui/results_page.py": "results Page module",
+    "gui/live_page.py": "live Page module",
+    "gui/finder_page.py": "finder Page module",
+    # the last builder: the home page has no state of its own
+    "gui/pages.py": "home page builder",
+    # the composition window: the stack, the central widget, the banner
+    "gui/main_window.py": "window composition (stack, central, banner)",
+}
+# Q-names that are NOT screens: event sources and handles a non-GUI owner
+# may create. QTimer is load-bearing in core/metronome.qt_scheduler — the
+# lazily-imported, injected GUI binding (a GC'd timer dies, the caller
+# keeps the handle); it owns no screen, so it passes.
+NON_WIDGET_QNAMES = {"QTimer"}
+
+
+def _widget_constructions(path: Path) -> list[tuple[int, str]]:
+    """Widget CONSTRUCTION calls of a source, with a provenance verdict.
+
+    A call whose callee (dotted path or bare name) starts with Q, or is a
+    pyqtgraph item (`pg.…`), is a widget under construction. The Q-prefix
+    is sound HERE: PyQt6 names every Qt class with Q, and this codebase's
+    own classes are never Q-prefixed. Non-widget callees (NotePlayer,
+    BeatGrid, Path, Verdict…) never match. Layouts, timers and other
+    non-screen Q-names pass through (NON_WIDGET_QNAMES) — only Page
+    modules and the window may build screens.
+    """
+    verdicts: list[tuple[int, str]] = []
+    try:
+        key = path.relative_to(REPO / "src" / "v2m").as_posix().replace("\\", "/")
+    except ValueError:  # a probe outside the repo: nothing owns it
+        key = ""
+    kind = WIDGET_OWNERS.get(key, "unowned")
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        name: str | None = None
+        if isinstance(callee, ast.Name):
+            name = callee.id
+        elif isinstance(callee, ast.Attribute):
+            parts = []
+            while isinstance(callee, ast.Attribute):
+                parts.append(callee.attr)
+                callee = callee.value
+            if isinstance(callee, ast.Name):
+                parts.append(callee.id)
+            name = ".".join(reversed(parts))
+        if name is None or name in NON_WIDGET_QNAMES:
+            continue
+        if name.startswith("Q") or name.startswith("pg."):
+            verdicts.append((node.lineno, kind))
+    return verdicts
+
+
+def test_widgets_are_built_where_their_screen_is_owned():
+    """Guard 9: widget construction lives in the library, a Page, or the window.
+
+    ADR 0010's pattern is COMPLETE (three Page modules); this keeps it
+    complete — a widget born in a helper re-opens the ownership question
+    the extraction answered, so the fourth place fails until it joins a
+    Page module or earns its WIDGET_OWNERS line with a reason.
+    """
+    offenders: list[str] = []
+    for path in sorted((REPO / "src" / "v2m").rglob("*.py")):
+        for lineno, kind in _widget_constructions(path):
+            if kind != "unowned":
+                continue
+            rel = path.relative_to(REPO / "src" / "v2m").as_posix().replace("\\", "/")
+            offenders.append(
+                f"src/v2m/{rel}:{lineno}: widget built where no screen is owned — "
+                "move it into a Page module (gui/*_page.py) or whitelist "
+                "the module in WIDGET_OWNERS with its reason"
+            )
+    assert not offenders, (
+        "a widget constructed outside its owner:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_widget_guard_bites():
+    """Guard 9 has TEETH: a stranger module building a widget is refused."""
+    # a bare Q-construction in an unowned module is flagged, with its line
+    helper = Path(tempfile.mkdtemp()) / "helper.py"
+    helper.write_text(
+        "from PyQt6.QtWidgets import QLabel\n"
+        "def badge():\n"
+        "    return QLabel('boom')\n",
+        encoding="utf-8",
+    )
+    assert _widget_constructions(helper) == [(3, "unowned")]
+    # pyqtgraph items count too (dotted callee)
+    plotter = Path(tempfile.mkdtemp()) / "plotter.py"
+    plotter.write_text(
+        "import pyqtgraph as pg\n"
+        "w = pg.PlotWidget()\n",
+        encoding="utf-8",
+    )
+    assert _widget_constructions(plotter) == [(2, "unowned")]
+    # non-widget classes are invisible to the guard (no Q-prefix, no pg. path)
+    plain = Path(tempfile.mkdtemp()) / "plain.py"
+    plain.write_text(
+        "from pathlib import Path\n"
+        "from ..core.grid import BeatGrid\n"
+        "p = Path('.')\n"
+        "g = BeatGrid(120.0)\n",
+        encoding="utf-8",
+    )
+    assert _widget_constructions(plain) == []
+    # and the real tree stays clean: every construction site is an owner,
+    # and the timer pass-through keeps core/metronome's qt_scheduler legal
+    assert all(
+        kind != "unowned"
+        for path in sorted((REPO / "src" / "v2m").rglob("*.py"))
+        for _, kind in _widget_constructions(path)
+    )
+    assert not _widget_constructions(REPO / "src" / "v2m" / "core" / "metronome.py")

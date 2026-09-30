@@ -47,11 +47,12 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     pdf_written = False
     try:
         print(tr("cli analyzing").format(path=path))
-        res = analyze_file(
+        file_analysis = analyze_file(
             str(path),
             opts=AnalyzeOptions(min_conf=args.min_conf, min_note_s=args.min_note / 1000.0),
             progress=lambda f, m: print(f"  [{int(f * 100):3d}%] {m}", end="\r"),
         )
+        res = file_analysis.analysis
         print()
 
         stem = Path(args.output).with_suffix("") if args.output else path.with_suffix("")

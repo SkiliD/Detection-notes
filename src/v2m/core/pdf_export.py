@@ -96,7 +96,13 @@ def export_pdf(musicxml_path: str | Path, pdf_path: str | Path) -> str:
     try:
         proc = subprocess.run(
             [cmd, "-o", out_arg, str(musicxml_path)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True,
+            # the tool's stderr is decoded in the LOCAL encoding, strict by
+            # default: a UTF-8-emitting MuseScore under a cp1252 console
+            # once raised UnicodeDecodeError OUTSIDE the PdfExportError
+            # contract (an unhandled crash for a cosmetic detail line).
+            errors="replace",
+            timeout=120,
             check=False,
         )
     except FileNotFoundError:

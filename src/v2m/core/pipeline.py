@@ -60,6 +60,21 @@ class AnalysisResult:
         return 0.0
 
 
+@dataclass
+class FileAnalysis:
+    """One file analysis and the exact decoded audio that produced it.
+
+    `cache_used` reports whether the file's validated Observation cache
+    served this reading. The audio is returned as mono float32 at the
+    analysis sample rate, so a presentation adapter can draw its waveform
+    without decoding the source a second time.
+    """
+
+    analysis: AnalysisResult
+    audio: np.ndarray
+    cache_used: bool
+
+
 # One policy for the analysis thresholds: the dataclass, the CLI parsers,
 # the GUI and LiveTake all read these — a default written twice had already
 # started to drift (the GUI hard-coded its own 0.6).
@@ -235,7 +250,13 @@ def analyze_file(
     path: str,
     opts: AnalyzeOptions | None = None,
     progress: Optional[Callable[[float, str], None]] = None,
-) -> AnalysisResult:
+) -> FileAnalysis:
+    """Analyze one audio file and return its result, audio, and cache fact.
+
+    Decode and cache validation happen once here. Callers that need the
+    original samples (for example, to draw the waveform) use this same
+    buffer instead of decoding the file again.
+    """
     opts = opts or AnalyzeOptions()
     y = audio_io.load_file(path)
     # The take's own cached observation (<take>.observation.npz, written by
@@ -246,6 +267,7 @@ def analyze_file(
     # cache can only ever SAVE time, never change a decision: same evidence
     # object, same interpretation.
     observation = cached_observation(path, y, audio_io.SR, opts)
+    cache_used = observation is not None
     report = progress or (lambda f, m: None)
     report(0.05, tr("progress tempo"))
     if observation is None:
@@ -265,13 +287,14 @@ def analyze_file(
             observation.save(takes.evidence_path(path))
         except OSError:
             pass
-    return interpret_observation(
+    result = interpret_observation(
         observation,
         tempo=detect_tempo(y, audio_io.SR, bpm_range=opts.bpm_range),
         source=path,
         opts=opts,
         report=progress or (lambda f, m: None),
     )
+    return FileAnalysis(analysis=result, audio=y, cache_used=cache_used)
 
 
 def cached_observation(

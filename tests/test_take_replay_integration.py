@@ -333,3 +333,59 @@ def test_silence_watch_is_per_take_state(qapp, monkeypatch, tmp_path):
         assert win._live.silence_since is None
     finally:
         win.close()
+
+
+# ------------------------------------------------------------------------- #
+# A mute or weak mic is named BEFORE the take starts (2026-09-29 request:
+# warn when the level stays under the silence gate for 3 s before a take,
+# so a weak mic is named before singing). One watch per phase: before the
+# first clear block `watch_low_level` speaks; after, `watch_silence` —
+# the same per-block telemetry, two windows, never both at once.
+# ------------------------------------------------------------------------- #
+
+
+def test_low_mic_is_named_before_the_take_starts(qapp):
+    """3 s under the gate before the first clear block: the message; a
+    clear block arms the take and hands over to the silence watch."""
+    from v2m.core import audio_io
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        gate = audio_io.GATE_RMS
+        # settling: under the gate, under the threshold — quiet
+        win._on_live_block(0.0, 0.0)
+        win._on_live_block(1.0, gate * 0.5)
+        assert not win.statusBar().currentMessage()
+        assert win._live.low_since == 0.0
+        # past 3 s of nothing above the gate: the singer is TOLD
+        win._on_live_block(3.2, 0.0)
+        msg = win.statusBar().currentMessage()
+        assert "3" in msg and "seuil" in msg.lower() or "gate" in msg.lower(), msg
+        # a clear block disarms the pre-take watch for the WHOLE take:
+        # silence at t=5 is now the DURING-take watch's business
+        win._on_live_block(4.0, gate * 3.0)
+        assert win._live.heard_once
+        assert win._live.low_since is None
+        win._on_live_block(7.5, 0.0)
+        assert win._live.silence_since == 7.5  # the other watch owns it now
+    finally:
+        win.close()
+
+
+def test_low_mic_watch_rearms_on_a_new_take(qapp, monkeypatch, tmp_path):
+    """The watch state belongs to the TAKE (LiveRenderState): the next
+    take re-arms it — a mic that went quiet between takes is named again."""
+    from v2m.gui import main_window as mw
+
+    _redirect(monkeypatch, mw, tmp_path)
+    win = mw.MainWindow()
+    try:
+        win._on_live_block(0.0, 0.5)  # take 1 heard the singer
+        assert win._live.heard_once
+        win._live = mw.LiveRenderState()  # on_start_live swaps the state
+        assert not win._live.heard_once
+        win._on_live_block(0.0, 0.0)  # take 2: the mic went mute meanwhile
+        assert win._live.low_since == 0.0
+    finally:
+        win.close()

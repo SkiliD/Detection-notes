@@ -268,6 +268,35 @@ def _take_file(tmp_path: Path) -> Path:
     return wav
 
 
+def test_analyze_file_decodes_and_checks_the_cache_once(tmp_path, monkeypatch):
+    """The FileAnalysis seam must produce all file facts in one pass."""
+    from v2m.core import pipeline
+
+    wav = _take_file(tmp_path)
+    calls = {"decode": 0, "cache": 0}
+    real_load = audio_io.load_file
+    real_cached = pipeline.cached_observation
+
+    def _count_load(path, sr=audio_io.SR):
+        calls["decode"] += 1
+        return real_load(path, sr=sr)
+
+    def _count_cache(path, y, sr, opts):
+        calls["cache"] += 1
+        return real_cached(path, y, sr, opts)
+
+    monkeypatch.setattr(pipeline.audio_io, "load_file", _count_load)
+    monkeypatch.setattr(pipeline, "cached_observation", _count_cache)
+
+    outcome = analyze_file(str(wav), opts=AnalyzeOptions())
+
+    assert calls == {"decode": 1, "cache": 1}
+    assert outcome.audio.dtype == np.float32
+    assert outcome.audio.ndim == 1 and len(outcome.audio) > 0
+    assert outcome.analysis.source == str(wav)
+    assert outcome.cache_used is False
+
+
 def test_pipeline_reuses_a_fresh_observation_cache(tmp_path, monkeypatch):
     wav = _take_file(tmp_path)
     opts = AnalyzeOptions()
@@ -289,10 +318,11 @@ def test_pipeline_reuses_a_fresh_observation_cache(tmp_path, monkeypatch):
         raise AssertionError("a fresh cache must avoid pYIN")
 
     monkeypatch.setattr("v2m.core.pipeline.VoiceObservation.from_signal", _forbidden)
-    result = analyze_file(str(wav), opts=opts)
-    assert [n.midi for n in result.notes] == [60, 62, 64]
+    outcome = analyze_file(str(wav), opts=opts)
+    assert outcome.cache_used is True
+    assert [n.midi for n in outcome.analysis.notes] == [60, 62, 64]
     # the cache's result is the same reading as the full computation
-    assert reinterpret.notes_fingerprint(result) == expected
+    assert reinterpret.notes_fingerprint(outcome.analysis) == expected
 
 
 def test_pipeline_ignores_a_stale_cache(tmp_path, monkeypatch):
@@ -316,7 +346,8 @@ def test_pipeline_ignores_a_stale_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "v2m.core.pipeline.VoiceObservation.from_signal", _counting
     )
-    analyze_file(str(wav), opts=opts)
+    outcome = analyze_file(str(wav), opts=opts)
+    assert outcome.cache_used is False
     assert calls, "a stale cache must re-run the evidence build"
 
 
@@ -330,15 +361,16 @@ def test_pipeline_ignores_a_cache_without_attacks_when_attacks_are_asked(tmp_pat
     obs.source_size = wav.stat().st_size
     obs.source_mtime = wav.stat().st_mtime
     obs.save(cache)
-    assert analyze_file(str(wav), opts=AnalyzeOptions()).notes
+    assert analyze_file(str(wav), opts=AnalyzeOptions()).analysis.notes
 
 
 def test_pipeline_ignores_a_corrupt_cache(tmp_path):
     wav = _take_file(tmp_path)
     cache = wav.with_suffix(".observation.npz")
     cache.write_bytes(b"not an npz file")
-    result = analyze_file(str(wav), opts=AnalyzeOptions())
-    assert result.notes  # the unreadable cache did not cost the analysis
+    outcome = analyze_file(str(wav), opts=AnalyzeOptions())
+    assert outcome.cache_used is False
+    assert outcome.analysis.notes  # the unreadable cache did not cost the analysis
 
 
 def test_analyze_file_autosaves_the_observation_cache(tmp_path, monkeypatch):
@@ -347,6 +379,7 @@ def test_analyze_file_autosaves_the_observation_cache(tmp_path, monkeypatch):
     opts = AnalyzeOptions()
     assert not wav.with_suffix(".observation.npz").exists()
     first = analyze_file(str(wav), opts=opts)
+    assert first.cache_used is False
     cache = wav.with_suffix(".observation.npz")
     assert cache.exists(), "the analysis did not leave its evidence beside the take"
 
@@ -362,8 +395,9 @@ def test_analyze_file_autosaves_the_observation_cache(tmp_path, monkeypatch):
 
     monkeypatch.setattr("v2m.core.pipeline.VoiceObservation.from_signal", _forbidden)
     second = analyze_file(str(wav), opts=opts)
-    assert reinterpret.notes_fingerprint(second) == expected
-    assert reinterpret.notes_fingerprint(first) == expected
+    assert second.cache_used is True
+    assert reinterpret.notes_fingerprint(second.analysis) == expected
+    assert reinterpret.notes_fingerprint(first.analysis) == expected
 
 
 def test_autosave_survives_a_readonly_folder(tmp_path, monkeypatch):
@@ -377,7 +411,7 @@ def test_autosave_survives_a_readonly_folder(tmp_path, monkeypatch):
 
     monkeypatch.setattr(VoiceObservation, "save", _denied)
     result = analyze_file(str(wav), opts=AnalyzeOptions())
-    assert result.notes  # the analysis went through
+    assert result.analysis.notes  # the analysis went through
     assert not cache.exists()
     monkeypatch.setattr(VoiceObservation, "save", real_save)
 
@@ -405,6 +439,6 @@ def test_pipeline_ignores_a_cache_of_another_format_version(tmp_path):
 
     # the cache refused, the analysis goes through the full build
     result = analyze_file(str(wav), opts=AnalyzeOptions())
-    assert [n.midi for n in result.notes] == [60, 62, 64]
+    assert [n.midi for n in result.analysis.notes] == [60, 62, 64]
     # and the .npz itself stays READABLE (the loader's tolerance)
     assert VoiceObservation.load(cache).sample_rate == 22_050

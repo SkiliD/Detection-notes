@@ -41,9 +41,18 @@ window re-deriving them per tick.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
+from ..core import audio_io
+from ..core.live_session import MIN_CAPTURE_S
 from ..core.takes import live_export_dir, live_take_name
+
+# A trace with no audio behind it would tell nothing the empty folder did
+# not: without a signal there is no take, only a Start press (the mic
+# failed to open) — the failure is still announced (the thread's `failed`
+# event), there is just no diagnosable folder to write one into.
+MIN_TRACEABLE_SIGNAL_BYTES = 1
 
 
 @dataclass(frozen=True)
@@ -84,6 +93,14 @@ class LiveSessionController:
       the next take): stores the event's signal — ALWAYS, an empty bytes
       payload CLEARS the buffer (the stale-signal family) — and returns
       the `Verdict` (timer) for the adapter to apply.
+    - `fail_take()` — the take died before its export (the thread's
+      `failed` event, no analysis arrived): writes the diagnostic trace
+      into the take's own folder and returns the path, or None. The
+      window calls it best-effort from the failure path ONLY — never
+      from a normal stop, where the queued analysis may still arrive.
+    - `write_trace(reason, detail)` — the trace writer `fail_take` uses;
+      callers with a reason of their own (a future failure path) name it
+      here.
     - `pump_replay(capture_running, timer_running, worker_running)` —
       the next queued replay to start, or None when a guard says wait.
     - `replay_finished()` — the running replay ended; the next pump may
@@ -102,6 +119,7 @@ class LiveSessionController:
         self._stem: str | None = None
         self._signal: bytes | None = None
         self._exported = False
+        self._traced = False
         self._queue: list[str] = []
         self._replay_running = False
 
@@ -111,6 +129,7 @@ class LiveSessionController:
         """A NEW take owns every buffer; the replay queue SURVIVES."""
         self._stem = None
         self._exported = False
+        self._traced = False
         self._signal = None
 
     def set_signal(self, signal_bytes: bytes) -> None:
@@ -181,6 +200,101 @@ class LiveSessionController:
         if signal_bytes is not None:
             self._signal = signal_bytes
         return Verdict(keep_timer=bool(capture_running))
+
+    # -- the failed take: a diagnosable trace ---------------------------------
+
+    # -- the failed take: a diagnosable trace ---------------------------------
+
+    @staticmethod
+    def reason_for_failure(signal_bytes: bytes | None) -> str:
+        """Why this take has no final analysis, read from the signal size.
+
+        The window (and any future caller) passes the take's signal bytes;
+        the classification is the CONTROLLER's — the ADR's decision puts
+        the failure vocabulary with the take's single owner, so every
+        trace names a failure the same way. The thresholds: `finalize`
+        refuses a capture under half a second (`err ui too short`), and
+        nothing captured at all is a dead or silent mic.
+        """
+        size = len(signal_bytes) if signal_bytes else 0
+        samples = size // 4  # float32 mono: the live signal's wire format
+        if samples == 0:
+            return "no audio captured (mic silent or unavailable)"
+        if samples < audio_io.SR * MIN_CAPTURE_S:
+            seconds = samples / audio_io.SR
+            # FLOOR at the display precision: one sample under the 0.5 s
+            # minimum is 0.49995 s — rounding (even to 3 decimals) would
+            # read "too short to analyze (0.500 s)", the text contradicting
+            # its own complaint. Down is always honest: a too-short capture
+            # displays strictly under the bound it violated.
+            shown = math.floor(seconds * 1000) / 1000
+            return f"capture too short to analyze ({shown:.3f} s)"
+        return "no final analysis (capture stopped before finalize)"
+
+    def fail_take(self) -> str | None:
+        """The take died before its export: write its trace, return the path.
+
+        The 2026-09-29 corpus hazard, THE case this exists for: a take
+        that dies before its first export has NO stem yet (the stem is
+        minted at the first export), so the trace must mint it HERE — the
+        failure itself names the folder (a pre-export mint is harmless:
+        the stem is a timestamp, `begin_take` forgets it, and an exported
+        take never reaches this path). The failure is only diagnosable
+        when there is a take to diagnose: without captured audio (a Start
+        press against a dead mic) there is no folder, the failure stays
+        on the status banner where it was announced. One trace per take:
+        the first failure names the cause, later ones would contradict it.
+
+        Best-effort, never raises (the take is already lost; the trace
+        must not raise a second error): returns the path written, or None
+        when there is nothing to write on.
+        """
+        if self._exported:
+            return None  # its artifacts and sidecar explain it — a trace would be noise
+        if not self._signal or len(self._signal) < MIN_TRACEABLE_SIGNAL_BYTES:
+            return None
+        reason = self.reason_for_failure(self._signal)
+        return self.write_trace(reason)
+
+    def write_trace(self, reason: str, detail: str = "") -> str | None:
+        """Write `<stem>.trace.json` into the take's folder; return the path.
+
+        The take's folder is named HERE (minting the stem if the failure
+        came before any export — see `fail_take`, the only caller the
+        failure path needs). Refusals: an `exported` take (its artifacts
+        and `live_vs_final.json` sidecar are the explanation — a trace
+        beside them would be noise) and an already-traced take (ONE trace
+        per take: the first failure is the cause, a later one would
+        contradict it — the invariant lives with the single writer).
+        Best-effort, never raises: returns the path written, or None.
+        """
+        if self._exported or self._traced:
+            return None
+        if not self._signal or len(self._signal) < MIN_TRACEABLE_SIGNAL_BYTES:
+            return None
+        import json
+        from datetime import datetime, timezone
+
+        stem = self.export_stem()  # the failure names the folder too
+        try:
+            folder = live_export_dir(stem)
+            folder.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "take": stem,
+                "reason": reason,
+                "detail": detail,
+                "signal_bytes": len(self._signal),
+                "exported": self._exported,
+                "written_at": datetime.now(timezone.utc).isoformat(),
+            }
+            path = folder / f"{stem}.trace.json"
+            path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            self._traced = True
+            return str(path)
+        except Exception:
+            return None
 
     # -- the replay queue ----------------------------------------------------
 

@@ -18,6 +18,11 @@ from .meter import detect_meter
 from .pipeline import LIVE_CONF, AnalysisResult, AnalyzeOptions, analyze_signal
 from .tempo import estimate_bpm_live
 
+# The captured length under which `finalize` refuses to analyze (a shorter
+# take has nothing readable: `err ui too short`). The failure-vocabulary
+# consumer (the GUI trace) reads the same constant, never a second literal.
+MIN_CAPTURE_S = 0.5
+
 
 @dataclass(frozen=True)
 class LiveEvent:
@@ -226,7 +231,7 @@ class LiveTake:
         if self._failure is not None:
             raise self._failure
         signal = self.stop()
-        if len(signal) < self.sr // 2:
+        if len(signal) < self.sr * MIN_CAPTURE_S:
             self._fail(ValueError(tr("err ui too short")))
         try:
             result = analyze_signal(
@@ -257,10 +262,16 @@ class LiveTake:
         return result, signal
 
     def _fail(self, error: Exception) -> None:
-        """Report a finalization failure once, then remember it for retries."""
+        """Report a finalization failure once, then remember it for retries.
+
+        The event carries the take's signal (the same payload the
+        "finalized" event would have): the failure diagnostic — the trace
+        that says WHY the take died — needs the audio to name the folder
+        and the duration, and only the take has it.
+        """
         self._failure = error
         self._error_emitted = True
-        self._emit(LiveEvent("failed", error=str(error)))
+        self._emit(LiveEvent("failed", error=str(error), signal=self._signal))
         raise error
 
     def close(self) -> None:

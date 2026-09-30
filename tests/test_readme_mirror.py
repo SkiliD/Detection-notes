@@ -143,7 +143,7 @@ def _parser_flags() -> set[str]:
     for script in ("score_accuracy.py", "profile_analysis.py", "confirm_s_sweep.py",
                    "liveseg_sweep.py",
                    "guide_capture.py", "reinterpret.py", "replay_takes.py",
-                   "engine_drift_watch.py"):
+                   "engine_drift_watch.py", "compare_takes.py"):
         text = (REPO / "scripts" / script).read_text(encoding="utf-8")
         flags.update(FLAG.findall(text))
     return flags - INTERNAL_FLAGS - SHORT_ALIASES - {"-h"}
@@ -166,7 +166,8 @@ def _script_flags() -> set[str]:
     flags: set[str] = set()
     for script in ("score_accuracy.py", "profile_analysis.py", "confirm_s_sweep.py",
                    "liveseg_sweep.py",
-                   "guide_capture.py", "reinterpret.py", "replay_takes.py"):
+                   "guide_capture.py", "reinterpret.py", "replay_takes.py",
+                   "compare_takes.py"):
         text = (REPO / "scripts" / script).read_text(encoding="utf-8")
         flags.update(FLAG.findall(text))
     return flags

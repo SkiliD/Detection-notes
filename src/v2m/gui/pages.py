@@ -1,29 +1,23 @@
-"""Widget assembly for the application's GUI pages.
+"""Widget assembly for the application's HOME page.
 
-Page builders create widgets and connect user actions; MainWindow owns state,
-navigation, capture, analysis, and rendering callbacks. The note finder is
-NOT here: its page is a Page module (`gui/finder_page.py`, FinderPage) that
-owns its widgets and behavior — the window only composes it.
+The home page is the last builder here: the three feature pages are Page
+modules (`gui/results_page.py`, `gui/live_page.py`, `gui/finder_page.py`)
+that own their widgets and behavior — the window only composes them.
+MainWindow owns state, navigation, capture, analysis, and rendering
+callbacks.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QListWidget, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 import pyqtgraph as pg
 
-from ..core.pdf_export import find_notation_tool
 from ..core.i18n import tr
-from .staff import StaffView
-from .widgets import (
-    HINT_CARD_STYLE, PianoRoll, PianoView,
-    ResultsPanel, WaveformView, action_button_style,
-)
+from .widgets import HINT_CARD_STYLE, action_button_style
 
 
 def build_home_page(window) -> QWidget:
@@ -128,111 +122,4 @@ def build_home_page(window) -> QWidget:
     window._hint.setStyleSheet("color: #7f8b99;")
     layout.addWidget(window._hint)
     layout.addStretch(3)
-    return page
-
-
-def build_analyze_page(window) -> QWidget:
-    page = QWidget()
-    root = QVBoxLayout(page)
-    top = QHBoxLayout()
-    window.btn_back = QPushButton("")
-    window.btn_back.clicked.connect(window.on_back_home)
-    top.addWidget(window.btn_back)
-    window.label_file = QLabel("")
-    window.label_file.setStyleSheet("font-weight: bold;")
-    top.addWidget(window.label_file, stretch=1)
-    root.addLayout(top)
-
-    window.progress = QProgressBar()
-    window.progress.setRange(0, 100)
-    root.addWidget(window.progress)
-
-    body = QHBoxLayout()
-    left = QVBoxLayout()
-    window.waveform = WaveformView()
-    window.piano = PianoRoll()
-    window.piano.seek_requested.connect(window.on_seek)
-    window.staff = StaffView()
-    left.addWidget(window.waveform, stretch=1)
-    left.addWidget(window.staff, stretch=2)
-    left.addWidget(window.piano, stretch=2)
-
-    playback = QHBoxLayout()
-    window.btn_play = QPushButton("")
-    window.btn_play.setMinimumWidth(64)
-    window.btn_play.clicked.connect(window.on_toggle_play)
-    window.btn_voice = QPushButton("")
-    window.btn_voice.setMinimumWidth(64)
-    window.btn_voice.clicked.connect(window.on_toggle_voice)
-    window.btn_both = QPushButton("")
-    window.btn_both.setMinimumWidth(72)
-    window.btn_both.clicked.connect(window.on_toggle_both)
-    window.label_play_pos = QLabel("")
-    playback.addWidget(window.btn_play)
-    playback.addWidget(window.btn_voice)
-    playback.addWidget(window.btn_both)
-    playback.addWidget(window.label_play_pos, stretch=1)
-    # the rendered piano's volume, for comparing it with the singer's voice
-    window.label_volume = QLabel("")
-    window.slider_volume = QSlider(Qt.Orientation.Horizontal)
-    window.slider_volume.setRange(0, 100)
-    window.slider_volume.setValue(70)
-    window.slider_volume.setMaximumWidth(150)
-    window.slider_volume.valueChanged.connect(window.on_piano_volume_changed)
-    playback.addWidget(window.label_volume)
-    playback.addWidget(window.slider_volume)
-    left.addLayout(playback)
-    window.piano_keys = PianoView()
-    left.addWidget(window.piano_keys)
-    body.addLayout(left, stretch=3)
-
-    right = QVBoxLayout()
-    window.results = ResultsPanel()
-    right.addWidget(window.results, stretch=1)
-    options = QGroupBox("")
-    form = QGridLayout(options)
-    window._grp_opts = options
-    # the interpretation thresholds the "re-read" button uses: they change
-    # HOW the take's evidence is read, never the evidence itself (pYIN does
-    # not rerun — the cached observation is re-interpreted in milliseconds)
-    window._lbl_min_note = QLabel("")
-    form.addWidget(window._lbl_min_note, 5, 0)
-    window.spin_min_note = QSpinBox()
-    window.spin_min_note.setRange(40, 300)
-    window.spin_min_note.setValue(60)
-    window.spin_min_note.setSuffix(" ms")
-    form.addWidget(window.spin_min_note, 5, 1)
-    window.chk_quantize = QCheckBox("")
-    form.addWidget(window.chk_quantize, 0, 0, 1, 2)
-    window._lbl_transpose = QLabel("")
-    form.addWidget(window._lbl_transpose, 1, 0)
-    window.spin_transpose = QSpinBox()
-    window.spin_transpose.setRange(-48, 48)
-    window.spin_transpose.valueChanged.connect(window.on_transpose_changed)
-    form.addWidget(window.spin_transpose, 1, 1)
-    window.chk_notation = QCheckBox("")
-    window.chk_notation.toggled.connect(window._on_notation_toggled)
-    form.addWidget(window.chk_notation, 2, 0, 1, 2)
-    window.chk_pdf = QCheckBox("")
-    window.chk_pdf.setEnabled(find_notation_tool() is not None)
-    form.addWidget(window.chk_pdf, 3, 0, 1, 2)
-    window.lbl_pdf_note = QLabel("")
-    window.lbl_pdf_note.setStyleSheet("color: #7f8b99; font-size: 8pt; font-style: italic;")
-    window.lbl_pdf_note.setWordWrap(True)
-    form.addWidget(window.lbl_pdf_note, 4, 0, 1, 2)
-    right.addWidget(options)
-
-    window.btn_export = QPushButton("")
-    window.btn_export.clicked.connect(window.on_export_again)
-    right.addWidget(window.btn_export)
-    # re-read the take's evidence with the CURRENT thresholds (the spin
-    # boxes above): interpretation only, the cached observation skips pYIN
-    window.btn_reinterpret = QPushButton("")
-    window.btn_reinterpret.clicked.connect(window.on_reinterpret)
-    right.addWidget(window.btn_reinterpret)
-    window.btn_open = QPushButton("")
-    window.btn_open.clicked.connect(window.on_open_file)
-    right.addWidget(window.btn_open)
-    body.addLayout(right, stretch=1)
-    root.addLayout(body, stretch=1)
     return page

@@ -38,23 +38,25 @@ def main() -> int:
     print("[smoke] qapp ok", flush=True)
 
     audio = sys.argv[1] if len(sys.argv) > 1 else "demo.wav"
-    res = analyze_file(audio)
+    file_analysis = analyze_file(audio)
+    res = file_analysis.analysis
     assert res.tempo is not None, "file analysis must produce a tempo"
+    assert len(file_analysis.audio) > 0, "file analysis must return its decoded audio"
     print(f"analyse ok : {len(res.notes)} notes, {res.tempo.bpm} bpm", flush=True)
 
     win = MainWindow()
     print("fenetre ok", flush=True)
 
-    win.results.set_results(res)
+    win.page_results.results.set_results(res)
     print("set_results ok (chord + tables)", flush=True)
 
-    win.piano.set_notation_mode(True)
+    win.page_results.piano.set_notation_mode(True)
     print("notation on ok", flush=True)
 
-    win.piano.set_notation_mode(True)  # idempotent
+    win.page_results.piano.set_notation_mode(True)  # idempotent
     print("notation re-on ok", flush=True)
 
-    win.piano.set_notation_mode(False)
+    win.page_results.piano.set_notation_mode(False)
     print("notation off ok", flush=True)
 
     win.show_error("erreur de test")
@@ -67,27 +69,27 @@ def main() -> int:
     from v2m.core.i18n import tr as _tr
 
     assert win._steps.text() == _tr("ui steps")
-    assert win.lbl_pdf_note.text() == _tr("ui pdf badge")
-    assert win.results._waiting.text() == _tr("ui panel waiting")
+    assert win.page_results.lbl_pdf_note.text() == _tr("ui pdf badge")
+    assert win.page_results.results._waiting.text() == _tr("ui panel waiting")
 
     # playback primitives: playhead shows/hides, empty-result guard holds
     win.result = None
     win.on_toggle_play()  # no result yet: must be a no-op, not a crash
-    win.piano.set_playhead(1.0)
-    assert win.piano._play_line.isVisible()
-    win.piano.seek_requested.emit(0.5)  # no player yet: no-op, no crash
-    win.piano.hide_playhead()
-    assert not win.piano._play_line.isVisible()
+    win.page_results.piano.set_playhead(1.0)
+    assert win.page_results.piano._play_line.isVisible()
+    win.page_results.piano.seek_requested.emit(0.5)  # no player yet: no-op, no crash
+    win.page_results.piano.hide_playhead()
+    assert not win.page_results.piano._play_line.isVisible()
     print("polish states ok", flush=True)
 
     # piano keyboard: indexes notes, lights keys with the playhead, paints
-    win.piano_keys.set_notes(res.notes)
-    assert win.piano_keys._spans
-    win.piano_keys.set_playhead(res.notes[0].start + 0.1)
-    assert res.notes[0].midi in win.piano_keys._active
-    win.piano_keys.set_playhead(-1.0)
-    assert not win.piano_keys._active
-    assert not win.piano_keys.grab().isNull()
+    win.page_results.piano_keys.set_notes(res.notes)
+    assert win.page_results.piano_keys._spans
+    win.page_results.piano_keys.set_playhead(res.notes[0].start + 0.1)
+    assert res.notes[0].midi in win.page_results.piano_keys._active
+    win.page_results.piano_keys.set_playhead(-1.0)
+    assert not win.page_results.piano_keys._active
+    assert not win.page_results.piano_keys.grab().isNull()
     print("piano keyboard ok", flush=True)
 
     # note finder: 88 keys built, labels translated, no capture started here
@@ -120,8 +122,8 @@ def main() -> int:
     assert win.btn_file.text() != fr_text, "button label must change language"
     assert win.btn_file.text() == "📁  Analyze an audio file"
     # the roll's axis titles follow too (they used to stay French)
-    assert win.piano.getPlotItem().getAxis("bottom").labelText == _tr("ui axis time")
-    assert win.piano.getPlotItem().getAxis("left").labelText == _tr("ui axis note")
+    assert win.page_results.piano.getPlotItem().getAxis("bottom").labelText == _tr("ui axis time")
+    assert win.page_results.piano.getPlotItem().getAxis("left").labelText == _tr("ui axis note")
     win.on_toggle_language()
     assert get_language() == "fr"
     assert win.btn_file.text() == fr_text

@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 
 from ..core.i18n import note_display_pair, tr
 from ..core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, on_piano
+from .display_stabilizer import DisplayStabilizer
 from .finder_session import FinderSession
 from .widgets import NOTE_TEXT_COLOR, PianoView, action_button_style
 
@@ -123,6 +124,9 @@ class FinderPage(QWidget):
         self._show_error = show_error
         self._clear_error = clear_error
         self.session = FinderSession()
+        # the name channel is vibration-tolerant (a ±0.5-st vibrato must
+        # not flicker the big name): DisplayStabilizer decides the name
+        self._stabilizer = DisplayStabilizer()
         self._thread: "LiveThread | None" = None
         self._gate_rms: float = 0.008  # refreshed from the capture at open
         self._build()
@@ -230,6 +234,7 @@ class FinderPage(QWidget):
         self._clear_error()
         self.set_note(None)
         self.session.reset()
+        self._stabilizer.reset()
         self._refresh_history()
         self._thread = self._thread_factory()
         self._thread.noteFrame.connect(self._on_note)
@@ -303,10 +308,16 @@ class FinderPage(QWidget):
         if display is None and heard is None:
             self.session.note_idle()  # the mic heard nothing on this tick
         self.session.feed(forming_midi, midi)
-        self.set_note(display, light=midi is not None)
+        shown = self._stabilizer.feed(self.session.last_reading or 0.0, forming)
+        # confirmed presence lights the key even while the name channel
+        # holds the previous note (a vibrato excursion near the seam)
+        self.set_note(shown if shown is not None else display, light=midi is not None)
         self._refresh_history()
 
-    def _on_failed(self, msg: str) -> None:
+    def _on_failed(self, msg: str, _signal: bytes = b"") -> None:
+        """The capture failed: stop, announce. The live thread's `failed`
+        signal also carries the take's signal (the failure trace reads
+        it) — the finder ignores it, it keeps no take."""
         self._stop()
         self._show_error(msg)
 

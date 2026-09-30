@@ -75,6 +75,32 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         dict(glide_s=0.25, consonant_s=0.05),
     ),
     "tenue vibrato": ([SungNote(57, 0.2, 1.5)], dict(vibrato_st=0.4, consonant_s=0.05)),
+    # The BEGINNER's vibrato (+/-0.5 st) — measured 2026-09-28 as the gap
+    # behind "il entend mal la voix" (the sweep that keeps HOLD_ST 0.6:
+    # scripts/liveseg_sweep.py). Both read EXACT offline and live at 5
+    # seeds — the display channels are what absorbs a beginner's wavering,
+    # not the segmentation. `debutant` unaccented on purpose (CASES keys
+    # are canonical DATA, and the docs guard allows only accented French).
+    "vibrato debutant tenu": (
+        [SungNote(64, 0.2, 1.6)],
+        dict(vibrato_st=0.5, consonant_s=0.05),
+    ),
+    "vibrato debutant phrase": (
+        [SungNote(60, 0.2, 0.7), SungNote(62, 0.9, 0.7), SungNote(64, 1.6, 0.7)],
+        dict(glide_s=0.09, consonant_s=0.05, vibrato_st=0.5),
+    ),
+    # The WIDE amateur vibrato (+/-0.7 st) — the display stabilizer's upper
+    # boundary, measured 2026-09-29: EXACT offline AND live, 5/5 seeds, both
+    # shapes (held + phrase) — segmentation is untouched by the depth; the
+    # ±0.5 boundary of the corpus is a milestone, not a wall.
+    "vibrato large tenu": (
+        [SungNote(64, 0.2, 1.6)],
+        dict(vibrato_st=0.7, consonant_s=0.05),
+    ),
+    "vibrato large phrase": (
+        [SungNote(60, 0.2, 0.7), SungNote(62, 0.9, 0.7), SungNote(64, 1.6, 0.7)],
+        dict(glide_s=0.09, consonant_s=0.05, vibrato_st=0.7),
+    ),
     "voix grave": (
         sequence([45, 47, 48, 50, 52], dur_s=0.8, start_s=0.2),
         dict(glide_s=0.09, consonant_s=0.05),
@@ -150,6 +176,10 @@ LIVE_CASES = [
     "voix grave",
     "voix haute",
     "bruit et vibrato",
+    "vibrato debutant tenu",
+    "vibrato debutant phrase",
+    "vibrato large tenu",
+    "vibrato large phrase",
     "saut d'octave",
     "répétition",
     "répétition aa-aa",
@@ -184,6 +214,31 @@ def _live(name: str) -> Accuracy:
     truth, _ = CASES[name]
     stream = LivePitchStream(SR, gate_rms=GATE)
     y = _signal(name)
+    for i in range(0, len(y) - BLOCK, BLOCK):
+        stream.feed(y[i : i + BLOCK], (i + BLOCK) / SR)
+    stream.seg.flush(len(y) / SR)
+    return measure(stream.seg.notes, truth, tol_s=LIVE_TOL_S)
+
+
+@lru_cache(maxsize=None)
+def _seeded_signal(name: str, seed: int) -> np.ndarray:
+    truth, kwargs = CASES[name]
+    return synthesize(truth, seed=seed, **kwargs)
+
+
+@lru_cache(maxsize=None)
+def _seeded_offline(name: str, seed: int) -> Accuracy:
+    truth, _ = CASES[name]
+    return measure(
+        detect_notes(_seeded_signal(name, seed), SR, with_attacks=True), truth
+    )
+
+
+@lru_cache(maxsize=None)
+def _seeded_live(name: str, seed: int) -> Accuracy:
+    truth, _ = CASES[name]
+    stream = LivePitchStream(SR, gate_rms=GATE)
+    y = _seeded_signal(name, seed)
     for i in range(0, len(y) - BLOCK, BLOCK):
         stream.feed(y[i : i + BLOCK], (i + BLOCK) / SR)
     stream.seg.flush(len(y) / SR)
@@ -306,6 +361,20 @@ def test_deep_vibrato_and_trill_stay_exact():
     for name in ("vibrato profond", "trille"):
         acc = _offline(name, True)
         assert acc.exact, (name, acc.line())
+
+
+def test_wide_vibrato_stays_exact_across_seeds():
+    """±0.7 st — the display stabilizer's upper boundary — stays EXACT on
+    both paths, both shapes, 5 seeds (measured BEFORE pinning, 2026-09-29:
+    segmentation is indifferent to the vibrato DEPTH; the ±0.5 corpus
+    milestone is not a wall). The display channel owns the excursion."""
+    for seed in range(5):
+        for name in ("vibrato large tenu", "vibrato large phrase"):
+            assert _seeded_offline(name, seed).exact, (name, seed)
+            acc = _seeded_live(name, seed)
+            assert acc.exact and acc.worst_start_ms <= 120.0, (
+                name, seed, acc.line(),
+            )
 
 
 # --------------------------------------------------------------------------- #

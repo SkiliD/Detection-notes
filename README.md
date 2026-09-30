@@ -29,7 +29,8 @@ Desktop application that **detects sung notes** (pitch, note values, meter), the
 - **PDF export**: score engraving via MuseScore or LilyPond (auto-detected, install hint otherwise) — `--pdf` on the CLI, a checkbox in the GUI
 - **JSON report** (everything, including the pitch curve, the meter, the measure count, each note's measure:beat position, the global chord and the chord segments) + **CSV** (note list with value and position)
 - **PyQt6 GUI**: polished dark interface, piano roll, waveform, results panel with per-note (position, value), per-chord-segment and **tuning-offset** rows, drag & drop, **notation mode** (color by note value), **built-in red error banner** (no blocking popups)
-- **Real-time mode**: note/Hz/level indicator, **piano roll that follows the capture** (10 s sliding window, time cursor, `mm:ss` clock, note counter and **detected meter** — 3/4, 4/4, 6/8 — shown live), comparison with an already-analyzed score (green/red keys), the held note shows **while you sing it** (~125 ms display latency), note values labeled live, export on stop — pitch tracking runs **outside the audio callback** (dedicated thread), so the driver never drops blocks. A **"Save the take's audio"** checkbox (off by default) also writes the take as a 16-bit WAV (`.wav`) into its `prises_live/<stem>/` folder, ahead of the other artifacts — live only, since a file analysis already has its audio
+- **Real-time mode**: note/Hz/level indicator, **piano roll that follows the capture** (10 s sliding window, time cursor, `mm:ss` clock, note counter and **detected meter** — 3/4, 4/4, 6/8 — shown live), comparison with an already-analyzed score (green/red keys), the held note shows **while you sing it** (~125 ms display latency), note values labeled live, export on stop — pitch tracking runs **outside the audio callback** (dedicated thread), so the driver never drops blocks. The mic level is visible **before and during** the take (a bar with the silence gate drawn on it): if nothing clears the gate for 3 s before you start, the app names the mic so it can be checked before singing. A **"Save the take's audio"** checkbox (on by default) also writes the take as a 16-bit WAV (`.wav`) into its `prises_live/<stem>/` folder, ahead of the other artifacts — live only, since a file analysis already has its audio
+- **Phrase-repeat mode**: compare two takes of the same phrase side by side — `scripts/compare_takes.py` pairs the notes through the one matching policy (identical, ±1-semitone rounding family, time-shifted, pitch-changed, missing/added) and reads the timing gaps in the second take's beats, so a slightly different tempo does not read as hesitation
 - **Note finder**: isolated mic recognition, 88-key keyboard and a local history of the last six notes; a key lights **only on a confirmed note** (a mic rumble never does), and there is no analysis nor export
 - **Control playback**: ▶ button (built-in local synth, no external software) with a **playhead synchronized** on the piano roll and the waveform; **double-click** the piano roll to start playback from there. The piano follows the take's own dynamics (a strong accent hits harder than a soft note), strikes soft keys slower, breathes a few milliseconds around the grid and sits in a light room — deterministic, so a replay sounds identical
 
@@ -81,6 +82,8 @@ The `analyze` command writes `sortie.mid`, `sortie.musicxml`, `sortie.json` and 
 v2m analyze chant.wav --quantize --pdf
 ```
 
+The file-analysis module decodes once and returns a `FileAnalysis`: the `AnalysisResult`, the exact decoded mono float32 audio, and `cache_used`. The GUI uses that audio for its waveform and that cache fact for its status message, without a second decode or cache lookup. `analyze_signal` still returns `AnalysisResult` for in-memory audio.
+
 The MusicXML score embeds **every detection**: chord symbols above the staff (per-measure progression) with their readable name ("La mineur"), solfège names (Do, Ré, Mi…) under each note, noteheads colored by confidence (green = sure → red = doubtful), recap header in the title. Everything opens in MuseScore, Finale or Sibelius.
 
 ### Library
@@ -89,9 +92,12 @@ The MusicXML score embeds **every detection**: chord symbols above the staff (pe
 from v2m.core.pipeline import analyze_file
 from v2m.core.report import export_result
 
-res = analyze_file("chant.wav")
+file_analysis = analyze_file("chant.wav")
+res = file_analysis.analysis
 print(res.tempo.bpm, res.key.best.label, len(res.notes))
 print(res.notes[0].figure)          # e.g. "noire" (French canonical value)
+print(file_analysis.cache_used)    # True when the validated Observation cache was used
+print(len(file_analysis.audio))    # decoded mono float32 samples, reused for the waveform
 if res.chord:
     print(res.chord.best.label)     # e.g. "Cmaj7" (None when undetermined)
 
@@ -148,6 +154,8 @@ scripts/
 │                        #   (fake real-time mic) and archive the live/final gap
 ├── engine_drift_watch.py # diagnostics: re-derive every stale engine audit and write
 │                        #   a Markdown non-drift report (exit 1 on a moved reading)
+├── compare_takes.py     # diagnostics: two takes of one phrase side by side
+│                        #   (counts, pitches incl. the ±1 family, timing in beats)
 └── reinterpret.py       # diagnostics: reinterpret a saved observation, no pYIN
 
 prises_verite/          # hand-checked takes: <name>.wav + <name>.truth.json (see its README)
@@ -210,14 +218,12 @@ The analysis is split into **two layers**: a `VoiceObservation` (the cleaned pit
 Two more tools complete the corpus work:
 
 ```bash
-# confirm_s sweep: the 18 live truth cases x 5 synth seeds x 0.05..0.10 s —
-# the archive of measured values lives in AGENTS.md
+# confirm_s sweep: the 18 live truth cases x 5 synth seeds x 0.05..0.10 s
 ./.venv/Scripts/python.exe scripts/confirm_s_sweep.py
 
 # live segmenter sweep: HOLD_ST x REARTIC_ST over the same cases plus two
 # beginner-vibrato (+/-0.5 st) cases, several seeds per cell — decides
-# whether a beginner's vibrato deserves a wider hold (measured verdict
-# archived in AGENTS.md)
+# whether a beginner's vibrato deserves a wider hold (measured verdict)
 ./.venv/Scripts/python.exe scripts/liveseg_sweep.py
 
 # guided recording of a hand-checked take: sing, annotate note by note,
@@ -228,7 +234,7 @@ Two more tools complete the corpus work:
 ./.venv/Scripts/python.exe scripts/guide_capture.py prise_verite.wav --audit
 ```
 
-The confirm_s sweep's `--values` narrows the threshold values scanned (comma-separated) and `--seeds` the synthesis seeds (a case can fail on ONE seed only: the noise grain fills the hold window a few ms differently); the segmenter sweep's `--holds`/`--reartics` narrow the two hold axes the same way; the capture's `--audit` re-reads an existing take instead of recording one.
+The confirm_s sweep's `--values` narrows the threshold values scanned (comma-separated) and `--seeds` the synthesis seeds (a case can fail on ONE seed only: the noise grain fills the hold window a few ms differently); `--amps` re-synthesizes every case quieter (default `0.35,0.10,0.05` — the measured 2026-09-29 corpus sat 3-7× under the reference takes; the shipped 0.09 must hold exact on the quiet cells, a low amplitude must not cost a note nor invent one); the segmenter sweep's `--holds`/`--reartics` narrow the two hold axes the same way; the capture's `--audit` re-reads an existing take instead of recording one.
 
 One more tool follows the sessions over time:
 
@@ -250,9 +256,19 @@ And one tool measures the real-time recognition itself, take by take:
 ./.venv/Scripts/python.exe -X utf8 scripts/replay_takes.py [--out rapport.json] [--take live_...] [--changed]
 ```
 
-For each take owning a `<stem>.wav`, the script feeds the real `LiveCapture` at the real clock, runs the final analysis and classifies every live note through the ONE matching policy (`core.compare` — the same net the GUI outlines and the JSON's `live_vs_final` block reads): identical, ±1 semitone neighbour, moved; the contour rate it prints is the health indicator of real-time recognition. Nothing is exported (a replay never overwrites a take's artifacts); `--out file.json` archives the table; `--take <stem>` restricts the replay to one take; `--changed` re-derives only the takes whose archived audit was measured by an OLDER engine (the engine's code hash travels in the `<take>.live_vs_final.json` sidecar — after a change to the engine, re-measure the verdicts it could have changed). The engine lives in `core.replay` (the stream is injected — a replay never swaps the global `sd.InputStream` the real microphone reads); the GUI reuses it: every live take is replayed automatically when its recording stops, in the background, and the audit replaces the take's `live_vs_final.json` sidecar. The replay's offline reading reuses the take's cached evidence (`<take>.observation.npz`, seeded by the first replay and re-read afterwards) so pYIN — the longest stage — runs at most once per take; a stale or corrupt cache falls back to the full analysis and is re-seeded, never trusted.
+For each take owning a `<stem>.wav`, the script feeds the real `LiveCapture` at the real clock, runs the final analysis and classifies every live note through the ONE matching policy (`core.compare` — the same net the GUI outlines and the JSON's `live_vs_final` block reads): identical, ±1 semitone neighbour, moved; the contour rate it prints is the health indicator of real-time recognition. Nothing is exported (a replay never overwrites a take's artifacts); `--out file.json` archives the table; `--take <stem>` restricts the replay to one take; `--changed` re-derives only the takes whose archived audit was measured by an OLDER engine (the engine's code hash travels in the `<take>.live_vs_final.json` sidecar — after a change to the engine, re-measure the verdicts it could have changed). The engine lives in `core.replay` (the stream is injected — a replay never swaps the global `sd.InputStream` the real microphone reads); the GUI reuses it: every live take is replayed automatically when its recording stops, in the background, and the audit replaces the take's `live_vs_final.json` sidecar. A take that dies BEFORE its final analysis (mic silent, capture under 0.5 s, capture lost) leaves a `<stem>.trace.json` in its own folder — the failure explains itself instead of staying an empty folder. The replay's offline reading reuses the take's cached evidence (`<take>.observation.npz`, seeded by the first replay and re-read afterwards) so pYIN — the longest stage — runs at most once per take; a stale or corrupt cache falls back to the full analysis and is re-seeded, never trusted.
 
 The `--changed` follow-up is automated by one script: `engine_drift_watch.py` re-derives every stale audit, compares each fresh row with the sidecar it replaces (per-metric deltas; any note-count movement is a drift, a sub-0.15 rate wobble is the engine's honest session noise) and writes a Markdown non-drift report — exit 1 when a reading moved, so a CI or a pre-commit hook fails loudly when the engine's last change moved a measured verdict. `--root <folder>` points the watch at another takes folder, `--report <file>` names the report (default `docs/engine-drift.md`):
+
+And one tool answers the singer's work loop — sing a phrase, listen, sing it again — by comparing two takes of the SAME phrase:
+
+```bash
+# did the second take change anything? counts, pitches (the ±1 rounding
+# family named as such) and the timing gaps, in beats of the second take
+./.venv/Scripts/python.exe -X utf8 scripts/compare_takes.py live_A live_B [--json rapport.json]
+```
+
+Each note of take A pairs with its nearest note of take B (nearest-by-onset, one-to-one) and every pairing is classified: identical, ±1-semitone neighbour (the rounding family, not a wrong note), time-shifted (same pitch beyond the window — hesitation), pitch-changed, plus the notes without a counterpart (missing from B, added in B). The timing shift reads in take B's beats, so a slightly different tempo does not flood the comparison with shifts; a tempo gap over 5% is announced instead. The engine (`core.phrase`) reads the takes' exported reports (`<stem>.json`); a bare stem name resolves inside `prises_live/`, a path is taken as-is. Nothing is written without `--json`; a missing or corrupt report is named and the exit code is 2.
 
 ```bash
 # after touching the engine: are the archived verdicts still true?
@@ -262,9 +278,7 @@ The `--changed` follow-up is automated by one script: `engine_drift_watch.py` re
 ## Project documentation
 
 - **`v2m weekly`** — the weekly recap as text (`--pdf` engraves it with the same tool as the score): the multi-week real-time health, WHEN you sing best (morning/afternoon/evening rates), the day subtotals. The same view lives on the coherence page; the retention (`prises_live/` kept under a documented size budget, oldest takes trimmed whole, history kept in the journal) runs when the recap or an export touches the folder.
-- **`CONTEXT.md`** — domain glossary (Analysis, Note, Tempo, Key, Chord, Figure, Meter, Export, Report) and conventions (languages, errors): the reference for any code change.
 - **`core/i18n.py`** — the user-visible string catalog (fr/en): every new visible string goes through `tr()`; note names follow the language (`note_display`), stored figures stay canonical (`tr_figure` translates at display time).
-- **`AGENTS.md`** — technical learnings and **session rules** (non-regression, docs updated with the code, readability) for coding agents; read automatically when the option is enabled in the client.
 
 ## Quality & limits
 

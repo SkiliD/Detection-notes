@@ -281,7 +281,7 @@ def test_live_accuracy_line_and_plot_agree(qapp):
     try:
         win._on_live_note((60.1, 262.0))
         win._on_live_note((62.4, 295.0))
-        items = list(win.accuracy.means.items())
+        items = list(win.page_live.accuracy.means.items())
         assert win.page_live.accuracy_plot._points == items
         assert len(win.page_live.accuracy_plot._points) == 2
         # each point carries its note's onset: the click-to-seek data
@@ -334,7 +334,7 @@ def test_accuracy_point_click_seeks_results_roll(qapp):
     try:
         win._accuracy_plot_target = "results"
         win._on_accuracy_point_clicked(0.5)
-        assert win.stack.currentWidget() is win.page_analyze
+        assert win.stack.currentWidget() is win.page_results
     finally:
         win.close()
 

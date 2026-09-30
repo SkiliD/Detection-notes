@@ -62,6 +62,42 @@ def test_file_dialog_speaks_the_current_language(qapp, monkeypatch):
         win.close()
 
 
+def test_file_analysis_outcome_preserves_audio_and_cache_status(qapp, monkeypatch):
+    """The file outcome's samples reach the waveform and its cache fact
+    remains visible after the completion handler's other status messages."""
+    import numpy as np
+
+    from v2m.core.pipeline import AnalysisResult, FileAnalysis
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    audio = np.linspace(-0.2, 0.2, 64, dtype=np.float32)
+    result = AnalysisResult(
+        source="take.wav", duration_s=64 / 22_050, notes=[], tempo=None, key=None,
+    )
+    outcome = FileAnalysis(analysis=result, audio=audio, cache_used=True)
+    win._analysis_started_at = 0.0
+    seen_audio = []
+    real_set_signal = win.page_results.waveform.set_signal
+
+    def _capture_audio(signal, sr):
+        seen_audio.append(signal)
+        real_set_signal(signal, sr)
+
+    monkeypatch.setattr(win.page_results.waveform, "set_signal", _capture_audio)
+    monkeypatch.setattr(win, "_export_results", lambda: None)
+    monkeypatch.setattr(win, "_coherence_summary", lambda _res: "coherence verdict")
+
+    try:
+        win._on_analysis_done(outcome)
+        assert win._signal_cache["take.wav"] is audio
+        assert seen_audio == [audio]
+        cache_prefix = tr("ui status cache").split("{", 1)[0].strip()
+        assert win.statusBar().currentMessage().startswith(cache_prefix)
+    finally:
+        win.close()
+
+
 def test_both_languages_define_the_same_keys():
     """A key added on one side only would fall back to the key (i.e. English)."""
     assert set(i18n.STRINGS["fr"]) == set(i18n.STRINGS["en"])

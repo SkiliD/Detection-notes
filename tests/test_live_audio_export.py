@@ -78,7 +78,8 @@ def test_the_audio_box_is_read_when_the_take_starts():
 
     win = mw.MainWindow()
     try:
-        assert win.page_live.chk_record_audio.isChecked() is False  # off by default
+        # ON by default: the audio is what keeps a failed take diagnosable
+        assert win.page_live.chk_record_audio.isChecked() is True
         win.page_live.chk_record_audio.setChecked(True)
         # what `on_start_live` does with the box (no capture started here)
         win._live_record_audio = win.page_live.chk_record_audio.isChecked()

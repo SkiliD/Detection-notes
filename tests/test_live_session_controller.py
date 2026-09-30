@@ -142,3 +142,142 @@ def test_close_dies_with_the_session():
     ctl.close()
     assert ctl.replay_queue() == []
     assert ctl.pump_replay() is None
+
+
+# -- the failed take: a diagnosable trace (ADR 0031) -------------------------
+
+
+def test_fail_take_traces_a_take_that_died_before_its_first_export(tmp_path, monkeypatch):
+    """THE unreachable-path regression (ADR 0031, the six empty folders):
+    the stem is minted at the FIRST EXPORT, so a take that dies before any
+    export has no stem — the trace must mint it, or the take that most
+    needs the diagnosis is the one that never gets it."""
+    from v2m.core import takes
+
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
+    ctl = _ctl()
+    assert ctl.take_stem() is None  # no export has run: nothing minted yet
+    ctl.set_signal(b"\x00\x01\x02\x03" * 22050)  # 1 s of float32 mono
+    path = ctl.fail_take()
+    assert path is not None
+    import json
+
+    payload = json.loads(open(path, encoding="utf-8").read())
+    stem = payload["take"]
+    assert stem  # the failure minted the folder name (pre-export: take_stem() is None)
+    assert payload["exported"] is False
+    assert payload["signal_bytes"] == 88200
+    assert payload["reason"] == "no final analysis (capture stopped before finalize)"
+    assert stem in path  # the failure named the folder itself
+
+
+def test_fail_take_refuses_an_exported_take_and_does_not_duplicate(tmp_path, monkeypatch):
+    """An exported take's artifacts and sidecar ARE the explanation (a trace
+    beside them would be noise); one take, ONE trace — the first failure is
+    the cause, a later one would contradict it."""
+    from v2m.core import takes
+
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
+    ctl = _ctl()
+    ctl.set_signal(b"\x00\x01\x02\x03" * 22050)
+    ctl.export_stem()  # named (an export ran, even if it failed mid-way)
+    ctl.handle_export({"live": 1, "final": 1})  # the take is exported
+    assert ctl.fail_take() is None
+    assert not list(tmp_path.rglob("*.trace.json"))
+    # a second failure on the SAME take rewrites nothing
+    ctl2 = _ctl()
+    ctl2.set_signal(b"\x00\x01\x02\x03" * 22050)
+    first = ctl2.fail_take()
+    assert ctl2.write_trace("a different reason") is None
+    import json
+
+    assert json.loads(open(first, encoding="utf-8").read())["reason"] == (
+        "no final analysis (capture stopped before finalize)"
+    )
+
+
+def test_fail_take_needs_a_take_to_diagnose(tmp_path, monkeypatch):
+    """Without captured audio there is no take, only a Start press (the mic
+    failed to open): no folder, no trace — the failure was announced on the
+    status label where it happened."""
+    from v2m.core import takes
+
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
+    ctl = _ctl()
+    assert ctl.fail_take() is None
+    assert not list(tmp_path.rglob("*"))
+
+
+def test_reason_for_failure_names_the_three_capture_shapes():
+    """The failure vocabulary is the CONTROLLER's (ADR 0031): dead mic,
+    too-short capture, capture lost before finalize — the thresholds are
+    the take's own (the 0.5 s finalize minimum), not a second literal."""
+    from v2m.gui.live_session_controller import LiveSessionController
+
+    r = LiveSessionController.reason_for_failure
+    assert r(None) == "no audio captured (mic silent or unavailable)"
+    assert r(b"") == "no audio captured (mic silent or unavailable)"
+    # float32 mono: 4 bytes per sample (1102 samples ≈ 0.05 s at 22 050 Hz);
+    # floored display: one sample under the minimum (0.49995 s) must not
+    # round into reading "(0.500 s)" — the text would contradict itself
+    assert r(b"\x00\x01\x02\x03" * 1102) == "capture too short to analyze (0.049 s)"
+    assert r(b"\x00\x01\x02\x03" * (11025 - 1)) == "capture too short to analyze (0.499 s)"
+    # the boundary agrees with finalize's own minimum: 0.5 s exactly is a take
+    assert r(b"\x00\x01\x02\x03" * 11025) == (
+        "no final analysis (capture stopped before finalize)"
+    )
+    assert r(b"\x00\x01\x02\x03" * 22050) == (
+        "no final analysis (capture stopped before finalize)"
+    )
+
+
+def test_write_trace_leaves_the_failure_reason_in_the_take_folder(tmp_path, monkeypatch):
+    """The empty-folder hazard (six unexplained folders on 2026-09-29): a
+    take that dies before its export leaves WHY in its own folder."""
+    from v2m.core import takes
+
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
+    ctl = _ctl()
+    stem = ctl.export_stem()  # the take names its folder (minted at first export)
+    ctl.set_signal(b"\x00\x01\x02\x03\x04\x05\x06\x07")
+    path = ctl.write_trace("mic silent", "duration_s=0.000")
+    assert path is not None
+    import json
+
+    payload = json.loads(open(path, encoding="utf-8").read())
+    assert payload["reason"] == "mic silent"
+    assert payload["signal_bytes"] == 8
+    assert payload["exported"] is False
+    assert stem in path
+
+
+def test_write_trace_names_the_folder_for_a_future_failure_path(tmp_path, monkeypatch):
+    """The trace writer mints the stem when the failure came before any
+    export (the window's failure path never exports): `fail_take` needs no
+    pre-mint to reach its own folder."""
+    from v2m.core import takes
+
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
+    ctl = _ctl()
+    ctl.set_signal(b"\x00\x01\x02\x03\x04\x05\x06\x07")
+    path = ctl.write_trace("mic silent", "duration_s=0.000")
+    assert path is not None
+    import json
+
+    payload = json.loads(open(path, encoding="utf-8").read())
+    assert payload["reason"] == "mic silent"
+    assert payload["signal_bytes"] == 8
+    assert payload["exported"] is False
+    assert payload["take"] in path  # the writer named the folder itself
+
+
+def test_write_trace_is_none_for_an_exported_take(tmp_path, monkeypatch):
+    """An already EXPORTED take has its artifacts and its sidecar — the
+    trace would be noise beside them."""
+    from v2m.core import takes
+
+    monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
+    ctl = _ctl()
+    ctl.export_stem()
+    ctl.handle_export({"live": 1, "final": 1})  # exported
+    assert ctl.write_trace("x", "y") is None
