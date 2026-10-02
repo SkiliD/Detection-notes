@@ -11,11 +11,10 @@ Three pins, each for a bug actually met during the workstream:
 3. **the worker starts on the EXported take** (its stem, its folder),
    not on a re-minted name — else the archive crosses two takes.
 
-Migration 2026-09-27 (`LiveSessionController` controller): the replay
-queue is enqueued AT EXPORT (the WAV exists at that instant — the
-worker would otherwise replay a missing file), never in the analysis;
-the tests therefore simulate the CURRENT capture before the export to
-pin the deferred enqueue.
+The replay queue is enqueued AT EXPORT (the WAV exists at that instant
+— the worker would otherwise replay a missing file), never in the
+analysis; the tests therefore simulate the CURRENT capture before the
+export to pin the deferred enqueue.
 """
 
 from __future__ import annotations
@@ -134,8 +133,8 @@ def test_the_worker_replays_the_exported_take_not_a_fresh_name(qapp, monkeypatch
         win.close()
 
 
-def test_analysis_done_starts_the_replay_on_the_take(qapp, monkeypatch, tmp_path):
-    """End of a live analysis: THIS take's replay starts (exported stem)."""
+def test_live_analysis_stays_pending_until_user_exports(qapp, monkeypatch, tmp_path):
+    """Analysis alone does not export a take or start its archived replay."""
     from v2m.gui import main_window as mw
 
     _redirect(monkeypatch, mw, tmp_path)
@@ -155,19 +154,22 @@ def test_analysis_done_starts_the_replay_on_the_take(qapp, monkeypatch, tmp_path
             ),
         )
         win._on_live_analysis_done(res, b"")
-        # the replay rode the take's OWN stem (the one the export minted)
+        assert FakeWorker.started == []
+        assert win.take_ctl.take_stem() is None
+        assert not list(tmp_path.rglob("*.live_vs_final.json"))
+
+        win._export_results()
+        # explicit export mints the take stem, archives its initial comparison,
+        # and only then allows the cross-check replay to start.
         assert FakeWorker.started == [win.take_ctl.take_stem()]
-        # the cross-check row REPLACES the export-time sidecar content only
-        # via the worker; the export-time sidecar exists right now
         assert list(tmp_path.rglob("*.live_vs_final.json")), "sidecar absent"
     finally:
         win.close()
 
 
 # ------------------------------------------------------------------------- #
-# The DSP starvation of chained takes (2026-09-27 regression, measured: the
-# live counter confirmed 2-12 notes while the replay of the SAME WAVs
-# confirmed 17-23 — the replay ran during the next capture)
+# The replay never runs while a capture runs: a replay's real-time DSP
+# competes with the live drain for the same budget
 # ------------------------------------------------------------------------- #
 
 
@@ -223,6 +225,9 @@ def test_the_queue_drains_when_the_capture_stops(qapp, monkeypatch, tmp_path):
             return True
 
     class StoppedThread:
+        # the real LiveThread's surface: `take` is None until run() opens one
+        take = None
+
         def isRunning(self):
             return False
 
@@ -287,9 +292,8 @@ def test_a_newer_capture_keeps_its_live_render(qapp, monkeypatch, tmp_path):
 
 
 # ------------------------------------------------------------------------- #
-# Prolonged silence during a take (2026-09-27 request: "tell the singer
-# when the silence lasts more than 2 s" — the "is the mic hearing me?"
-# feeling has an on-screen answer, not a JSON one)
+# Prolonged silence during a take: the singer gets the on-screen answer
+# "is the mic hearing me?", not a JSON one
 # ------------------------------------------------------------------------- #
 
 
@@ -336,9 +340,9 @@ def test_silence_watch_is_per_take_state(qapp, monkeypatch, tmp_path):
 
 
 # ------------------------------------------------------------------------- #
-# A mute or weak mic is named BEFORE the take starts (2026-09-29 request:
-# warn when the level stays under the silence gate for 3 s before a take,
-# so a weak mic is named before singing). One watch per phase: before the
+# A mute or weak mic is named BEFORE the take starts (the level stays
+# under the silence gate for 3 s before the take: the warning comes
+# before singing). One watch per phase: before the
 # first clear block `watch_low_level` speaks; after, `watch_silence` —
 # the same per-block telemetry, two windows, never both at once.
 # ------------------------------------------------------------------------- #

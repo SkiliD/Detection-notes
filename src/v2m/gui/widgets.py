@@ -90,15 +90,22 @@ class PianoRoll(pg.PlotWidget):
     In "notation" mode each note is colored by its figure and carries a
     short label (R, B, N, C, DC, 3N, trailing dot = dotted).
     A playhead line tracks playback; double-click seeks (seek_requested).
+
+    A SELECTABLE roll (the results page) also selects on the graph:
+    press a bar to select that note, drag across neighbours to extend
+    the selection, click empty space to clear. The gesture EMITS
+    `note_selection` (indices, [] = cleared) — the notes table remains
+    the one selection owner, this widget only renders what it says.
     """
 
     seek_requested = pg.QtCore.pyqtSignal(float)
+    note_selection = pg.QtCore.pyqtSignal(list)  # selected bar indices; [] = cleared
 
     MIDI_MIN, MIDI_MAX = 21, 108
     LIVE_SPAN = 10.0      # seconds of history kept visible during live capture
     LIVE_Y_MIN = 14.0     # minimum visible pitch band, in semitones
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, selectable: bool = False):
         super().__init__(parent, axisItems={"left": PitchAxis(orientation="left")})
         self.setBackground(BG_APP)
         self.getPlotItem().showGrid(x=True, y=True, alpha=0.12)
@@ -110,6 +117,11 @@ class PianoRoll(pg.PlotWidget):
         self._notation_mode = False
         self._last_notes: list = []
         self._rendered_figures: list = []
+        self._selectable = selectable
+        self._selection: list[int] = []
+        self._drag_anchor: int | None = None  # gesture started on this bar
+        self._press_pos: tuple[float, float] | None = None  # empty press: click vs pan
+        self._pan_moved = False
         self._live_span = self.LIVE_SPAN
         self._live_preview = None
         self._live_preview_midi: int | None = None
@@ -236,6 +248,131 @@ class PianoRoll(pg.PlotWidget):
                 if t >= 0:
                     self.seek_requested.emit(float(t))
 
+    # ------------------------------------------------------- note selection
+    def _note_at(self, t: float, midi: float, tol: float = 0.6) -> int | None:
+        """Index of the note under (time, pitch); nearest pitch on ties.
+
+        A bar spans midi ±0.4, so `tol` is the pick margin in semitones:
+        the event path widens it to a few SCREEN pixels at the current
+        zoom (zoomed out, a bar shrinks below its own half-height), while
+        the default keeps hit-testing exact.
+        """
+        best: int | None = None
+        best_d: float | None = None
+        for i, n in enumerate(self._last_notes):
+            if not (n.start <= t <= n.end):
+                continue
+            d = abs(midi - n.midi)
+            if d <= tol and (best_d is None or d < best_d):
+                best, best_d = i, d
+        return best
+
+    def _hit(self, event) -> int | None:
+        """The note under the event, tolerance scaled to the view's zoom."""
+        vb = self.getPlotItem().vb
+        data = vb.mapSceneToView(self.mapToScene(event.position().toPoint()))
+        (_x0, _x1), (y0, y1) = vb.viewRange()
+        per_px = (y1 - y0) / max(1, vb.height())
+        return self._note_at(float(data.x()), float(data.y()), tol=max(0.6, per_px * 8))
+
+    def set_selection(self, indices) -> None:
+        """Highlight the selected bars — the notes TABLE's selection, rendered.
+
+        The page calls this when the table's selection changes; a roll
+        gesture instead EMITS `note_selection` so the table applies it —
+        one selection (the table), two views, no mirrored state here.
+
+        On a non-selectable roll (the live page has no table) nothing is
+        ever highlighted: `selectable` gates BOTH directions.
+        """
+        if not self._selectable:
+            return
+        self._selection = sorted({int(i) for i in indices})
+        self._render_selection()
+
+    def set_selectable(self, enabled: bool) -> None:
+        """Turn graph selection on or off (the live page's take lifecycle).
+
+        The results page builds its roll selectable and never changes it;
+        the live roll starts frozen out and becomes selectable only when a
+        capture has STOPPED — the closed notes are then explorable, and
+        starting the next take clears whatever was picked.
+        """
+        if enabled == self._selectable:
+            return
+        self._selectable = enabled
+        self._selection = []
+        self._drag_anchor = None
+        self._press_pos = None
+        self._render_selection()  # any highlight goes back to the own colors
+
+    def _render_selection(self) -> None:
+        """Rebrush only the bars whose state changed (a click on a big
+        take must not repaint 3000 pictures) — the RAW color goes into
+        `opts["brush"]`, exactly as `_add_note` stores it.
+        """
+        chosen = set(self._selection)
+        for i, item in enumerate(self._bar_items):
+            if i >= len(self._last_notes):
+                break  # defensive: bars and notes are built together
+            want = ACCENT if i in chosen else self._color_for(self._last_notes[i])
+            if item.opts.get("brush") != want:
+                item.setOpts(brush=want)
+
+    def _emit_selection(self, indices: list[int]) -> None:
+        """Publish a gesture's selection (silent when nothing changed)."""
+        if indices == self._selection:
+            return
+        self._selection = indices
+        self._render_selection()
+        self.note_selection.emit(list(indices))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Press on a bar selects it (a drag then extends it to a range).
+
+        A press on EMPTY space stays pyqtgraph's own gesture — the view
+        keeps panning the timeline — and its click (no movement) clears
+        the selection. On a non-selectable roll (the live page) every
+        event passes through untouched.
+        """
+        if self._selectable and event.button() == pg.QtCore.Qt.MouseButton.LeftButton:
+            idx = self._hit(event)
+            if idx is not None:
+                self._press_pos = None
+                self._drag_anchor = idx
+                self._emit_selection([idx])
+                event.accept()
+                return
+            self._press_pos = (event.position().x(), event.position().y())
+            self._pan_moved = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self._drag_anchor is not None:
+            idx = self._hit(event)
+            if idx is not None:  # over a gap: keep the range built so far
+                lo, hi = sorted((self._drag_anchor, idx))
+                self._emit_selection(list(range(lo, hi + 1)))
+            event.accept()
+            return
+        if self._press_pos is not None:
+            x0, y0 = self._press_pos
+            if abs(event.position().x() - x0) + abs(event.position().y() - y0) > 4:
+                self._pan_moved = True
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if event.button() == pg.QtCore.Qt.MouseButton.LeftButton:
+            if self._drag_anchor is not None:
+                self._drag_anchor = None
+                event.accept()
+                return
+            clicked_empty = self._press_pos is not None and not self._pan_moved
+            self._press_pos = None
+            if clicked_empty:
+                self._emit_selection([])  # a click on empty space clears
+        super().mouseReleaseEvent(event)
+
     def set_notation_mode(self, enabled: bool) -> None:
         if enabled == self._notation_mode:
             return  # idempotent: live mode re-checks on every note-on
@@ -268,19 +405,19 @@ class PianoRoll(pg.PlotWidget):
         for n in notes:
             self._add_note(n)
         self._rendered_figures = figures
+        self._render_selection()  # a rebuild keeps the table's selection visible
+
+    def _color_for(self, n) -> tuple:
+        """The bar's own color: figure in notation mode, confidence ramp else."""
+        return figure_color(n.figure) if self._notation_mode else self._color_for_conf(n.confidence)
 
     def _add_note(self, n) -> None:
-        color = (
-            figure_color(n.figure)
-            if self._notation_mode
-            else self._color_for_conf(n.confidence)
-        )
         item = pg.BarGraphItem(
             x0=[n.start],
             x1=[n.end],
             y0=[n.midi - 0.4],
             y1=[n.midi + 0.4],
-            brush=color,
+            brush=self._color_for(n),
             pen=pg.mkPen(None),
         )
         self.addItem(item)
@@ -594,7 +731,11 @@ class ResultsPanel(pg.LayoutWidget):
         # diving. A file analysis without evidence shows why it is silent.
         observation = getattr(res, "observation", None)
         if observation is None:
-            self._values["key coherence"].setText(tr("ui coherence na"))
+            self._values["key coherence"].setText(
+                tr("ui coherence manual")
+                if getattr(res, "manual_pitch_corrections", False)
+                else tr("ui coherence na")
+            )
         else:
             block = coherence_report(observation, res.notes)
             checked = block["checked"]
@@ -628,12 +769,16 @@ class ResultsPanel(pg.LayoutWidget):
         # A file analysis has no live reading and stays silent.
         from ..core.explain import explain as explain_block
 
-        lines = explain_block(getattr(res, "live_vs_final", None) or {})
-        if lines:
-            self._lbl_explain.setText("<br>".join(lines))
+        if getattr(res, "manual_pitch_corrections", False):
+            self._lbl_explain.setText(tr("ui coherence live pending"))
             self._lbl_explain.setVisible(True)
         else:
-            self._lbl_explain.setVisible(False)
+            lines = explain_block(getattr(res, "live_vs_final", None) or {})
+            if lines:
+                self._lbl_explain.setText("<br>".join(lines))
+                self._lbl_explain.setVisible(True)
+            else:
+                self._lbl_explain.setVisible(False)
 
         # Per-measure chord progression (falls back to legacy 2 s segments)
         prog = getattr(res, "chord_progression", None)
@@ -668,6 +813,8 @@ class PianoView(pg.QtWidgets.QWidget):
     WHITE_PCS = (0, 2, 4, 5, 7, 9, 11)
     SHARP_AFTER = (0, 2, 5, 7, 9)  # C, D, F, G, A are followed by a black key
 
+    key_clicked = pyqtSignal(int)
+
     def __init__(self, parent=None, min_midi: int | None = None, max_midi: int | None = None):
         super().__init__(parent)
         self.min_midi = self.MIN_MIDI if min_midi is None else min_midi
@@ -679,6 +826,33 @@ class PianoView(pg.QtWidgets.QWidget):
         self._active: set[int] = set()
         self._active_colors: dict[int, tuple[int, int, int]] = {}
         self.setMinimumHeight(78)
+        self.setCursor(pg.QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Publish the key under the pointer, checking black keys first."""
+        if event.button() != pg.QtCore.Qt.MouseButton.LeftButton:
+            return
+        midi = self._midi_at(event.position().x(), event.position().y())
+        if midi is not None:
+            self.key_clicked.emit(midi)
+
+    def _midi_at(self, x: float, y: float) -> int | None:
+        """Map a keyboard position to its key; black keys overlay whites."""
+        if not 0 <= x < self.width() or not 0 <= y < self.height():
+            return None
+        if not self._whites:
+            return None
+        white_width = self.width() / len(self._whites)
+        black_width = white_width * 0.62
+        if y < self.height() * 0.62:
+            for index in range(len(self._whites) - 1):
+                base = self._white_midi(index)
+                if self._has_black_after(base):
+                    left = (index + 1) * white_width - black_width / 2
+                    if left <= x < left + black_width:
+                        return base + 1
+        index = min(len(self._whites) - 1, int(x / white_width))
+        return self._white_midi(index)
 
     def set_notes(self, notes) -> None:
         """Index the detected notes by pitch: {midi: [(start, end), ...]}"""
@@ -1017,10 +1191,14 @@ HINT_CARD_STYLE = (
     f"background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 10px;"
     "padding: 10px 18px;"
 )
-STYLESHEET = f"""
 # Font sizes in pt, never px: a px-sized font reports pointSize() == -1,
 # and rich-text labels then hit QFont::setPointSize(-1) (console warning).
 # pt also scales with the user's Windows DPI setting, px does not.
+# The comments live OUTSIDE the QSS on purpose: Qt's stylesheet parser has
+# no '#' line comment ('#' opens an id selector there) and one unrecognized
+# token silently discards the WHOLE sheet — the app then renders in the
+# system default theme with no error anywhere.
+STYLESHEET = f"""
 QMainWindow, QWidget {{ background: {BG_APP}; color: {TEXT}; font-size: 10pt; }}
 QLabel {{ color: #cfd6dd; background: transparent; }}
 QPushButton {{

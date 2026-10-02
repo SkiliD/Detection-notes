@@ -1,11 +1,10 @@
 """Verify one exported take: do the WAV and the JSON describe the SAME signal?
 
-The 2026-09-26 user report ("the audio doesn't match what I sang") came
-from a GUI analysis hand-off that wrote the PREVIOUS take's WAV under the
-new take's name: one folder's JSON and WAV told two different takes. This
-module is the control the user (or a script) can run on any export: a take
-whose WAV duration and JSON duration diverge is a WRONG take, whatever the
-analysis says.
+A GUI analysis hand-off can write one take's WAV under another take's
+name: one folder's JSON and WAV then tell two different takes. This
+module is the control the user (or a script) can run on any export: a
+take whose WAV duration and JSON duration diverge is a WRONG take,
+whatever the analysis says.
 """
 
 from __future__ import annotations

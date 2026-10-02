@@ -75,9 +75,8 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         dict(glide_s=0.25, consonant_s=0.05),
     ),
     "tenue vibrato": ([SungNote(57, 0.2, 1.5)], dict(vibrato_st=0.4, consonant_s=0.05)),
-    # The BEGINNER's vibrato (+/-0.5 st) — measured 2026-09-28 as the gap
-    # behind "il entend mal la voix" (the sweep that keeps HOLD_ST 0.6:
-    # scripts/liveseg_sweep.py). Both read EXACT offline and live at 5
+    # The BEGINNER's vibrato (+/-0.5 st) — the sweep that keeps HOLD_ST
+    # 0.6: scripts/liveseg_sweep.py. Both read EXACT offline and live at 5
     # seeds — the display channels are what absorbs a beginner's wavering,
     # not the segmentation. `debutant` unaccented on purpose (CASES keys
     # are canonical DATA, and the docs guard allows only accented French).
@@ -89,10 +88,10 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         [SungNote(60, 0.2, 0.7), SungNote(62, 0.9, 0.7), SungNote(64, 1.6, 0.7)],
         dict(glide_s=0.09, consonant_s=0.05, vibrato_st=0.5),
     ),
-    # The WIDE amateur vibrato (+/-0.7 st) — the display stabilizer's upper
-    # boundary, measured 2026-09-29: EXACT offline AND live, 5/5 seeds, both
-    # shapes (held + phrase) — segmentation is untouched by the depth; the
-    # ±0.5 boundary of the corpus is a milestone, not a wall.
+    # The WIDE amateur vibrato (+/-0.7 st) — the display stabilizer's
+    # upper boundary: EXACT offline AND live, 5/5 seeds, both shapes
+    # (held + phrase) — segmentation is untouched by the depth; the ±0.5
+    # boundary of the corpus is a milestone, not a wall.
     "vibrato large tenu": (
         [SungNote(64, 0.2, 1.6)],
         dict(vibrato_st=0.7, consonant_s=0.05),
@@ -144,10 +143,9 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         sequence([69, 69, 69, 69], dur_s=0.30, gap_s=0.15, start_s=0.2),
         dict(consonant_s=0, glide_s=0, noise=0.02),
     ),
-    # 2026-09-25, "repeated same note read as one hold": the harness's
-    # consonant at FULL strength (1.4) produced 3 notes out of 4 live —
-    # the attack landed on the burst's garbage frame, the split refused it
-    # and consumed it. The case freezes the repair (re-staging the attack
+    # Repeated same note, consonant at FULL strength (1.4): the attack
+    # lands on the burst's garbage frame, the split refuses it and
+    # consumes it — the case freezes the repair (re-staging the attack
     # the split refused).
     "répétition ta-ta": (
         sequence([64, 64, 64, 64], dur_s=0.50, gap_s=0.05, start_s=0.2),
@@ -162,9 +160,9 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
     ),
 }
 
-# the real-time path finds exactly these phrases (2026-09-25: the three
-# new truth cases — descending glissando, deep vibrato, soprano — join;
-# they already passed at their arrival, the live chain holds them)
+# the real-time path finds exactly these phrases (the truth cases —
+# descending glissando, deep vibrato, soprano — join; the live chain
+# holds them)
 LIVE_CASES = [
     "consonnes",
     "legato",
@@ -251,7 +249,7 @@ def _seeded_live(name: str, seed: int) -> Accuracy:
 
 
 def test_the_harness_catches_a_lost_note():
-    """Sans quoi les tests ci-dessous ne prouveraient rien."""
+    """Without it, the tests below would prove nothing."""
     truth, _ = CASES["consonnes"]
     acc = measure([], truth)
     assert acc.matched == 0 and acc.missing == len(truth) and not acc.exact
@@ -365,9 +363,9 @@ def test_deep_vibrato_and_trill_stay_exact():
 
 def test_wide_vibrato_stays_exact_across_seeds():
     """±0.7 st — the display stabilizer's upper boundary — stays EXACT on
-    both paths, both shapes, 5 seeds (measured BEFORE pinning, 2026-09-29:
-    segmentation is indifferent to the vibrato DEPTH; the ±0.5 corpus
-    milestone is not a wall). The display channel owns the excursion."""
+    both paths, both shapes, 5 seeds: segmentation is indifferent to the
+    vibrato DEPTH; the ±0.5 corpus milestone is not a wall. The display
+    channel owns the excursion."""
     for seed in range(5):
         for name in ("vibrato large tenu", "vibrato large phrase"):
             assert _seeded_offline(name, seed).exact, (name, seed)
@@ -554,7 +552,7 @@ def test_careless_timing_is_still_transcribed():
 
 
 # ---------------------------------------------------------------------------
-# 2026-09-25 repairs: "repeated same note read as one hold"
+# Repairs: repeated same note must never read as one hold
 # ---------------------------------------------------------------------------
 
 

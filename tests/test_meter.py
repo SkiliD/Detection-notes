@@ -46,19 +46,17 @@ def test_binary_only_returns_none():
 
 
 def test_a_binary_4_4_line_is_not_6_8():
-    """Measured regression: a perfectly regular 4/4 line came out as 6/8,
-    which shifts every bar line.
-
-    Its attacks often land on the ternary grid (0.71 on the reference
-    motif) — that is why alignment alone does not decide: the simple grid
-    must be clearly less well explained (0.86).
+    """A binary 4/4 line never reads 6/8: its attacks often land on the
+    ternary grid (0.71 on the reference motif) — that is why alignment
+    alone does not decide, the simple grid must be clearly less well
+    explained (0.86).
     """
     starts = [i * BEAT + h * BEAT / 2 for i in range(4) for h in (0, 1)]
     meter = detect_meter(_notes_from_starts(starts), BPM)
     assert meter is None or meter.label != "6/8"
 
 
-def test_too_few_notes_returns_none():
+def test_too_few_notes_returns_no_meter():
     notes = _notes_from_starts([0.0, BEAT, 2 * BEAT])
     assert detect_meter(notes, BPM) is None
 
@@ -126,15 +124,12 @@ def test_reads_dotted_pulse():
 
 
 def test_two_runs_of_constant_level_never_read_dotted():
-    """The 2026-09-27 regression (take 204633, fake 156 -> 234 BPM).
-
-    Two RUNS of constant level (a loud phrase, a soft one) validate each
-    other at lag 2: `111111000000000` scores 11/13 on ALTERNATE_SHARE and
-    passes MINORITY_SHARE — but a true alternation CHANGES label at
-    almost every step, runs only at their boundary (measured: 1 change in
-    14 against 5-8 in ~16 for the three sister takes of the same melody).
-    The change-rate guard refuses the family without touching the true
-    alternation.
+    """Two RUNS of constant level (a loud phrase, a soft one) never read
+    as a dotted pulse: they validate each other at lag 2 (`111111000000000`
+    scores 11/13 on ALTERNATE_SHARE and passes MINORITY_SHARE) but a true
+    alternation CHANGES label at almost every step, runs only at their
+    boundary (1 change in 14). The change-rate guard refuses the family
+    without touching the true alternation.
     """
     from v2m.core.meter import reads_dotted_pulse
 

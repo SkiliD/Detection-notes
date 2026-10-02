@@ -251,7 +251,7 @@ def test_the_home_page_button_renders_the_weekly_trend(qapp, monkeypatch, tmp_pa
     try:
         win.stack.setCurrentWidget(win.page_home)
         win.on_show_coherence()
-        text = win.coherence_text.toPlainText()
+        text = win.page_home.coherence_text.toPlainText()
         # the weeks section is on screen: the journal was fed by the takes
         assert "Real-time health" in text or "Santé du temps réel" in text
         assert "2026-S" in text
@@ -297,13 +297,13 @@ def test_the_health_chart_draws_the_weeks_and_hides_when_empty(qapp, monkeypatch
     _seed_weeks(tmp_path, {"a": [0.5, 0.4], "b": [0.3]})
     win = mw.MainWindow()
     try:
-        win._refresh_health_chart()
-        assert not win.health_plot.isHidden(), "the chart must show with weeks"
-        assert win._health_weeks[0]["contour_rate"] == pytest.approx(0.45)
+        win.page_home.show_coherence()
+        assert not win.page_home.health_plot.isHidden(), "the chart must show with weeks"
+        assert win.page_home._snapshot.health_weeks[0]["contour_rate"] == pytest.approx(0.45)
         # no data at all: the plot hides, the invite is the honest answer
         (tmp_path / coh.JOURNAL_NAME).unlink()
-        win._refresh_health_chart()
-        assert win.health_plot.isHidden()
+        win.page_home.show_coherence()
+        assert win.page_home.health_plot.isHidden()
     finally:
         win.close()
 
@@ -316,26 +316,42 @@ def test_clicking_a_week_shows_that_weeks_takes(qapp, monkeypatch, tmp_path):
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(coh, "LIVE_TAKES_DIR", tmp_path)
-    # TWO weeks (S39: live_20260901, S40: live_20260902) — the drill-down
-    # needs a week whose stems exclude the other week's takes
-    _seed_weeks(tmp_path, {"a": [0.5], "b": [0.4]})
-    _take(tmp_path, "live_20260901_090000", checked=5, rate=0.5)
-    _take(tmp_path, "live_20260902_090000", checked=5, rate=0.4)
+    # Two take folders land in separate ISO weeks so the drill-down
+    # contains only the clicked week's stem.
+    first = "live_20260921_090000"
+    second = "live_20260928_090000"
+    _take(tmp_path, first, checked=5, rate=0.5)
+    _take(tmp_path, second, checked=5, rate=0.4)
+    journal = {
+        first: {
+            "date": "20260921", "clock": "090000", "epoch_s": 1.0,
+            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
+            "verify_ok": True, "contour_rate": 0.5,
+            "live_notes": 10, "final_notes": 20,
+        },
+        second: {
+            "date": "20260928", "clock": "090000", "epoch_s": 2.0,
+            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
+            "verify_ok": True, "contour_rate": 0.4,
+            "live_notes": 10, "final_notes": 20,
+        },
+    }
+    _journal_with(tmp_path, journal)
     win = mw.MainWindow()
     try:
-        win._refresh_health_chart()
-        vb = win.health_plot.getPlotItem().vb
+        win.page_home.show_coherence()
+        vb = win.page_home.health_plot.getPlotItem().vb
         vb.mapSceneToView = lambda p: p  # the click maps to its own point
         ev = SimpleNamespace(
             button=lambda: Qt.MouseButton.LeftButton,
             scenePos=lambda: QPointF(1, 50),  # week index 1 (the second point)
         )
-        win._on_health_clicked(ev)
-        text = win.coherence_text.toPlainText()
+        win.page_home._on_health_clicked(ev)
+        text = win.page_home.coherence_text.toPlainText()
         # the clicked week's take is listed BY STEM (the per-take lines under
         # the session table), the other week's take is absent
-        assert "live_20260902_090000" in text, "the clicked week's take is missing"
-        assert "live_20260901_090000" not in text, "another week bled into it"
+        assert second in text, "the clicked week's take is missing"
+        assert first not in text, "another week bled into it"
     finally:
         win.close()
 

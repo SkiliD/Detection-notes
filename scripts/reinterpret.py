@@ -181,7 +181,7 @@ def diff_notes(old: list[list], new: list[list]) -> list[str]:
 
 
 def _floats(spec: str) -> list[float]:
-    """Les valeurs d'un balayage « 0.4,0.5,0.6 » (une valeur mal lue = erreur)."""
+    """The values of a sweep "0.4,0.5,0.6" (one misread value = an error)."""
     try:
         return [float(v.strip()) for v in spec.split(",") if v.strip()]
     except ValueError as exc:

@@ -9,11 +9,12 @@ checks the ADAPTER — what a front-end can break on its own:
    observation hiding a secondary plateau) is re-read by the aggregator
    — what the exporter writes (CSV extended with the published plateau),
    the adapter reads;
-2. the sweep only takes real take names (a file export is noise);
-3. empty/missing folders: empty table, return code, orientation
-   messages — day one, before even the first take;
-4. the labels follow the current language (fr/en), like every visible
-   output.
+2. empty/missing folders: empty table, return code, orientation
+   messages — day one, before even the first take.
+
+The core's decisions around that round-trip (real take names only, fr/en
+labels, sessions, rates, verify) are pinned in
+`tests/test_core_coherence.py`.
 """
 
 import importlib.util
@@ -125,17 +126,6 @@ def test_the_exported_coherence_csv_round_trips_through_the_aggregator(
     assert "20260926" in text and "suspects 1" in text
 
 
-def test_only_real_take_names_are_aggregated(tmp_path):
-    """A CSV out of the name contract (file export, noise) is ignored."""
-    from v2m.core import coherence as coh
-
-    (tmp_path / "chant").mkdir()
-    (tmp_path / "chant" / "chant.coherence.csv").write_text("", encoding="utf-8")
-    (tmp_path / "live_bad").mkdir()
-    (tmp_path / "live_bad" / "notes.coherence.csv").write_text("", encoding="utf-8")
-    assert coh.takes_under(tmp_path) == []
-
-
 # --------------------------------------------------------------------------- #
 # The adapter: return codes and first-run orientation
 # --------------------------------------------------------------------------- #
@@ -156,16 +146,3 @@ def test_first_run_guides_instead_of_confusing(capsys):
     out = capsys.readouterr().out
     assert "prises_live" in out  # where we searched
     assert ".coherence.csv" in out or "prise" in out  # what creates a report
-
-
-def test_render_follows_the_language_tables():
-    from v2m.core import coherence as coh
-    from v2m.core.i18n import set_language
-
-    set_language("fr")
-    fr = coh.render([])
-    assert "Aucun rapport" in fr or "rien" in fr
-    set_language("en")
-    en = coh.render([])
-    assert "No coherence report" in en
-    set_language("fr")

@@ -28,8 +28,8 @@ import pytest
 DETECTION_ENTRIES = {"estimate_bpm_live", "detect_meter", "label_notes"}
 ROOT = Path(__file__).parents[1]
 # The GUI package, plus the CLI module — the CLI live adapter
-# (`LiveSession`) was absorbed into cli.py on 2026-09-28 (v2m/live.py
-# deleted): the guard follows the adapters where they live.
+# (`LiveSession`) lives in cli.py (v2m/live.py deleted): the guard
+# follows the adapters where they live.
 ADAPTER_FILES = [
     *sorted((ROOT / "src" / "v2m" / "gui").glob("*.py")),
     ROOT / "src" / "v2m" / "cli.py",

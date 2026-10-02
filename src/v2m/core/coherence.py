@@ -16,8 +16,8 @@ Decisions owned here, each with its reason:
   carries its DELTA against the previous one, so the trend reads without
   comparing rows by hand.
 - **Every take is verified before being counted** (`verify.verify_take`):
-  the WAV/JSON hand-off bug of 2026-09-26 produced perfectly readable
-  coherence CSVs describing the WRONG signal. A take whose artifacts
+  perfectly readable coherence CSVs can describe the WRONG signal when a
+  hand-off mixed the artifacts. A take whose artifacts
   diverge is flagged in the table and its notes are NOT trusted into the
   rate (they still count in `takes`, visible).
 - **A persisted journal** (`coherence_journal.json`) remembers each take's
@@ -89,6 +89,39 @@ class TakeAudit:
         if self.checked is None:
             return None
         return 100.0 * len(self.suspects) / self.checked if self.checked else 0.0
+
+
+@dataclass(frozen=True)
+class EvidenceSnapshot:
+    """One pass of take evidence and every aggregate derived from it."""
+
+    root: Path
+    takes: list[TakeAudit]
+    sessions: list[dict]
+    days: list[dict]
+    practice_windows: list[dict]
+    health_weeks: list[dict]
+    regression: dict | None
+    journal: dict
+
+
+
+def build_snapshot(root: Path) -> EvidenceSnapshot:
+    """Read audits once, refresh the journal, and derive all aggregate views."""
+    takes_list = takes_under(root)
+    journal = update_journal(root, takes_list)
+    sessions = session_rows(takes_list)
+    weeks = contour_trend_entries(journal)
+    return EvidenceSnapshot(
+        root=root,
+        takes=takes_list,
+        sessions=sessions,
+        days=day_rows(sessions, takes_list) if takes_list else [],
+        practice_windows=practice_time_report(takes_list),
+        health_weeks=weeks,
+        regression=regression_report(weeks),
+        journal=journal,
+    )
 
 
 def _epoch(date: str, clock: str) -> float:
@@ -202,8 +235,8 @@ def load_take(csv_path: Path) -> TakeAudit:
 def _trusted(takes: list[TakeAudit]) -> list[TakeAudit]:
     """The takes whose artifacts were verified (or had nothing to verify).
 
-    A take whose WAV and JSON diverge describes an UNKNOWN signal (the
-    2026-09-26 hand-off bug): its suspects and its audited count must not
+    A take whose WAV and JSON diverge describes an UNKNOWN signal: its
+    suspects and its audited count must not
     feed the rates — it stays in the table, flagged, visible.
     """
     return [t for t in takes if t.verify_ok is not False]
@@ -262,7 +295,7 @@ def _session_row(group: list[TakeAudit], prev: list[TakeAudit]) -> dict:
     trusted = _trusted(group)
     checked_list = [t.checked for t in trusted]
     checked = (
-        sum(checked_list)
+        sum(c for c in checked_list if c is not None)
         if trusted and all(c is not None for c in checked_list)
         else None
     )
@@ -285,7 +318,9 @@ def _session_row(group: list[TakeAudit], prev: list[TakeAudit]) -> dict:
         prev_trusted = _trusted(prev)
         prev_checked = [t.checked for t in prev_trusted]
         prev_total = (
-            sum(prev_checked) if all(c is not None for c in prev_checked) else None
+            sum(c for c in prev_checked if c is not None)
+            if all(c is not None for c in prev_checked)
+            else None
         )
         prev_suspects = sum(len(t.suspects) for t in prev_trusted)
         prev_rate = (
@@ -341,7 +376,11 @@ def day_rows(session_rows_list: list[dict], takes: list[TakeAudit]) -> list[dict
         group = by_date[date]
         checked = [t.checked for t in group]
         suspects = sum(len(t.suspects) for t in group)
-        total = sum(checked) if all(c is not None for c in checked) else None
+        total = (
+            sum(c for c in checked if c is not None)
+            if all(c is not None for c in checked)
+            else None
+        )
         out.append(
             {
                 "date": date,
@@ -434,23 +473,24 @@ def _week_key(entry: dict) -> str:
 
 
 def contour_trend(root: Path) -> list[dict]:
-    """The weekly real-time health trend, from the JOURNAL (not the folder).
+    """The weekly real-time health trend, from the JOURNAL (not the folder)."""
+    return contour_trend_entries(read_journal(root))
 
-    One row per ISO week that has contour data: the takes' mean contour
-    rate (a take without a `live_vs_final` block does not dilute the
-    average), the live/final note totals, and the number of takes that
-    contributed. Read from the JOURNAL, not from the folder: a deleted
-    take keeps its week's history (the journal's whole point), so the
-    trend survives folder cleanup. Rows are chronological; a week with
-    no usable rate is not a row.
+
+def contour_trend_entries(data: dict) -> list[dict]:
+    """Build the weekly trend from an already-read journal snapshot.
+
+    A take without a live/final block does not dilute a week's mean, and
+    entries retained after folder cleanup remain part of the trend.
     """
-    data = read_journal(root)
     weeks: dict[str, list[dict]] = {}
     for stem, entry in data.items():
         if not isinstance(entry, dict) or entry.get("contour_rate") is None:
             continue
-        entry.setdefault("stem", stem)  # the trend's click-through needs it
-        weeks.setdefault(_week_key(entry), []).append(entry)
+        weeks.setdefault(
+            _week_key(entry),
+            [],
+        ).append({**entry, "stem": entry.get("stem", stem)})
     out = []
     for week in sorted(k for k in weeks if k != "?"):
         entries = weeks[week]
@@ -676,7 +716,12 @@ def sparkline(values, width: int = 10) -> str:
     return "".join(out)
 
 
-def render(takes: list[TakeAudit], root: str = str(LIVE_TAKES_DIR)) -> str:
+def render(
+    takes: list[TakeAudit],
+    root: str = str(LIVE_TAKES_DIR),
+    rows: list[dict] | None = None,
+    days: list[dict] | None = None,
+) -> str:
     """The full report, in the current language: sessions, days, takes."""
     import io
 
@@ -687,8 +732,8 @@ def render(takes: list[TakeAudit], root: str = str(LIVE_TAKES_DIR)) -> str:
         out.write(tr("coh empty title").format(root=root) + "\n")
         out.write(tr("coh empty hint") + "\n")
         return out.getvalue()
-    rows = session_rows(takes)
-    days = day_rows(rows, takes)
+    rows = rows if rows is not None else session_rows(takes)
+    days = days if days is not None else day_rows(rows, takes)
     out.write(tr("coh sessions title") + "\n")
     out.write("-" * 96 + "\n")
     out.write(
@@ -812,20 +857,19 @@ def render(takes: list[TakeAudit], root: str = str(LIVE_TAKES_DIR)) -> str:
 # --------------------------------------------------------------------- #
 
 
-def session_table_text(takes: list[TakeAudit], root: Path | None = None) -> str:
-    """The session table alone (the GUI page's compact view) + the trends.
-
-    The sparkline column shows the suspect-rate history UP TO each session
-    (left = oldest, tall = more suspects per 100 notes); below the table,
-    the multi-week real-time health trend reads from the journal when a
-    root is given (the GUI passes its takes folder).
-    """
+def session_table_text(
+    takes: list[TakeAudit],
+    root: Path | None = None,
+    rows: list[dict] | None = None,
+    weeks: list[dict] | None = None,
+) -> str:
+    """Render the session table, optionally using a prebuilt evidence snapshot."""
     import io
 
     from .i18n import tr
 
     out = io.StringIO()
-    rows = session_rows(takes)
+    rows = rows if rows is not None else session_rows(takes)
     out.write(
         f"{tr('coh col session'):<16}{tr('coh col takes'):>7}{tr('coh col checked'):>12}"
         f"{tr('coh col suspects'):>10}{tr('coh col rate'):>8}{tr('coh col delta'):>8}"
@@ -851,21 +895,25 @@ def session_table_text(takes: list[TakeAudit], root: Path | None = None) -> str:
             f"{rate:>8}{delta:>8}{contours:>9}  {trend}\n"
         )
     out.write(tr("coh gui footer").format(takes=len(takes)) + "\n")
-    if root is not None:
-        weeks = contour_trend(root)
-        if weeks:
-            out.write("\n" + tr("coh weeks title") + "\n")
+    if weeks is not None:
+        selected_weeks = weeks
+    elif root is not None:
+        selected_weeks = contour_trend(root)
+    else:
+        selected_weeks = []
+    if selected_weeks:
+        out.write("\n" + tr("coh weeks title") + "\n")
+        out.write(
+            sparkline([w["contour_rate"] for w in selected_weeks], width=16)
+            + "\n"
+        )
+        for w in selected_weeks:
             out.write(
-                sparkline([w["contour_rate"] for w in weeks], width=16)
+                tr("coh week row").format(
+                    week=w["week"], takes=w["takes"],
+                    rate=f"{w['contour_rate']*100:.0f}%",
+                    live=w["live_notes"], final=w["final_notes"],
+                )
                 + "\n"
             )
-            for w in weeks:
-                out.write(
-                    tr("coh week row").format(
-                        week=w["week"], takes=w["takes"],
-                        rate=f"{w['contour_rate']*100:.0f}%",
-                        live=w["live_notes"], final=w["final_notes"],
-                    )
-                    + "\n"
-                )
     return out.getvalue()

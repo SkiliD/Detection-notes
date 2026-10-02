@@ -15,7 +15,7 @@ from pathlib import Path
 from .i18n import tr
 
 TOOLS = [
-    ("MuseScore", "musescore", ["musescore4", "musescore3", "musescore", "MuseScore4.exe", "MuseScore3.exe"]),
+    ("MuseScore", "musescore", ["musescore4", "musescore3", "musescore", "mscore", "MuseScore4.exe", "MuseScore3.exe"]),
     ("LilyPond", "lilypond", ["lilypond"]),
 ]
 
@@ -27,8 +27,24 @@ _STANDARD_DIRS = {
     "musescore3": ["MuseScore 3", "bin", "MuseScore3.exe"],
 }
 
+# macOS: a .app bundle never appears on the PATH — its executable sits
+# inside the bundle (MuseScore 4 versions the bundle, MuseScore 3 does
+# not). Keyed by the same PATH commands as _STANDARD_DIRS.
+_APP_BUNDLES = {
+    "musescore4": ("MuseScore 4.app",),
+    "musescore3": ("MuseScore.app", "MuseScore 3.app"),
+}
+_APP_BIN = ("Contents", "MacOS", "mscore")
+
+# A GUI-launched app carries a minimal PATH that can miss the package
+# managers' directories (a Homebrew formula like LilyPond installs to
+# /opt/homebrew/bin, which a macOS GUI session does not inherit):
+# probe them under the command's own name.
+_POSIX_BIN_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/snap/bin")
+
 
 def _installed_bases() -> list[Path]:
+    """The Windows installer roots (the env vars are absent elsewhere)."""
     bases = []
     for var in ("ProgramFiles", "ProgramFiles(x86)"):
         v = os.environ.get(var)
@@ -38,6 +54,32 @@ def _installed_bases() -> list[Path]:
     if local:
         bases.append(Path(local) / "Programs")
     return bases
+
+
+def _mac_app_roots() -> list[Path]:
+    """The two .app locations: system-wide and per-user."""
+    return [Path("/Applications"), Path.home() / "Applications"]
+
+
+def _standard_candidates(cmd: str) -> list[Path]:
+    """Absolute locations where `cmd` lives when it is not on the PATH.
+
+    `find_notation_tool` tries `shutil.which` first; these are the
+    real-world misses per platform: a Windows installer that never
+    touched the PATH, a macOS .app bundle (never on the PATH at all),
+    and a package-manager directory a minimal GUI PATH does not carry.
+    """
+    out: list[Path] = []
+    parts = _STANDARD_DIRS.get(cmd)
+    if parts:
+        for base in _installed_bases():
+            out.append(base.joinpath(*parts))
+    for bundle in _APP_BUNDLES.get(cmd, ()):
+        for root in _mac_app_roots():
+            out.append(root.joinpath(bundle, *_APP_BIN))
+    for directory in _POSIX_BIN_DIRS:
+        out.append(Path(directory) / cmd)
+    return out
 
 
 class PdfExportError(RuntimeError):
@@ -56,20 +98,19 @@ class PdfToolMissing(PdfExportError):
 def find_notation_tool() -> tuple[str, str] | None:
     """Return (name, command) of the first available tool, else None.
 
-    Beyond the PATH, the standard Windows install locations are probed:
-    MuseScore installed but invisible to `shutil.which` is the common case
-    on a real machine (the tool WAS there, the PDF was skipped anyway).
+    Beyond the PATH, the standard install locations are probed
+    (`_standard_candidates`: Windows installer dirs, macOS .app bundles,
+    POSIX bin directories): MuseScore installed but invisible to
+    `shutil.which` is the common case on a real machine (the tool WAS
+    there, the PDF was skipped anyway).
     """
     for name, pkg, cmds in TOOLS:
         for cmd in cmds:
             if shutil.which(cmd):
                 return name, cmd
-            parts = _STANDARD_DIRS.get(cmd)
-            if parts:
-                for base in _installed_bases():
-                    exe = base.joinpath(*parts)
-                    if exe.exists():
-                        return name, str(exe)
+            for candidate in _standard_candidates(cmd):
+                if candidate.is_file():
+                    return name, str(candidate)
     return None
 
 

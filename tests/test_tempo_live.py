@@ -1,4 +1,4 @@
-"""Tests estimate_bpm_live : BPM approximatif pendant l'enregistrement."""
+"""Tests estimate_bpm_live: approximate BPM while recording."""
 
 import numpy as np
 

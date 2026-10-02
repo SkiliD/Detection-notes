@@ -102,11 +102,11 @@ def test_unordered_and_overlapping_notes_never_go_backwards():
 
 
 def test_figure_follows_the_grid_tempo():
-    notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]   # 1 s de respiration
+    notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]   # 1 s of breath
     at_120 = detect_rests(notes, GRID, include_lead_in=False)[0]
     at_60 = detect_rests(notes, BeatGrid(60.0), include_lead_in=False)[0]
-    assert at_120.figure == "demi-pause"   # 2 temps à 120
-    assert at_60.figure == "soupir"        # 1 temps à 60
+    assert at_120.figure == "demi-pause"   # 2 beats at 120
+    assert at_60.figure == "soupir"        # 1 beat at 60
 
 
 def test_without_a_grid_the_rests_stay_unlabeled():

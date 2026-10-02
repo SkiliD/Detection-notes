@@ -7,9 +7,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-import pyqtgraph as pg
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -20,9 +19,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import audio_io
-from ..core.accuracy import record_take
 from ..core.audio_io import LiveCapture
 from ..core.continuity import coherence_report
+from ..core.edits import EDIT_ACTIONS, EditHistory, EditState, delete_notes, snapshot_state
 from ..core.grid import BeatGrid
 from ..core.i18n import get_language, note_display_pair, set_language, tr
 from ..core.live_session import LiveEvent, LiveTake
@@ -39,7 +38,7 @@ from ..core.takes import live_export_dir, live_take_name
 from .finder_page import FinderPage
 from .live_page import LIVE_SILENCE_WARN_S, LivePage
 from .live_session_controller import LiveSessionController
-from .pages import build_home_page
+from .home_page import HomePage
 from .results_page import ResultsPage
 from .widgets import (
     STYLESHEET,
@@ -109,6 +108,12 @@ class AnalysisThread(QThread):
         self.opts = opts
 
     def run(self) -> None:
+        # pYIN only has to finish EVENTUALLY: below the capture's priority,
+        # so finalizing the previous take cannot starve the next one's live
+        # drain (see gui/priority.py)
+        from .priority import lower_background_priority
+
+        lower_background_priority()
         try:
             from ..core.pipeline import analyze_file
 
@@ -120,6 +125,36 @@ class AnalysisThread(QThread):
             self.finishedOk.emit(outcome)
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class SignalAnalysisThread(QThread):
+    """Analyze an edited in-memory take without blocking the GUI thread."""
+
+    finishedOk = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, signal: np.ndarray, sr: int, source: str):
+        super().__init__()
+        self.signal = np.asarray(signal, dtype=np.float32)
+        self.sr = sr
+        self.source = source
+
+    def run(self) -> None:
+        from .priority import lower_background_priority
+
+        lower_background_priority()
+        try:
+            from ..core.pipeline import AnalyzeOptions, LIVE_CONF, analyze_signal
+
+            result = analyze_signal(
+                self.signal,
+                self.sr,
+                source=self.source,
+                opts=AnalyzeOptions(min_conf=LIVE_CONF),
+            )
+            self.finishedOk.emit(result, self.signal)
+        except Exception as error:
+            self.failed.emit(str(error))
 
 
 class LiveThread(QThread):
@@ -215,22 +250,46 @@ class MainWindow(QMainWindow):
         self._signal_cache: dict[str, np.ndarray] = {}  # source -> decoded audio
         # the accuracy history lives IN the live page (its only writer);
         # the archive below consumes it through the page
-        self._last_take_entry: dict | None = None  # persisted accuracy entry
         self._analysis_started_at: float = 0.0  # cache-status timing (perf_counter)
         self._replay_worker = None  # ReplayWorker: the take's own cross-check
+        self._phrase_replacement: tuple[
+            AnalysisResult, np.ndarray, int, int, bool
+        ] | None = None
+        self._replacement_source_path: str | None = None
+        self._replacement_pending_analysis = False
+        self._signal_analysis_thread: SignalAnalysisThread | None = None
+        # the note edits' undo/redo: whole-take states (core.edits owns the
+        # history; this window snapshots its facts and applies restorations)
+        self._edit_history = EditHistory()
+        # the re-sung phrase awaiting the singer's verdict: (before-state,
+        # phrase start s, phrase end s in the merged audio). Export waits,
+        # and the views show the spliced take — the decision is informed.
+        self._replacement_decision: tuple | None = None
         # the take in progress, ONE owner: stem (minted once), signal (the
         # event's bytes), replay queue (survives a new take), sidecar and
-        # timer decisions — the deep module the 2026-09-27 regressions
-        # pointed at; this window is its Qt adapter (applies its Verdicts)
+        # timer decisions — this window is its Qt adapter (applies its
+        # Verdicts)
         self.take_ctl = LiveSessionController()
         self.metronome = None       # created when the user opts in
         self.playback = PlaybackSession(audio_io.SR, on_error=self._on_playback_error)
         self.player: NotePlayer | None = None
         self._voice_player: NotePlayer | None = None
+        self._finder_audition = np.zeros(0, dtype=np.float32)
         self.playbackFailed.connect(self._show_playback_error)
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(33)  # ~30 fps playhead updates
         self._play_timer.timeout.connect(self._on_play_tick)
+        # Ctrl+Z / Ctrl+Y (StandardKey.Redo covers Ctrl+Shift+Z too): the
+        # handlers no-op when there is nothing to restore
+        undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_shortcut.activated.connect(self.on_undo_edit)
+        redo_shortcut = QShortcut(QKeySequence.StandardKey.Redo, self)
+        redo_shortcut.activated.connect(self.on_redo_edit)
+        # Del removes the SELECTED range as one undoable edit; the handler
+        # itself guards (another page, no selection → silent no-op), and a
+        # focused line edit still eats the key for its own text
+        delete_shortcut = QShortcut(QKeySequence.StandardKey.Delete, self)
+        delete_shortcut.activated.connect(self.on_delete_selection)
 
         # Single error banner shown above every page (no modal error popups).
         self.stack = QStackedWidget()
@@ -243,7 +302,16 @@ class MainWindow(QMainWindow):
         root.addWidget(self.stack, stretch=1)
         self.setCentralWidget(central)
 
-        self.page_home = build_home_page(self)
+        self.page_home = HomePage(
+            open_file=self.on_open_file,
+            start_live=self.on_start_live,
+            open_finder=self.on_open_finder,
+            toggle_language=self.on_toggle_language,
+            snapshot_factory=self._coherence_snapshot,
+            show_status=lambda message, timeout: self.statusBar().showMessage(
+                message, timeout
+            ),
+        )
         # The results page is a Page module (ADR 0010's full shape): it owns
         # its widgets (waveform, staff, roll, keyboard, options, play
         # buttons) and its rendering behavior; the window injects the user
@@ -252,6 +320,9 @@ class MainWindow(QMainWindow):
         # through `page_results.<widget>`.
         self.page_results = ResultsPage(
             on_seek=self.on_seek,
+            correct_note=self.on_correct_note,
+            replace_phrase=self.on_start_phrase_replacement,
+            finish_replacement=self.on_finish_phrase_replacement,
             toggle_play=self.on_toggle_play,
             toggle_voice=self.on_toggle_voice,
             toggle_both=self.on_toggle_both,
@@ -261,6 +332,13 @@ class MainWindow(QMainWindow):
             reinterpret=self.on_reinterpret,
             open_file=self.on_open_file,
             back_home=self.on_back_home,
+            undo_edit=self.on_undo_edit,
+            redo_edit=self.on_redo_edit,
+            jump_edit_state=self.on_jump_edit_state,
+            accept_replacement=self._on_accept_replacement,
+            cancel_replacement=self._on_cancel_replacement,
+            audition_replacement=self.on_audition_replacement,
+            audition_original=self.on_audition_original,
         )
         # The live page is a Page module (ADR 0010's full shape): it owns
         # its widgets AND its behavior — the window composes it, injecting
@@ -287,6 +365,7 @@ class MainWindow(QMainWindow):
             go_home=lambda: self.stack.setCurrentWidget(self.page_home),
             show_error=self._on_error,
             clear_error=self.error_banner.clear,
+            audition_note=self.on_audition_finder_note,
         )
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_results)
@@ -394,17 +473,7 @@ class MainWindow(QMainWindow):
     def retranslate(self) -> None:
         """Refresh every window string in the current language."""
         self.setWindowTitle(tr("ui window title"))
-        self._title.setText("<h1>🎤 Voix → MIDI</h1>")
-        self._subtitle.setText(tr("ui app subtitle"))
-        self._steps.setText(tr("ui steps"))
-        self.btn_file.setText(tr("ui open file"))
-        self.btn_live.setText(tr("ui sing live"))
-        self.btn_lang.setText(
-            tr("ui lang button") if get_language() == "fr" else "🌐  Langue : English"
-        )
-        self._hint.setText(tr("ui drop hint"))
-        self.btn_coherence.setText(tr("ui coherence sessions btn"))
-        self.btn_finder.setText(tr("ui finder button"))
+        self.page_home.retranslate()
         self.page_finder.retranslate()
         self.page_results.retranslate()
         self.page_live.retranslate()
@@ -594,10 +663,8 @@ class MainWindow(QMainWindow):
     def on_back_home(self) -> None:
         """Leave the analyze page: the playback must NOT keep sounding.
 
-        The user report ("when you leave the page and come back home, the
-        audio keeps playing"): every lambda that only switched pages left the
-        PlaybackSession running — the page changed, the sound didn't. One
-        owner for the navigation back, and it stops the audio first.
+        One owner for the navigation back, and it stops the audio first —
+        a page switch alone would leave the PlaybackSession running.
         """
         self.stop_playback()
         self.stack.setCurrentWidget(self.page_home)
@@ -616,6 +683,10 @@ class MainWindow(QMainWindow):
         if res is None or getattr(res, "observation", None) is None:
             self.show_error(tr("err reinterpret none"), timeout=6_000)
             return
+        # a re-reading replaces the whole interpretation: the edit history's
+        # snapshots describe the previous reading, so they start over
+        self._edit_history.clear()
+        self._sync_edit_history()
         self.stop_playback()
         opts = AnalyzeOptions(
             min_note_s=self.page_results.spin_min_note.value() / 1000.0
@@ -640,6 +711,7 @@ class MainWindow(QMainWindow):
         reinterpreted.grid = res.grid
         self.result = reinterpreted
         self._show_result(reinterpreted)
+
         self.statusBar().showMessage(
             tr("ui status reinterpreted").format(n=len(reinterpreted.notes)), 8_000
         )
@@ -695,83 +767,15 @@ class MainWindow(QMainWindow):
         name = Path(self.source_path).name if self.source_path else tr("ui no file")
         self.page_results.set_file_label(f"{name} — {msg}")
 
+    def _coherence_snapshot(self):
+        """The core snapshot is the one aggregation pass for every view."""
+        from ..core import coherence as coh
+
+        return coh.build_snapshot(coh.LIVE_TAKES_DIR)
+
     def on_show_coherence(self) -> None:
-        """Aggregate the user's takes into the per-session table, on screen.
-
-        The SAME core (`core.coherence`) the CLI script reads: one policy,
-        two front-ends. Best-effort — a read-only or empty folder shows the
-        invite, never an error banner (this is a viewer, not an action).
-        """
-        from ..core import coherence as coh
-
-        text = ""
-        try:
-            root = coh.LIVE_TAKES_DIR
-            takes = coh.takes_under(root)
-            if not takes:
-                self.coherence_text.setVisible(True)
-                self.coherence_text.setPlainText(tr("ui coherence none"))
-                return
-            coh.update_journal(root, takes)
-            text = coh.session_table_text(takes, root=root)
-            # the practice-WINDOW view (morning/afternoon/evening): when is
-            # the singer best? The windows read the same audits — no new
-            # evidence — and only the sung windows appear.
-            windows = coh.practice_time_report(takes)
-            if windows:
-                text += "\n" + tr("ui practice windows title") + "\n"
-                for w in windows:
-                    rate = (
-                        f"{w['suspect_rate']:.1f}" if w["suspect_rate"] is not None else "-"
-                    )
-                    contours = (
-                        f"{w['contour_rate']*100:.0f}%" if w["contour_rate"] is not None else "-"
-                    )
-                    text += tr("ui practice window row").format(
-                        window=tr(f"time {w['window']}"), takes=w["takes"],
-                        rate=rate, contours=contours,
-                    ) + "\n"
-        except Exception as e:  # a viewer must never break the home page
-            text = tr("err ui unreadable").format(e=e)
-        self.coherence_text.setVisible(True)
-        self.coherence_text.setPlainText(text)
-        try:
-            self._refresh_health_chart()
-        except Exception:  # the chart is a nicety, the table is the product
-            pass
-
-    def _refresh_health_chart(self) -> None:
-        """Draw the weekly contour-rate curve from the JOURNAL.
-
-        One point per week (the same rows `session_table_text` lists as
-        text), the rate in percent on y — lower is better. The X positions
-        are the weeks' index (categorical): the labels live in the tooltip
-        and in the click-through, not on an axis, because ISO weeks are not
-        a continuous time axis. Replaces the ASCII sparkline ON THIS PAGE —
-        the CLI keeps its text trends.
-        """
-        from ..core import coherence as coh
-
-        weeks = coh.contour_trend(coh.LIVE_TAKES_DIR)
-        self.health_plot.clear()
-        if not weeks:
-            self.health_plot.setVisible(False)
-            return
-        self._health_weeks = weeks
-        xs = list(range(len(weeks)))
-        ys = [w["contour_rate"] * 100.0 for w in weeks]
-        # the rate line, then each week as a clickable point (ACCENT = the
-        # app's one accent, already the outlines' and the counter's color)
-        self.health_plot.plot(
-            xs, ys, pen=pg.mkPen("#4da3d8", width=2), antialias=True,
-        )
-        scatter = pg.ScatterPlotItem(
-            xs, ys, size=9, brush=pg.mkBrush("#4da3d8"), pen=pg.mkPen("#0e1218"),
-        )
-        self.health_plot.addItem(scatter)
-        self.health_plot.setXRange(-0.5, len(weeks) - 0.5, padding=0)
-        self.health_plot.setYRange(0, 100, padding=0)
-        self.health_plot.setVisible(True)
+        """Thin public delegation to the home page's coherence view."""
+        self.page_home.show_coherence()
 
     def _coherence_summary(self, res) -> str:
         """The one-line coherence verdict for the status bar (or '')."""
@@ -789,6 +793,11 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_done(self, outcome: FileAnalysis) -> None:
         res = outcome.analysis
+        # a new file is a new take: an unaccepted splice dies with the take
+        # it edited, and the edit history never crosses takes
+        self._abandon_pending_replacement()
+        self._edit_history.clear()
+        self._sync_edit_history()
         self.result = res
         # retain the exact decoded samples used for this analysis: waveform
         # rendering must not reopen the source file.
@@ -799,10 +808,7 @@ class MainWindow(QMainWindow):
             res.notes, sr=audio_io.SR, gain=self._piano_gain(),
         )
         self._show_result(res, outcome.audio)
-        self._export_results()
-        # the coherence verdict in the status bar too: it is the one line
-        # the singer reads without opening the JSON (results panel carries
-        # the same verdict as a row)
+        # The analysis remains editable; the export button writes artifacts.
         summary = self._coherence_summary(res)
         if summary:
             self.statusBar().showMessage(
@@ -823,6 +829,8 @@ class MainWindow(QMainWindow):
     def _export_results(self) -> None:
         if self.result is None:
             return
+        if self._replacement_decision is not None:
+            return  # the spliced take awaits its keep/cancel decision
         res = self.result
         # a live take names its folder ONCE (the controller mints at the
         # first export, later re-exports — the Export button — reuse it):
@@ -868,7 +876,10 @@ class MainWindow(QMainWindow):
                 # breakdown (the gap decomposed: ±1 roundings, moves,
                 # absorbed glides) — a file analysis hands over none
                 live_notes=(
-                    self._last_take_live_notes if res.source == "live" else None
+                    self._last_take_live_notes
+                    if res.source == "live"
+                    and not getattr(res, "manual_pitch_corrections", False)
+                    else None
                 ),
             )
             if self.page_results.chk_pdf.isChecked():
@@ -900,16 +911,33 @@ class MainWindow(QMainWindow):
             # the controller records the stem this take exported under (the
             # sidecar, the replay and a later re-export all name it) and
             # decides whether a sidecar is due (ONE writer, ONE stem)
+            manually_corrected = getattr(res, "manual_pitch_corrections", False)
+            audit_block = getattr(res, "live_vs_final", None) or {}
             archive_stem = self.take_ctl.handle_export(
-                getattr(res, "live_vs_final", None) or {}
+                audit_block if not manually_corrected else {},
+                replay=not manually_corrected,
             )
+            if manually_corrected:
+                self.take_ctl.discard_replay(archive_stem or stem.name)
+                worker = self._replay_worker
+                if worker is not None and worker.isRunning():
+                    worker_stem = Path(worker.stem).name
+                    if self.take_ctl.discard_replay(worker_stem):
+                        worker.stop()
             archive = (
-                self._archive_sidecar(archive_stem, getattr(res, "live_vs_final", None) or {})
-                if archive_stem
+                self._archive_sidecar(archive_stem, audit_block)
+                if archive_stem and not manually_corrected
                 else None
             )
             if archive:
                 exts.append(takes.SIDECAR_SUFFIX)
+            elif manually_corrected:
+                from ..core.takes import sidecar_path
+
+                try:
+                    sidecar_path(stem.parent, stem.name).unlink(missing_ok=True)
+                except OSError:
+                    pass  # stale audit removal is best-effort after the export
             # the retention lives at export time: the take folder was just
             # written, so the disk's size is current. The oldest take
             # folders are trimmed WHOLE under the documented budget — the
@@ -929,11 +957,32 @@ class MainWindow(QMainWindow):
         # the action acknowledges itself where the eye already is
         self.page_results.ack_export()
         self.statusBar().showMessage(tr("ui status exported").format(files=files), 10_000)
+        self._refresh_exported_coherence()
         # the take's WAV now exists on disk: its queued cross-check may
         # start — the controller's guards still hold (a running capture or
         # replay keeps it waiting); a file analysis's export pumps an empty
         # queue, the call is free
         self._pump_replay_queue()
+
+    def _refresh_exported_coherence(self) -> None:
+        """Refresh the session verdict from one evidence snapshot after export."""
+        if self.result is None or self.result.source != "live":
+            return
+        try:
+            snapshot = self._coherence_snapshot()
+            if snapshot.sessions and snapshot.sessions[-1]["checked"] is not None:
+                row = snapshot.sessions[-1]
+                self.statusBar().showMessage(
+                    tr("ui coherence session verdict").format(
+                        suspects=row["suspects"],
+                        checked=row["checked"],
+                        takes=row["takes"],
+                    ),
+                    10_000,
+                )
+            self._announce_regression(snapshot)
+        except Exception:
+            pass
 
     def on_export_again(self) -> None:
         self._export_results()
@@ -957,6 +1006,7 @@ class MainWindow(QMainWindow):
         # to forget (the previous take's buffers are gone with the object)
         self._live = LiveRenderState()
         self.page_live.accuracy.reset()
+        self.page_live.set_replacement_mode(self._phrase_replacement is not None)
         # the audio box is read HERE (before the capture starts): the choice
         # belongs to the take, not to the moment its export happens
         self._live.record_audio = self.page_live.chk_record_audio.isChecked()
@@ -964,16 +1014,22 @@ class MainWindow(QMainWindow):
         # real-time wait loop costs the same drain as the capture) is
         # BROKEN HERE, not joined — the worker skips the rest of its take
         # and exits on its own thread. Its stem is NOT re-queued: the
-        # cross-check is a nicety, a deferral that starved live captures
-        # is the 2026-09-27 regression this whole queue exists to prevent
+        # cross-check is a nicety, and keeping it queued would keep
+        # competing with live captures
         worker = self._replay_worker
         if worker is not None and worker.isRunning():
             worker.stop()
-        # the NEW take owns every buffer through the controller (stem,
-        # signal): the previous take's name must never survive into this
-        # take's sidecar or replay — but the replay QUEUE survives, its
-        # entries belong to already-exported takes
-        self.take_ctl.begin_take()
+        # A phrase replacement remains the SAME take: retain its export
+        # identity and queued work. A fresh take starts a new controller state.
+        if self._phrase_replacement is None:
+            # a fresh take abandons an unaccepted splice and forgets the
+            # previous take's edit history (its states belong to that take)
+            self._abandon_pending_replacement()
+            self._edit_history.clear()
+            self._sync_edit_history()
+            self.take_ctl.begin_take()
+        else:
+            self.take_ctl.begin_replacement()
         self._refresh_live_accuracy()
         self._refresh_expected_note(0.0)
         # reset the live state BEFORE the status label: the meter shown at
@@ -985,6 +1041,7 @@ class MainWindow(QMainWindow):
             )
         )
         # live pitch curve on the scrolling piano roll (drop the previous take's)
+        self.page_live.piano_live.set_selectable(False)  # a running take is never picked
         self.page_live.piano_live.begin_live()
         self.page_live.piano_live.set_notation_mode(True)
         self.page_live.staff_live.clear()
@@ -1058,31 +1115,34 @@ class MainWindow(QMainWindow):
             self.page_live.piano_live.set_live_cursor(max(0.0, t))
 
     def _on_live_analysis_done(self, res, signal_bytes: bytes = b"") -> None:
-        """The shared LiveTake finished its final analysis: show and export it.
-
-        Export FIRST: the take is the user's data, a cosmetic hiccup below
-        must never cost it (it used to silently skip the export entirely).
-        """
-        # the live timer is the RENDER of the CURRENT capture: the 2026-09-27
-        # chained-takes regression stopped it unconditionally here, so the
-        # take the singer had ALREADY started (its analysis arrives queued)
-        # kept recording while its roll, counter and cursor froze — the
-        # "the mic stopped detecting me" feel. The CONTROLLER decides (it
-        # also queues this take's cross-check replay): the adapter applies.
+        """Show the completed live analysis and retain it until explicit export."""
+        # a NEW take's analysis never inherits an unaccepted splice (a
+        # pending decision belongs to the take it edited)
+        self._abandon_pending_replacement()
+        # the live timer is the RENDER of the CURRENT capture: the take the
+        # singer has ALREADY started (its analysis arrives queued) keeps
+        # recording while its roll, counter and cursor must stay live. The
+        # CONTROLLER decides (it also queues this take's cross-check
+        # replay): the adapter applies.
         verdict = self.take_ctl.handle_analysis(
             capture_running=(
                 self.live_thread is not None and self.live_thread.isRunning()
             ),
             signal_bytes=signal_bytes,  # the event's bytes AS THEY ARE: an
             # EMPTY payload CLEARS the buffer (the controller's rule) —
-            # `or None` here once turned an empty event into "keep the
-            # previous take's signal", the 2026-09-26 stale-WAV family
+            # `or None` here would turn an empty event into "keep the
+            # previous take's signal": the stale-WAV family
         )
         if verdict.keep_timer:
             self.page_live.start_timer()  # a newer capture owns the view: keep it
         else:
             self.page_live.stop_timer()
         self.page_live.piano_live.set_live_preview(None)
+        if self._phrase_replacement is not None:
+            self._finish_phrase_replacement(res, signal_bytes)
+            return
+        self._edit_history.clear()
+        self._sync_edit_history()
         self.result = res
         # LIVE vs FINAL, made visible: the notes the live segmenter had
         # confirmed are compared to the offline reading of the same take
@@ -1110,30 +1170,7 @@ class MainWindow(QMainWindow):
         self._accuracy_plot_target = "results"
         # Export FIRST: the take is the user's data, a cosmetic hiccup below
         # must never cost it (it used to silently skip the export entirely).
-        self._export_results()
         self.stop_playback()
-        # the SESSION's coherence verdict, right after this take's export:
-        # the singer reads the session's health without running the script
-        # (same core as the home-page button and the CLI script)
-        try:
-            from ..core import coherence as coh
-
-            session_takes = coh.takes_under(coh.LIVE_TAKES_DIR)
-            if session_takes:
-                rows = coh.session_rows(session_takes)
-                if rows:
-                    last = rows[-1]
-                    if last["checked"] is not None:
-                        self.statusBar().showMessage(
-                            tr("ui coherence session verdict").format(
-                                suspects=last["suspects"],
-                                checked=last["checked"],
-                                takes=last["takes"],
-                            ),
-                            10_000,
-                        )
-        except Exception:
-            pass  # the take is already exported; the verdict must never cost it
         self.player = NotePlayer(
             res.notes, sr=audio_io.SR, gain=self._piano_gain(),
             on_error=self._on_playback_error,
@@ -1144,55 +1181,26 @@ class MainWindow(QMainWindow):
         except Exception as e:  # a broken view must not swallow the take
             self.show_error(str(e), timeout=8_000)
         self.statusBar().showMessage(
-            tr("ui status live done").format(
+            tr("ui status live ready").format(
                 bpm=res.tempo.bpm, key=res.key.best.label, n=len(res.notes)
             ),
             12_000,
         )
-        # archive this take's tuning history (progress across sessions);
-        # a failure here must never cost the take already exported
-        dur = len(self._live_signal) / audio_io.SR if self._live_signal is not None else 0.0
-        self._last_take_entry = record_take(
-            self.page_live.accuracy,
-            duration_s=dur,
-            bpm=res.tempo.bpm,
-        )
-        # the take's live/final gap is already archived BESIDE its artifacts
-        # (by `_export_results`, the ONE writer of the sidecar); the take is
-        # then REPLAYED through the real chain (`ReplayWorker`, its own
-        # thread) to cross-check the engine on its own audio: the audit row
-        # lands in `<stem>.live_vs_final.json`, which `scripts/replay_takes.py`
-        # and the weekly health trend read back. Best-effort: the take is
-        # already exported, a replay failure must never cost it.
-        try:
-            # the finished take's cross-check goes through the controller:
-            # it QUEUES it and decides (from the adapter's facts) whether it
-            # may start now or must wait for the next quiet moment
-            self._pump_replay_queue()
-        except Exception:
-            self._replay_worker = None  # no replay: the take is already archived
-        # the multi-week REAL-TIME HEALTH regression, announced once the
-        # session's journal was refreshed above: a deterioration of the
-        # contour rate is the one number that says "the live view is drifting
-        # from the final pass" — the singer reads it where they stand
-        try:
-            self._announce_regression()
-        except Exception:  # a warning must never cost the take
-            pass
-
+        # A fresh live result waits for explicit export before its replay
+        # enters the archive or the coherence journal.
     def _pump_replay_queue(self) -> None:
         """Start the next queued replay, ONLY when nothing competes for DSP.
 
-        THE 2026-09-27 regression this pump guards: a replay's real-time DSP
-        (the same `LiveCapture` -> YIN -> segmenter cost as a capture)
-        starved the LIVE capture's drain thread when both ran — on the four
-        chained takes of that evening the live counter confirmed 2-12 notes
-        while replaying the same WAVs confirmed 17-23. The CONTROLLER owns
-        the queue and the decision (its `pump_replay` reads the adapter's
-        facts: capture timer, worker thread); this adapter only applies —
-        start the named worker, re-pump from `on_stop_live` and from the
-        worker's own `finished` signal.
+        A replay's real-time DSP (the same `LiveCapture` -> YIN ->
+        segmenter cost as a capture) competes with the LIVE capture's
+        drain thread when both run. The CONTROLLER owns the queue and the
+        decision (its `pump_replay` reads the adapter's facts: capture
+        timer, worker thread); this adapter only applies — start the
+        named worker, re-pump from `on_stop_live` and from the worker's
+        own `finished` signal.
         """
+        if self._replacement_pending_analysis or self._signal_analysis_thread is not None:
+            return
         stem_name = self.take_ctl.pump_replay(
             capture_running=self.live_thread is not None
             and self.live_thread.isRunning(),
@@ -1252,6 +1260,469 @@ class MainWindow(QMainWindow):
         except Exception:  # a display nicety must never break the results
             pass
 
+    def _finish_phrase_replacement(self, replacement_result, signal_bytes: bytes) -> None:
+        """Splice the sung phrase, then rebuild evidence for the whole take."""
+        context = self._phrase_replacement
+        self._phrase_replacement = None
+        self.page_live.set_replacement_mode(False)
+        self.page_results.set_replacement_analyzing(True)
+        if context is None:
+            self._replacement_pending_analysis = False
+            return
+        original, original_signal, first, last, record_audio = context
+        self._live_record_audio = record_audio
+        self._replacement_source_path = original.source
+        # the state the decision will offer to restore: the take as it was
+        # when the singer chose to re-sing (captured BEFORE the live-notes
+        # hand-over is cleared below). The action travels with the state:
+        # the history's timeline labels this row "replacement".
+        before = snapshot_state(
+            original, original_signal, self._last_take_live_notes, action="replacement"
+        )
+        self._last_take_live_notes = []
+        try:
+            from ..core.edits import splice_phrase
+
+            replacement_signal = np.frombuffer(signal_bytes, dtype=np.float32).copy()
+            notes, merged_signal, delta = splice_phrase(
+                original.notes,
+                original_signal,
+                replacement_result.notes,
+                replacement_signal,
+                first,
+                last,
+                original.sr,
+                replacement_sr=replacement_result.sr,
+            )
+            # the audition window: where the replaced span sits in the MERGED
+            # audio (the selection's start, its span stretched by delta)
+            phrase_window = (
+                original.notes[first].start,
+                original.notes[last].end + delta,
+            )
+        except Exception as error:
+            self.result = original
+            self._replacement_pending_analysis = False
+            self._live_signal = original_signal
+            self.take_ctl.set_signal(original_signal.tobytes())
+            self._show_result(original, original_signal)
+            self.show_error(tr("err replacement failed").format(e=error), timeout=8_000)
+            self._pump_replay_queue()
+            return
+        self.result = original
+        self._live_signal = original_signal
+        self.take_ctl.set_signal(original_signal.tobytes())
+        self._show_result(original, original_signal)
+        self.page_results.label_play_pos.setText(tr("ui replacement analyzing"))
+        self.page_results.set_replacement_analyzing(True)
+        self._replacement_pending_analysis = True
+        self._replacement_decision = (before, phrase_window[0], phrase_window[1])
+        self._signal_analysis_thread = SignalAnalysisThread(
+            merged_signal, original.sr, source="live"
+        )
+        self._signal_analysis_thread.finishedOk.connect(self._on_replacement_analysis_done)
+        self._signal_analysis_thread.failed.connect(self._on_replacement_analysis_failed)
+        self._signal_analysis_thread.start()
+
+    def _on_replacement_analysis_done(self, result, signal: np.ndarray) -> None:
+        """Publish the spliced take and hand the decision to the singer.
+
+        The splice is NOT applied yet: the views show the spliced take and
+        the singer auditions it (the phrase clip, or the whole take with
+        the play buttons), then keeps it — the splice becomes an undoable
+        edit — or cancels it — the take returns to what it was.
+        """
+        self._signal_analysis_thread = None
+        self._replacement_pending_analysis = False
+        self.page_results.set_replacement_analyzing(False)
+        if self._replacement_source_path is not None:
+            result.source = self._replacement_source_path
+        self._replacement_source_path = None
+        result.live_vs_final = None
+        self._last_take_live_notes = []
+        self.stop_playback()
+        self.result = result
+        self._live_signal = np.asarray(signal, dtype=np.float32)
+        self.take_ctl.set_signal(self._live_signal.tobytes())
+        self._signal_cache = {result.source: self._live_signal}
+
+        self.player = NotePlayer(
+            result.notes, sr=result.sr, gain=self._piano_gain(),
+            on_error=self._on_playback_error,
+        )
+        self.playback.set_sources(piano=self.player.signal, voice=self._live_signal)
+        if self._replacement_decision is None:
+            # no decision context (the splice came from another path): the
+            # spliced take is shown, the singer keeps or re-exports as today
+            self._show_result(result, self._live_signal)
+            return
+        self.page_results.set_replacement_pending(True)
+        self._show_result(result, self._live_signal)
+        self.statusBar().showMessage(tr("ui replacement pending"), 8_000)
+        # Nothing is exported and no stale pre-decision replay may run
+        # before the singer keeps or cancels the splice.
+
+    def _on_accept_replacement(self) -> None:
+        """Keep the spliced take: the decision becomes an undoable edit."""
+        decision = self._replacement_decision
+        if decision is None or self.result is None:
+            return
+        self._replacement_decision = None
+        self.page_results.set_replacement_pending(False)
+        self._edit_history.record(decision[0])
+        self._sync_edit_history()
+        self.statusBar().showMessage(
+            tr("ui replacement accepted").format(n=len(self.result.notes)), 8_000
+        )
+        self._pump_replay_queue()
+
+    def _on_cancel_replacement(self) -> None:
+        """Refuse the splice: the take returns to what it was."""
+        decision = self._replacement_decision
+        if decision is None:
+            return
+        self._replacement_decision = None
+        self.page_results.set_replacement_pending(False)
+        self._apply_edit_state(decision[0])
+        self._sync_edit_history()
+        self.statusBar().showMessage(tr("ui replacement cancelled"), 6_000)
+        self._pump_replay_queue()
+
+    def _abandon_pending_replacement(self) -> None:
+        """Drop an unaccepted splice silently, restoring the take it edited.
+
+        A pending decision belongs to its take: a NEW take (or a new file
+        analysis) abandons it — the pre-replacement state is restored
+        WITHOUT refilling the views (the caller is on its way elsewhere)
+        and the edit history is untouched (nothing was ever applied).
+        """
+        decision = self._replacement_decision
+        if decision is None:
+            return
+        self._replacement_decision = None
+        self.page_results.set_replacement_pending(False)
+        self._apply_edit_state(decision[0], show=False)
+
+    def on_audition_replacement(self) -> None:
+        """Play the re-sung phrase, as the spliced take will sound there."""
+        decision = self._replacement_decision
+        signal = self._live_signal
+        if decision is None or signal is None or self.result is None:
+            return
+        _before, phrase_start, phrase_end = decision
+        sr = self.result.sr
+        lo = max(0, int(round(phrase_start * sr)))
+        hi = min(len(signal), int(round(phrase_end * sr)))
+        if hi <= lo:
+            return
+        self.stop_playback()
+        self.playback.set_sources(
+            voice=np.asarray(signal[lo:hi], dtype=np.float32)
+        )
+        self.playback.play("voice")
+        self._sync_play_buttons()  # the button state follows the sounding clip
+
+    def on_audition_original(self) -> None:
+        """Play the selected phrase's ORIGINAL audio, before re-singing it.
+
+        The clip is cut from the take's CURRENT signal (the live take's, or
+        a file's cached audio) between the first selected note's onset and
+        the last one's offset — the same span a replacement would splice,
+        so the singer can compare the two auditions like for like.
+        """
+        signal = self._voice_signal()
+        if signal is None or self.result is None:
+            return
+        indices = self.page_results._selected_note_indices()
+        if not indices:
+            return
+        notes = self.result.notes
+        if indices[-1] >= len(notes):
+            return
+        sr = self.result.sr
+        lo = max(0, int(round(notes[indices[0]].start * sr)))
+        hi = min(len(signal), int(round(notes[indices[-1]].end * sr)))
+        if hi <= lo:
+            return
+        self.stop_playback()
+        self.playback.set_sources(
+            voice=np.asarray(signal[lo:hi], dtype=np.float32)
+        )
+        self.playback.play("voice")
+        self._sync_play_buttons()  # the button state follows the sounding clip
+
+    def _edit_snapshot(self, action: str = "correction") -> EditState | None:
+        """The whole current take state (the edit history's before/after unit).
+
+        `action` names the edit that is ABOUT to overwrite this state — it
+        only feeds the history's timeline labels.
+        """
+        res = self.result
+        if res is None:
+            return None
+        signal = (
+            self._live_signal
+            if res.source == "live"
+            else self._signal_cache.get(res.source)
+        )
+        return snapshot_state(res, signal, self._last_take_live_notes, action=action)
+
+    def _sync_edit_history(self) -> None:
+        """Push the history's branches and whole timeline to the results page."""
+        res = self.result
+        current = self._edit_snapshot() if res is not None else None
+        if current is not None:
+            self.page_results.set_edit_states(self._edit_history.entries(current))
+        self.page_results.set_edit_history_state(
+            self._edit_history.can_undo, self._edit_history.can_redo
+        )
+
+    def _edit_jumps_allowed(self) -> bool:
+        """The shared guard for every note edit and every history move.
+
+        Deleting, undoing, redoing and the state dropdown all answer NO at
+        the same moments: no take, a splice awaiting its verdict, another
+        page, a capture re-singing the phrase, or a splice re-analyzing.
+        One owner of the rule, so the dropdown can never reach a state
+        undo would refuse and Del can never fire where an edit cannot.
+        """
+        if self.result is None or self._replacement_decision is not None:
+            return False
+        # the shortcut is window-wide: it only acts where the edits live
+        if self.stack.currentWidget() is not self.page_results:
+            return False
+        if self._phrase_replacement is not None or self._signal_analysis_thread is not None:
+            return False  # a capture is re-singing, or the splice is re-analyzing
+        return True
+
+    def _steps_to_history_index(self, row_index: int) -> int:
+        """Signed undo(+)/redo(-) step count that lands on the timeline row.
+
+        `entries` is [undo stack ..., CURRENT, redo stack ...]: an undo row
+        sits that many steps back from the current state; a redo row sits
+        that many redo steps FORWARD (row `undo_depth` IS the current row).
+        Nothing is lost either way — each stepped move re-archives the
+        state it leaves, so the timeline keeps every state the jump passed
+        over.
+        """
+        undo_depth = self._edit_history.undo_depth
+        return undo_depth - row_index  # undo rows positive, redo rows negative
+
+    def _move_through_history(self, steps: int) -> bool:
+        """Apply `steps` undo (+) or redo (-) moves as ONE view restoration."""
+        if steps == 0:
+            return False
+        current = self._edit_snapshot()
+        if current is None:
+            return False
+        state = current
+        undone = redone = 0
+        for _ in range(abs(steps)):
+            if steps > 0:
+                nxt = self._edit_history.undo(state)
+                if nxt is None:
+                    break
+                state = nxt
+                undone += 1
+            else:
+                nxt = self._edit_history.redo(state)
+                if nxt is None:
+                    break
+                state = nxt
+                redone += 1
+        if undone + redone == 0:
+            return False
+        self._apply_edit_state(state)
+        self._sync_edit_history()
+        message = "ui edit undone" if undone else "ui edit redone"
+        self.statusBar().showMessage(tr(message), 6_000)
+        return True
+
+    def on_undo_edit(self) -> None:
+        """Restore the take as it was before the last applied note edit."""
+        if not self._edit_jumps_allowed():
+            return
+        self._move_through_history(1)
+
+    def on_redo_edit(self) -> None:
+        """Reapply the last undone note edit."""
+        if not self._edit_jumps_allowed():
+            return
+        self._move_through_history(-1)
+
+    def on_jump_edit_state(self, row_index: int) -> None:
+        """Restore a past state chosen in the results page's dropdown.
+
+        The jump is a stepped undo (rows above the current are undo moves;
+        below is impossible — the current state is the last row), replayed
+        through the SAME undo machinery so one owner keeps the branch
+        bookkeeping and every step lands on a state the history archived.
+        """
+        if not self._edit_jumps_allowed():
+            return
+        states = self.page_results._edit_states
+        if not 0 <= row_index < len(states) or states[row_index][0] is None:
+            return
+        self._move_through_history(self._steps_to_history_index(row_index))
+
+    def _apply_edit_state(self, state: EditState, *, show: bool = True) -> None:
+        """Swap one whole-take state in (an undo, a redo, a cancelled splice)."""
+        res = state.result
+        self.stop_playback()
+        self.result = res
+        if res.source == "live":
+            self._live_signal = (
+                np.asarray(state.signal, dtype=np.float32)
+                if state.signal is not None
+                else None
+            )
+            self._signal_cache = (
+                {"live": np.asarray(self._live_signal, dtype=np.float32)}
+                if self._live_signal is not None
+                else {}
+            )
+            if self._live_signal is not None:
+                # the take's exportable audio follows the restored state
+                self.take_ctl.set_signal(self._live_signal.tobytes())
+        else:
+            self._live_signal = None  # a file view must never show a live take
+            self._signal_cache = (
+                {res.source: np.asarray(state.signal, dtype=np.float32)}
+                if state.signal is not None
+                else {}
+            )
+        self._last_take_live_notes = list(state.live_notes)
+        self.player = NotePlayer(
+            res.notes, sr=res.sr, gain=self._piano_gain(),
+            on_error=self._on_playback_error,
+        )
+        self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
+        if show:
+            self._show_result(res, state.signal)
+
+
+    def _on_replacement_analysis_failed(self, error: str) -> None:
+        """Keep the original result visible if rebuilt evidence cannot be read."""
+        self._signal_analysis_thread = None
+        self._replacement_pending_analysis = False
+        self._replacement_decision = None
+        self.page_results.set_replacement_analyzing(False)
+        if self.result is not None:
+            if self._replacement_source_path is not None:
+                self.result.source = self._replacement_source_path
+                self._replacement_source_path = None
+            self.take_ctl.set_signal(
+                self._live_signal.tobytes() if self._live_signal is not None else b""
+            )
+            self._show_result(self.result, self._live_signal)
+        else:
+            self._replacement_source_path = None
+        self.show_error(tr("err replacement failed").format(e=error), timeout=8_000)
+        self._pump_replay_queue()
+
+    def on_correct_note(self, index: int, midi: int) -> None:
+        """Correct one selected note and refresh the score's dependent facts."""
+        if self.result is None:
+            return
+        before = self._edit_snapshot()
+        try:
+            from ..core.edits import correct_note_pitch
+
+            correct_note_pitch(self.result, index, midi)
+            self.stop_playback()
+            self.player = NotePlayer(
+                self.result.notes, sr=self.result.sr, gain=self._piano_gain(),
+                on_error=self._on_playback_error,
+            )
+            self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
+            self._show_result(self.result)
+            if before is not None:
+                self._edit_history.record(before)
+            self._sync_edit_history()
+        except Exception as error:
+            self.show_error(tr("err note correction failed").format(e=error), timeout=8_000)
+
+    def on_delete_selection(self) -> None:
+        """Delete the selected notes as ONE undoable edit (the Del key).
+
+        No selection stays silent — Del belongs to other widgets too. The
+        edit follows the correction path (snapshot, mutate, re-show,
+        record), so one undo restores every deleted note at once; a
+        deletion that would empty the take is refused by the core and
+        announced, history untouched.
+        """
+        result = self.result
+        if result is None or not self._edit_jumps_allowed():
+            return
+        indices = self.page_results._selected_note_indices()
+        if not indices:
+            return
+        before = self._edit_snapshot(action="deletion")
+        try:
+            delete_notes(result, indices)
+            self.stop_playback()
+            self.player = NotePlayer(
+                result.notes, sr=result.sr, gain=self._piano_gain(),
+                on_error=self._on_playback_error,
+            )
+            self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
+            self._show_result(result)
+            if before is not None:
+                self._edit_history.record(before)
+            self._sync_edit_history()
+        except Exception as error:
+            self.show_error(tr("err note deletion failed").format(e=error), timeout=8_000)
+
+    def on_start_phrase_replacement(self) -> None:
+        """Start a live capture that replaces the selected contiguous notes."""
+        result = self.result
+        signal = self._voice_signal()
+        indices = self.page_results._selected_note_indices()
+        if result is None or result.source != "live" or signal is None:
+            self.show_error(tr("err replacement live only"), timeout=6_000)
+            return
+        if not indices or indices != list(range(indices[0], indices[-1] + 1)):
+            self.show_error(tr("err replacement selection"), timeout=6_000)
+            return
+        self._phrase_replacement = (
+            result,
+            signal.copy(),
+            indices[0],
+            indices[-1],
+            self._live_record_audio,
+        )
+        self._replacement_pending_analysis = True
+        self.page_results.set_replacement_active(True)
+        try:
+            self.on_start_live()
+        except Exception as error:
+            self._cancel_phrase_replacement(str(error))
+            return
+        self._live_record_audio = self._phrase_replacement[4]
+        self.page_live.set_replacement_mode(True)
+        self.page_live.label_status.setText(tr("ui replacement prompt"))
+
+    def on_finish_phrase_replacement(self) -> None:
+        """Stop singing the replacement; the live finalizer handles its audio."""
+        if self._phrase_replacement is None:
+            return
+        self.on_stop_live()
+
+    def on_audition_finder_note(self, midi: int) -> None:
+        """Play one short piano tone; another click or leaving stops it."""
+        self._play_timer.stop()
+        self.playback.stop()
+        if midi <= 0:
+            return
+        from ..core.notes import Note
+        from ..core.playback import render_notes
+
+        self._finder_audition = np.zeros(0, dtype=np.float32)
+        tone = Note(0.0, 0.85, int(midi), 0.95, strength=0.8)
+        self._finder_audition = render_notes([tone], sr=audio_io.SR, gain=0.8)
+        self.playback.set_sources(piano=self._finder_audition)
+        self.playback.play("piano")
+
     def _show_result(self, res, signal: np.ndarray | None = None) -> None:
         """Show a fresh result on the results page (file or live take)."""
         self.stack.setCurrentWidget(self.page_results)
@@ -1269,6 +1740,9 @@ class MainWindow(QMainWindow):
     def on_stop_live(self) -> None:
         self.page_live.stop_timer()
         self.page_live.piano_live.set_live_preview(None)
+        # the take is over: its closed notes sit frozen on the roll — the
+        # singer can now pick them read-only (the next take clears it all)
+        self.page_live.piano_live.set_selectable(True)
         self.page_live.piano_live_keys.set_pressed()
         self.page_live.staff_live.clear()
         if self.metronome is not None:
@@ -1291,17 +1765,45 @@ class MainWindow(QMainWindow):
                 # the capture thread also drains its queued blocks: give it
                 # room before the reference goes away
                 self.live_thread.wait(6000)
+            dropped = self.live_thread.take.dropped_blocks if (
+                self.live_thread.take is not None
+            ) else 0
+            if dropped:
+                # the honesty counter, read where the eye is: the live note
+                # count reads hollow (blocks never reached the DSP), the WAV
+                # keeps everything — the announcement makes the gap legible
+                self.page_live.label_status.setText(
+                    tr("ui dropped blocks").format(n=dropped)
+                )
             self.live_thread = None
             # a take whose replay was DEFERRED (its analysis arrived while
-            # the next capture was already running — the chained-takes case
-            # that starved the live DSP, 2026-09-27) starts HERE, where no
+            # the next capture was already running) starts HERE, where no
             # capture competes for the drain thread
-            try:
-                self._pump_replay_queue()
-            except Exception:
-                pass
+            if not self._replacement_pending_analysis:
+                try:
+                    self._pump_replay_queue()
+                except Exception:
+                    pass
         else:
             self.stack.setCurrentWidget(self.page_home)
+
+    def _cancel_phrase_replacement(self, error: str) -> None:
+        """Restore the original take when replacement capture cannot finish."""
+        context = self._phrase_replacement
+        self._phrase_replacement = None
+        self._replacement_pending_analysis = False
+        self.page_live.set_replacement_mode(False)
+        self.page_results.set_replacement_analyzing(False)
+        self.page_results.set_replacement_active(False)
+        if context is not None:
+            original, signal, _first, _last, record_audio = context
+            self.result = original
+            self._live_signal = signal
+            self._live_record_audio = record_audio
+            self.take_ctl.set_signal(signal.tobytes())
+            self._show_result(original, signal)
+        self.show_error(tr("err replacement failed").format(e=error), timeout=8_000)
+        self._pump_replay_queue()
 
     def _live_thread_failed(self, error: str, signal_bytes: bytes = b"") -> None:
         """The take's finalization failed: announce it, leave the trace.
@@ -1325,6 +1827,9 @@ class MainWindow(QMainWindow):
         stop-time trace would brand a healthy take failed before its
         export arrived.
         """
+        if self._phrase_replacement is not None:
+            self._cancel_phrase_replacement(error)
+            return
         self.page_live.on_failed(error)
         self.take_ctl.set_signal(signal_bytes)
         try:
@@ -1352,75 +1857,7 @@ class MainWindow(QMainWindow):
         except Exception:  # a nicety on top of an archived result
             pass
 
-    def _on_health_clicked(self, ev) -> None:
-        """A week was clicked on the health chart: show ITS replayed takes.
-
-        The mapping is positional (the click's x is rounded to the nearest
-        week index) and the drill-down reads the JOURNAL's own stems — the
-        same rows the text table lists, never a folder guess. Double-click
-        handling is left to pyqtgraph: any accepted click drills down.
-        """
-        if getattr(ev, "button", lambda: None)() != pg.QtCore.Qt.MouseButton.LeftButton:
-            return
-        weeks = getattr(self, "_health_weeks", None)
-        if not weeks:
-            self.statusBar().showMessage(tr("ui health click none"), 5_000)
-            return
-        try:
-            pos = self.health_plot.getPlotItem().vb.mapSceneToView(ev.scenePos())
-            idx = int(round(pos.x()))
-        except Exception:
-            idx = -1
-        if not 0 <= idx < len(weeks):
-            self.statusBar().showMessage(tr("ui health click none"), 5_000)
-            return
-        week = weeks[idx]
-        stems = week.get("stems") or []
-        if not stems:
-            self.statusBar().showMessage(tr("ui health click none"), 5_000)
-            return
-        self.statusBar().showMessage(
-            tr("ui health click").format(week=week["week"], n=len(stems)), 8_000
-        )
-        # the drill-down shows the WEEK'S OWN takes through the session
-        # table's reader: stems -> audits -> one text block, plus each
-        # take's own line (the compact table shows sessions, the singer
-        # clicked to see TAKES — the existing i18n formats render them)
-        try:
-            from ..core import coherence as coh
-
-            take_audits = coh.takes_under(coh.LIVE_TAKES_DIR)
-            by_stem = {t.stem: t for t in take_audits}
-            week_takes = [by_stem[s] for s in stems if s in by_stem]
-            missing = len(stems) - len(week_takes)
-            detail = coh.session_table_text(week_takes)
-            lines = [tr("ui health click").format(week=week["week"], n=len(stems)), ""]
-            lines.extend(detail.splitlines())
-            lines.append("")
-            for t in week_takes:
-                checked = f"{t.checked}" if t.checked is not None else "-"
-                rate = f"{t.contour_rate*100:.0f}%" if t.contour_rate is not None else "-"
-                if t.verify_ok is False:
-                    lines.append(tr("coh take divergent").format(
-                        stem=t.stem, checked=checked, rate=rate))
-                elif not t.suspects:
-                    lines.append(tr("coh take clean").format(
-                        stem=t.stem, checked=checked) + f"  ({rate})")
-                else:
-                    lines.append(tr("coh take suspects").format(
-                        stem=t.stem, checked=checked, rate=rate,
-                        n=len(t.suspects)))
-            if missing:
-                lines.append(
-                    tr("ui health click none") if missing == len(stems) else
-                    f"  ({missing})"
-                )
-            self.coherence_text.setVisible(True)
-            self.coherence_text.setPlainText("\n".join(lines))
-        except Exception:  # a read-only drill-down must never break the page
-            pass
-
-    def _announce_regression(self) -> None:
+    def _announce_regression(self, snapshot=None) -> None:
         """Warn when the real-time health DEGRADED against the previous week.
 
         The journal was just refreshed with this take's audit: `regression_report`
@@ -1429,10 +1866,8 @@ class MainWindow(QMainWindow):
         never a judgment. Silent when healthy, when the data is missing, or
         when a lone take cannot back the comparison.
         """
-        from ..core import coherence as coh
-
-        weeks = coh.contour_trend(coh.LIVE_TAKES_DIR)
-        reg = coh.regression_report(weeks)
+        snapshot = snapshot or self._coherence_snapshot()
+        reg = snapshot.regression
         if reg is None:
             return
         self.show_error(

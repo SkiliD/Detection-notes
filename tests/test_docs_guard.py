@@ -33,11 +33,15 @@ Contracts that so far lived only in AGENTS.md:
    user instead of raising, so a typo in a key can only be seen
    statically — here, on src/ and scripts/.
 
-7. **Docstrings are in ENGLISH** (2026-09-28 whole-repo sweep): a
-   docstring carrying an accented-French letter in src/ or scripts/
-   (i18n.py exempted — its tables ARE the French) is swept residue and
-   fails. Canonical vocabulary inside a docstring is exempted, as for
-   guard 3.
+7. **Comments and docstrings are in ENGLISH** (2026-09-28 whole-repo
+   sweep): a COMMENT or docstring in src/ or scripts/ (i18n.py exempted —
+   its tables ARE the French) carrying an accented-French letter, or one
+   of the UNACCENTED French words the accent test structurally cannot see
+   (`verite`, `dans`, `aucune`… — the guide_capture sweep, 2026-10-02),
+   fails. Canonical vocabulary inside the text is exempted, as for
+   guard 3. The word list is bounded on both sides and corpus-audited:
+   `quiet`/`describe` are English words, not matches. tests/ is outside
+   the border on purpose: test comments QUOTE the French UI by design.
 
 8. **A subprocess booted by a test is AUDITED against the user's
    `~/.v2m_lang`**: the conftest language sandbox is process-local, so
@@ -59,15 +63,22 @@ Contracts that so far lived only in AGENTS.md:
    or the composition window. A widget born in a helper, a dialog or a
    fourth place re-opens "who owns this screen?" and fails until it
    joins a Page (or earns its allowlist line with a reason).
+
+10. **Shell scripts keep LF endings**: `.gitattributes` pins
+    `*.sh text eol=lf` and `docker-entrypoint.sh` carries no CR — the
+    entry point runs through bash inside the Linux image, where a CRLF
+    file fails with `env: '\r': No such file or directory`.
 """
 
 from __future__ import annotations
 
 import ast
+import io
 import re
 import subprocess
 import tempfile
 import time
+import tokenize
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -83,6 +94,18 @@ CANONICAL = (
     "détaché",  # musical vocabulary quoted as a term (AGENTS.md 2026-09-28 rule)
 )
 CANONICAL_RE = tuple(re.escape(w) + r"\b" for w in CANONICAL)
+
+# Guard 7's text test: an accented letter (canonical exempted) OR one of
+# guard 4's unaccented French words — FRENCH_WORD_RE is defined with guard
+# 4 below (one shared list, bounded on both sides, accent-folded, so
+# `quiet`/`describe` are English words and never matches). Deliberately
+# absent from the list: words that appear inside QUOTED French in
+# src/scripts ("chantez une note…").
+def _has_french(text: str) -> bool:
+    """The text carries French: an accented letter or a guard-4 word."""
+    if FRENCH_LETTERS & set(text) and not any(re.search(p, text) for p in CANONICAL_RE):
+        return True
+    return bool(FRENCH_WORD_RE.search(text.translate(ACCENT_FOLD)))
 
 
 def _tracked() -> list[str]:
@@ -184,9 +207,23 @@ def test_no_french_literals_outside_i18n():
 # Accents are folded on BOTH sides so 'trouvé' and 'trouve' fall under the
 # same rule, and each word is bounded (\b) so 'west', 'manifest', 'latest'
 # are not swallowed (English has 'est' too).
+# ONE shared list: guard 4 applies it to code literals, guard 7 to
+# comments and docstrings (the 2026-10-02 guide_capture sweep — unaccented
+# French hid in comments no accent test could see). Every added word is
+# audited against this corpus: English neighbours ('quiet', 'describe')
+# are not members, and words quoted in French stay out ('chantez', 'une').
 FRENCH_WORDS = (
     "est", "trouve", "echec", "fichier", "dossier", "introuvable",
     "indisponible", "delai", "duree", "analyse",
+    # guard 7's extension: comments/docstrings vocabulary
+    "aucun", "aucune", "aussi", "avait", "borne", "bornes", "chaque",
+    "courbe", "dans", "deja", "depuis", "donc", "ecrit", "entree",
+    "etre", "etait", "faut", "fenetre", "hauteur", "lorsque", "mais",
+    "meme", "parce", "peut", "peuvent", "plusieurs", "pour", "puis",
+    "rafine", "raffine", "repere", "trame", "trames", "tres", "toujours",
+    "toutes", "tous", "verite", "avec", "cette", "ainsi", "alors",
+    "cela", "enfin", "manquant", "doivent", "pendant", "reelle",
+    "reelles", "verifiee", "verifiees", "arret", "separe", "valeur", "vide",
 )
 FRENCH_WORD_RE = re.compile(r"\b(" + "|".join(FRENCH_WORDS) + r")\b", re.I)
 ACCENT_FOLD = str.maketrans({
@@ -368,35 +405,48 @@ def _tr_key_offenders(rel: str, source: str, tables: dict) -> list[str]:
 
 
 def _docstring_offenders(path: Path) -> list[tuple[int, str]]:
-    """French docstrings of `path` (accented letters), canonical vocabulary exempted."""
+    """French docstrings of `path` (accents or the word list), canonical exempted."""
     hits: list[tuple[int, str]] = []
     for const in _docstring_consts(ast.parse(path.read_text(encoding="utf-8"))):
         if not isinstance(const.value, str):
             continue
         text = const.value
-        if FRENCH_LETTERS & set(text) and not any(re.search(p, text) for p in CANONICAL_RE):
+        if _has_french(text):
             hits.append((const.lineno, text))
     return hits
 
 
-def test_no_french_docstrings_outside_i18n():
-    """No French docstring in src/ or scripts/ — the mirror of guard 3."""
+def _comment_offenders(path: Path) -> list[tuple[int, str]]:
+    """French comments of `path` (accents or the word list), canonical exempted."""
+    hits: list[tuple[int, str]] = []
+    source = path.read_text(encoding="utf-8")
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.COMMENT and _has_french(tok.string):
+                hits.append((tok.start[0], tok.string))
+    except tokenize.TokenError:
+        pass  # an unparseable tail hides no comment the parser could read
+    return hits
+
+
+def test_no_french_comments_or_docstrings_outside_i18n():
+    """No French comment or docstring in src/ or scripts/ — guard 7's border."""
     offenders: list[str] = []
     for base in ("src/v2m", "scripts"):
         for path in sorted((REPO / base).rglob("*.py")):
             if path.name == "i18n.py":
                 continue
-            for lineno, text in _docstring_offenders(path):
+            for lineno, text in _docstring_offenders(path) + _comment_offenders(path):
                 offenders.append(f"{path}:{lineno}: {text[:80]!r}")
     assert not offenders, (
-        "French docstrings in src/scripts — comments and docstrings are in "
-        "ENGLISH (session rule, 2026-09-28 sweep):\n  "
+        "French comments/docstrings in src/scripts — both are in ENGLISH "
+        "(session rule, 2026-09-28 sweep; unaccented words caught 2026-10-02):\n  "
         + "\n  ".join(offenders)
     )
 
 
 def test_french_docstring_guard_bites():
-    """Guard 7 has TEETH: it bites a French docstring, exempts the canonical."""
+    """Guard 7 has TEETH: a French docstring AND a French comment bite."""
     tmp = Path(tempfile.mkdtemp())
     bad = tmp / "bad.py"
     bad.write_text(
@@ -404,6 +454,17 @@ def test_french_docstring_guard_bites():
         encoding="utf-8",
     )
     assert _docstring_offenders(bad), "the guard does not bite?"
+    # an unaccented French DOCSTRING (the guide_capture shape) bites too
+    plain = tmp / "plain.py"
+    plain.write_text(
+        'def f():\n    """Raffine le repere humain sur la courbe."""\n    return None\n',
+        encoding="utf-8",
+    )
+    assert _docstring_offenders(plain), "unaccented French slipped through"
+    # a French COMMENT is on the same border (comments were swept too)
+    cmt = tmp / "cmt.py"
+    cmt.write_text("x = 1  # aucune plage ne correspond\n", encoding="utf-8")
+    assert _comment_offenders(cmt), "a French comment does not bite?"
     # canonical vocabulary inside a docstring is exempted (as guard 3)
     ok = tmp / "ok.py"
     ok.write_text(
@@ -869,8 +930,8 @@ WIDGET_OWNERS = {
     "gui/results_page.py": "results Page module",
     "gui/live_page.py": "live Page module",
     "gui/finder_page.py": "finder Page module",
-    # the last builder: the home page has no state of its own
-    "gui/pages.py": "home page builder",
+    # page modules own their screen widgets and behavior
+    "gui/home_page.py": "home Page module",
     # the composition window: the stack, the central widget, the banner
     "gui/main_window.py": "window composition (stack, central, banner)",
 }
@@ -981,3 +1042,14 @@ def test_widget_guard_bites():
         for _, kind in _widget_constructions(path)
     )
     assert not _widget_constructions(REPO / "src" / "v2m" / "core" / "metronome.py")
+
+
+def test_shell_scripts_keep_lf_for_the_linux_image():
+    """Guard 10: the `.gitattributes` pin exists and the entry point has no CR."""
+    attrs = (REPO / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.sh text eol=lf" in attrs, (
+        "without the pin, a Windows checkout (autocrlf) hands bash a CRLF "
+        "docker-entrypoint.sh and the Linux image refuses to start"
+    )
+    entrypoint = (REPO / "docker-entrypoint.sh").read_bytes()
+    assert b"\r" not in entrypoint, "docker-entrypoint.sh carries CR line endings"

@@ -18,8 +18,8 @@ FMIN = 65.0    # ~ C2
 FMAX = 2100.0  # ~ C7
 # A "pitch" is only kept when the frame is actually PERIODIC: YIN's minimum
 # of d'(tau) is the periodicity (0 = perfect period, 1 = noise). Measured on
-# a low rumble (mic handling / desk thump, the "Sol#2 at the start of a live
-# take" user report): d'min 0.73-1.12 — YIN still returns an Hz, the note
+# a low rumble (mic handling / desk thump): d'min 0.73-1.12 — YIN still
+# returns an Hz, the note
 # segmenter reads a fake low note. Any sung frame sits far below (measured
 # 0.000-0.05; the old fallback rejected above 0.6, so 0.35 keeps a wide
 # margin under it while killing the rumble).

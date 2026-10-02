@@ -234,7 +234,7 @@ def test_rest_without_figure_falls_back_to_the_closest_value():
         _note(60, 0.0, dur_s=0.5, figure="noire"),
         _note(62, 3.5, dur_s=0.5, figure="noire"),
     ]
-    rests = [Rest(start=0.5, end=2.5)]          # 2 s à 120 BPM = 4 temps
+    rests = [Rest(start=0.5, end=2.5)]          # 2 s at 120 BPM = 4 beats
     lay = layout_staff(notes, grid=GRID, rests=rests)
     r = lay.rests[0]
     assert r.shape is None

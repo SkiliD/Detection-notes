@@ -1,4 +1,4 @@
-"""The Voice observation -> Interpretation seam (workstream A, 2026-09-26).
+"""The Voice observation -> Interpretation seam (workstream A).
 
 What this file pins, and nothing pinned before:
 

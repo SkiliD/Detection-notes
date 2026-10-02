@@ -7,8 +7,8 @@ never cost the data — and here the data is `weekly_text`, which the CLI
 can print and the tests can read without a notation tool installed.
 
 The tool contract mirrors `pdf_export`: `find_notation_tool` probes the
-standard Windows install dirs beyond the PATH (the installers do not add
-themselves to the PATH); `WeeklyPdfToolMissing` (nothing installed =
+standard install locations beyond the PATH (Windows installer dirs,
+macOS `.app` bundles, POSIX package-manager bin dirs); `WeeklyPdfToolMissing` (nothing installed =
 skipped) is distinct from `WeeklyPdfExportError` (the conversion ran and
 failed) so the caller can decide whether to warn or to exit 2. The recap
 itself travels as a MusicXML score whose lyrics CARRY the text: MuseScore

@@ -1,11 +1,11 @@
 """The finder's readings, decided once: pending shows, confirmed remembers.
 
-The two jobs are NOT the same (both measured): the big name answers from
-the PENDING reading — hiding a confirming note read as "the mic is
-ignored" — while the history keeps CONFIRMED piano notes only, no
-repeats — a rumble holds no confirmation window, so it enters nothing
-(the synthetic-thump measurement). These tests pin that split without
-Qt: the session's interface is the test surface.
+The big name answers from the PENDING reading; the history keeps
+CONFIRMED piano notes only — a rumble holds no confirmation window, so
+it lights nothing and enters nothing. A HOLD is one entry; a REPEAT
+(the same pitch re-confirmed after the reading broke) is another.
+These tests pin that split without Qt: the session's interface is the
+test surface.
 """
 
 from __future__ import annotations
@@ -21,9 +21,19 @@ def test_display_reads_pending_history_reads_confirmed():
     # confirmed: the history records it (once)
     s.feed(69, 69)
     assert s.history == [69]
-    # the same confirmed pitch does not repeat
+    # a HOLD stays one entry (the confirmed reading keeps streaming)
     s.feed(69, 69)
     assert s.history == [69]
+
+
+def test_repeated_notes_enter_the_history_twice():
+    # a repeat is the same pitch re-confirmed after the reading broke
+    # (the note closed between the two confirmations)
+    s = FinderSession()
+    s.feed(69, 69)
+    s.feed(69, None)   # the confirmed reading broke: the note closed
+    s.feed(69, 69)     # re-confirmed: a new note, the same pitch
+    assert s.history == [69, 69]
 
 
 def test_a_rumble_never_enters_the_history():

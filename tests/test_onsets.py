@@ -39,7 +39,8 @@ def _stream_attacks(y: np.ndarray, sr: int = SR, block: int = BLOCK) -> list[flo
 
 
 def test_a_held_note_with_vibrato_gives_one_attack():
-    """Regression: 19 attacks (one per vibrato cycle) instead of one."""
+    """One attack per note: a vibrato cycle is not an attack (19 attacks
+    on the held-with-vibrato signal would be one per cycle)."""
     attacks = detect_attacks(_held(vibrato_st=0.4, consonant_s=CONSONANT), SR)
     assert len(attacks) == 1
     assert attacks.times[0] == pytest.approx(0.2, abs=0.08)

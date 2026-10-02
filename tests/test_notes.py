@@ -81,7 +81,7 @@ def test_clean_pitch_marks_transitions_and_estimates_on_plateaus():
     assert observation.attacks is not None
     assert track.transition is not None
     voiced = ~np.isnan(track.hz)
-    # 2026-09-25: the periodicity gate (MIN_PITCH_QUALITY) drops the ramp
+    # the periodicity gate (MIN_PITCH_QUALITY) drops the ramp
     # frames of a LONG portamento (250 ms) under the threshold — pYIN
     # reads a slow ramp as doubt — and the ramp then reaches the slope
     # threshold in small steps < TRANSITION_ST_S. The PLATEAU reading

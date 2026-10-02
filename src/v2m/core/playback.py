@@ -36,7 +36,7 @@ except Exception:  # pragma: no cover - no audio device in CI
 
 _CHUNK = 1024  # ~23 ms at 44.1 kHz: stop latency stays imperceptible
 
-# --- Pedal & brightness (2026-09-25, user request) ------------------------
+# --- Pedal & brightness ----------------------------------------------------
 # A HELD note keeps ringing after the key is lifted: the damper is up
 # (pedal down), the string decays through its own partials and only the
 # tail fade ends it. Below HELD_MIN_S the note is a short one: the damper

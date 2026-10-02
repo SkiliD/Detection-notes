@@ -43,8 +43,9 @@ def _stream(y: np.ndarray, block: int, **kw) -> list[tuple[float, float]]:
 def test_yin_block_times_are_absolute_and_monotonic():
     """Frame times must advance, even when the buffer is trimmed.
 
-    Regression: after the trim, frames restarted from the buffer's start
-    (frozen time) — the live segmenter then confirmed no note at all.
+    After a trim the frames must keep their ABSOLUTE times: restarting
+    from the buffer's start freezes the clock and the live segmenter
+    confirms no note at all.
     """
     frames = _stream(sine_note(440.0, 2.0, sr=SR), 1024, window=2048, hop=1024)
     times = [t for t, _ in frames]

@@ -1,11 +1,10 @@
 """The GUI twin of the Session live: the take in progress, one deep module.
 
-The 2026-09-27 user-reported regressions (a sidecar archived twice, a
-frozen live roll, a replay starving the next capture) all landed in the
-same vacuum: nobody owned "the take in progress" on the GUI side — the
-window spread its state across five handlers and mutated it from each.
-This module owns that state behind a SMALL interface; the window becomes
-a thin adapter that applies what the controller decides.
+The take in progress touches several GUI handlers (start, export,
+analysis, stop) and each one needs the SAME state — stem, signal,
+replay queue, timers. This module owns that state behind a SMALL
+interface; the window becomes a thin adapter that applies what the
+controller decides.
 
 Plain Python on purpose: the interface is the test surface, and these
 tests must not pay an event loop. A `Verdict` is returned, never applied
@@ -119,9 +118,11 @@ class LiveSessionController:
         self._stem: str | None = None
         self._signal: bytes | None = None
         self._exported = False
+        self._needs_replay = False
         self._traced = False
         self._queue: list[str] = []
         self._replay_running = False
+        self._replay_stem: str | None = None
 
     # -- take lifecycle ---------------------------------------------------
 
@@ -129,8 +130,15 @@ class LiveSessionController:
         """A NEW take owns every buffer; the replay queue SURVIVES."""
         self._stem = None
         self._exported = False
+        self._needs_replay = False
         self._traced = False
         self._signal = None
+
+    def begin_replacement(self) -> None:
+        """Start a new capture segment without changing the take identity."""
+        self._signal = None
+        self._needs_replay = True
+        self._traced = False
 
     def set_signal(self, signal_bytes: bytes) -> None:
         """The take's audio, from the event that carries it (source of truth)."""
@@ -156,24 +164,32 @@ class LiveSessionController:
         stem = self.take_stem()
         return live_export_dir(stem) if stem else None
 
-    def handle_export(self, block: dict | None) -> str | None:
-        """The export finished: queue the cross-check, name the sidecar stem.
+    def handle_export(
+        self, block: dict | None, *, replay: bool = True
+    ) -> str | None:
+        """Name the take and optionally queue an audio cross-check.
 
-        The FIRST export is the take's completion: it names the folder
-        (`export_stem()` mints it) and QUEUES the take's replay — the WAV
-        now exists, the pump after the export may start it. A re-export
-        (the Export button again) reuses the stem and does NOT re-queue:
-        the cross-check already ran or is queued (dedup either way). The
-        RETURN is only the stem to archive the live_vs_final sidecar
-        under — None when there is no block (no live reading), never a
-        guess.
+        The FIRST export names the folder (`export_stem()` mints it) and
+        queues its replay when requested; the WAV now exists, so the pump
+        after export may start it. A re-export reuses the stem and does not
+        duplicate a replay that already ran or is queued. Manual pitch edits
+        pass `replay=False`: the WAV no longer describes the edited notes.
+        The return is only the stem for a present live/final block, or None.
         """
         first = not self._exported
         self._exported = True
-        stem = self.export_stem()  # minted HERE if the adapter skipped it
-        if first:
-            self.enqueue_replay(stem)
+        stem = self.export_stem()
+        if first or self._needs_replay:
+            if replay:
+                self.enqueue_replay(stem)
+            self._needs_replay = False
         return stem if block else None
+
+    def discard_replay(self, stem_name: str) -> bool:
+        """Remove a queued replay and report whether that stem is running."""
+        self._queue = [queued for queued in self._queue if queued != stem_name]
+        return self._replay_stem == stem_name
+
 
     # -- the finished analysis: ONE place that decides -----------------------
 
@@ -185,16 +201,15 @@ class LiveSessionController:
         """The queued final analysis arrived: store its signal, judge the timer.
 
         The live timer is the render of the CURRENT capture: keep it when
-        one is running (the singer had already started the next take —
-        stopping it froze that take's roll, counter and cursor, the
-        "the mic stopped detecting me" feel of 2026-09-27), stop it
-        otherwise. The replay is NOT decided here (see `Verdict`): the
-        take's WAV does not exist until the export in the same handler.
+        one is running (the singer has already started the next take —
+        stopping it would freeze that take's roll, counter and cursor),
+        stop it otherwise. The replay is NOT decided here (see `Verdict`):
+        the take's WAV does not exist until the export in the same handler.
 
         `signal_bytes` is the event's audio, taken ALWAYS (an EMPTY bytes
-        payload clears the buffer: keeping the previous value here is the
-        2026-09-26 stale-signal bug — a take's WAV describing the
-        previous take). None (no event carried one) keeps what a earlier
+        payload clears the buffer: keeping the previous value here makes
+        a take's WAV describe the PREVIOUS take — the stale-signal
+        family). None (no event carried one) keeps what an earlier
         event stored.
         """
         if signal_bytes is not None:
@@ -234,15 +249,15 @@ class LiveSessionController:
     def fail_take(self) -> str | None:
         """The take died before its export: write its trace, return the path.
 
-        The 2026-09-29 corpus hazard, THE case this exists for: a take
-        that dies before its first export has NO stem yet (the stem is
-        minted at the first export), so the trace must mint it HERE — the
-        failure itself names the folder (a pre-export mint is harmless:
-        the stem is a timestamp, `begin_take` forgets it, and an exported
-        take never reaches this path). The failure is only diagnosable
-        when there is a take to diagnose: without captured audio (a Start
-        press against a dead mic) there is no folder, the failure stays
-        on the status banner where it was announced. One trace per take:
+        A take that dies before its first export has NO stem yet (the
+        stem is minted at the first export), so the trace must mint it
+        HERE — the failure itself names the folder (a pre-export mint is
+        harmless: the stem is a timestamp, `begin_take` forgets it, and
+        an exported take never reaches this path). The failure is only
+        diagnosable when there is a take to diagnose: without captured
+        audio (a Start press against a dead mic) there is no folder, the
+        failure stays on the status banner where it was announced. One
+        trace per take:
         the first failure names the cause, later ones would contradict it.
 
         Best-effort, never raises (the take is already lost; the trace
@@ -325,11 +340,13 @@ class LiveSessionController:
         if self._replay_running or not self._queue:
             return None
         self._replay_running = True
-        return self._queue.pop(0)
+        self._replay_stem = self._queue.pop(0)
+        return self._replay_stem
 
     def replay_finished(self) -> None:
         """The running replay ended: the next pump may start one."""
         self._replay_running = False
+        self._replay_stem = None
 
     def replay_running(self) -> bool:
         return self._replay_running
@@ -341,3 +358,4 @@ class LiveSessionController:
         not data — every queued take is already exported)."""
         self._queue.clear()
         self._replay_running = False
+        self._replay_stem = None

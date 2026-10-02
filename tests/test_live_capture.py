@@ -1,10 +1,10 @@
 """LiveCapture: the DSP must run OUTSIDE the audio callback.
 
-Regression: the PortAudio callback did the YIN and the segmentation
-(several milliseconds per 23 ms block); when it exceeds the block's
-duration, the driver drops audio (holes in the take). The callback now
-only copies/stacks the block; `on_block` is called by a dedicated thread
-draining the queue.
+YIN and the segmentation cost several milliseconds per 23 ms block; run
+inside the PortAudio callback they exceed the block's duration and the
+driver drops audio (holes in the take). The callback only copies/stacks
+the block; `on_block` is called by a dedicated thread draining the
+queue.
 """
 
 from __future__ import annotations
@@ -118,8 +118,56 @@ def test_a_broken_on_block_does_not_stop_the_capture(monkeypatch, capsys):
     assert "bug de l'appelant" in capsys.readouterr().out
 
 
+def test_a_stop_past_the_join_timeout_counts_the_dropped_blocks(monkeypatch):
+    """A stop that cannot wait out the backlog counts the abandoned blocks
+    (the blocks stay in the WAV: the final analysis reads the take whole)."""
+    handled = threading.Event()
+    release = threading.Event()
+
+    def slow_on_block(block, t):
+        handled.set()
+        release.wait(2.0)  # the drain stays busy past any join timeout
+
+    monkeypatch.setattr(audio_io, "DRAIN_JOIN_TIMEOUT_S", 0.05)
+    cap = _capture(monkeypatch, slow_on_block)
+    try:
+        _push(cap, 0.1, 3)  # three blocks queued, one being handled
+        assert _wait(handled.is_set), "the drain never picked up the first block"
+        cap.stop()
+    finally:
+        release.set()
+        if cap._worker is not None and cap._worker.is_alive():
+            cap._worker.join(2.0)
+    assert cap.dropped >= 2, (
+        f"the queued-but-never-handled blocks were not counted: dropped={cap.dropped}"
+    )
+    # the WAV side is complete regardless: the callback archived every block
+    assert len(cap.chunks) == 3
+
+
+def test_drain_progress_reports_one_when_the_dsp_keeps_up(monkeypatch):
+    """A capture whose drain handled everything reads progress 1.0; the
+    singer's "did it follow me?" question has a measured answer."""
+    seen: list[float] = []
+    gate = threading.Event()
+
+    def on_block(block, t):
+        seen.append(t)
+        gate.set()
+
+    cap = _capture(monkeypatch, on_block)
+    try:
+        _push(cap, 0.1, 2)
+        assert _wait(lambda: len(seen) >= 2), "the drain never handled the blocks"
+        # queue empty, everything handled: ~1.0 (no real-time loss)
+        assert cap.drain_progress() > 0.99
+        assert cap.dropped == 0
+    finally:
+        cap.stop()
+
+
 def test_elapsed_follows_the_sample_count(monkeypatch):
-    """`elapsed` reste en O(1) pendant la capture (un compteur, pas une somme)."""
+    """`elapsed` stays O(1) during the capture (a counter, not a sum)."""
     cap = _capture(monkeypatch, None)
     try:
         _push(cap, 0.3, n=4)

@@ -2,9 +2,8 @@
 
 Two contracts: (1) a note hiding a secondary plateau must appear in the
 report (the doubt made visible, never silently rewritten); (2) a live
-take's artifacts must describe the SAME signal — the 2026-09-26 report
-("the audio does not match what I sang") came from another take's WAV
-under this take's name.
+take's artifacts must describe the SAME signal — never another take's
+WAV under this take's name.
 """
 
 import os
@@ -108,7 +107,7 @@ def test_take_verification_wav_matches_json(tmp_path):
     ok, lines = verify_take(str(tmp_path / "prise"))
     assert ok and any("1.5" in line for line in lines)
 
-    # a JSON describing another duration (the 2026-09-26 bug) is REFUSED
+    # a JSON describing another duration is REFUSED
     rep_path.write_text('{"duration_s": 9.94, "n_notes": 3}', encoding="utf-8")
     ok, lines = verify_take(str(tmp_path / "prise"))
     assert not ok and any("ECART" in line for line in lines)

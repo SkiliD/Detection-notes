@@ -1,4 +1,4 @@
-"""The intonation summary (workstream 5, 2026-09-26).
+"""The intonation summary (workstream 5).
 
 `Note.deviation` is the RESIDUAL deviation (signed semitones) left after
 absorbing the take's global offset. This module has a single design

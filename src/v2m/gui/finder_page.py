@@ -13,10 +13,10 @@ The two contracts this page serves (measured, see FinderSession):
   as "the mic is ignored";
 - the key lights on a CONFIRMED note only — a rumble holds no 90 ms.
 
-"Il entend mal la voix" product fixes (2026-09-28), all measured:
+Product fixes, all measured:
 - the mic level is VISIBLE (`LevelMeter`, the silence gate drawn on the
-  bar) — a mic too far away or muted was indistinguishable from a
-  silent page;
+  bar) — a mic too far away or muted is indistinguishable from a
+  silent page without it;
 - the RAW instant pitch is shown (`seg.heard()`) when the segmenter
   holds nothing — a glide, a wavering beginner tone or a quiet voice
   still read as "chantez une note…" while YIN saw the pitch fine;
@@ -68,7 +68,15 @@ class LevelMeter(QWidget):
     saying "trop faible", not "rien entendu". No decay, no smoothing:
     the raw block RMS, redrawn per event (a width change on a QLabel is
     cheap at 20 Hz).
+
+    The other end is just as decision-bearing: a block whose RMS reaches
+    the rail (CLIP_RMS_RMS >= 0.95) turns the fill to the gate's red —
+    "the input is clipping, turn the input DOWN". The 0.95 threshold is
+    an ABSOLUTE: the WAV is PCM_16, the rail is physical, not a
+    relative heuristic.
     """
+
+    CLIP_RMS_RMS = 0.95
 
     def __init__(self) -> None:
         super().__init__()
@@ -79,6 +87,7 @@ class LevelMeter(QWidget):
         self._gate.setFixedWidth(2)
         self._gate.setStyleSheet(f"background: {LEVEL_GATE_COLOR};")
         self._gate_share = 0.04
+        self._clipping = False
         self.setFixedHeight(8)
         self.setStyleSheet(LEVEL_BAR_BG)
 
@@ -91,7 +100,18 @@ class LevelMeter(QWidget):
         share = max(0.0, min(1.0, rms / LEVEL_FULL_SCALE))
         if share <= 0.001:
             self._fill.hide()
+            self._clipping = False
             return
+        clipping = rms >= self.CLIP_RMS_RMS
+        if clipping != self._clipping:
+            # the gate's red: one red per bar, already a CSS string — the
+            # clipping fill is the same "turn it down" family of signal
+            self._fill.setStyleSheet(
+                f"background: {LEVEL_GATE_COLOR}; border-radius: 3px;"
+                if clipping
+                else f"background: {NOTE_TEXT_COLOR}; border-radius: 3px;"
+            )
+        self._clipping = clipping
         self._fill.show()
         self._fill.setFixedWidth(max(2, int(round(share * self.width()))))
         self._fill.setFixedHeight(self.height() - 2)
@@ -117,12 +137,14 @@ class FinderPage(QWidget):
         go_home: Callable[[], None],
         show_error: Callable[[str], None],
         clear_error: Callable[[], None],
+        audition_note: Callable[[int], None],
     ) -> None:
         super().__init__()
         self._thread_factory = thread_factory
         self._go_home = go_home
         self._show_error = show_error
         self._clear_error = clear_error
+        self._audition_note = audition_note
         self.session = FinderSession()
         # the name channel is vibration-tolerant (a ±0.5-st vibrato must
         # not flicker the big name): DisplayStabilizer decides the name
@@ -191,6 +213,7 @@ class FinderPage(QWidget):
 
         self.keys = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
         self.keys.setMinimumHeight(150)
+        self.keys.key_clicked.connect(self._audition_note)
         root.addWidget(self.keys, stretch=2)
 
     # ------------------------------------------------------------------
@@ -215,6 +238,7 @@ class FinderPage(QWidget):
     def leave(self) -> None:
         """Leave the finder: the capture is dropped, never analysed nor exported."""
         self._stop()
+        self._audition_note(0)  # stop the currently auditioned key
         self._go_home()
 
     def retranslate(self) -> None:

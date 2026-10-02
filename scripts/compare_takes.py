@@ -15,9 +15,9 @@ paths or two take stem names inside `prises_live/`. Nothing is written:
 the table IS the product.
 
 Usage:
-    ./.venv/Scripts/python.exe -X utf8 scripts/compare_takes.py prises_live/live_20260929_161442 prises_live/live_20260929_161537
-    ./.venv/Scripts/python.exe -X utf8 scripts/compare_takes.py live_20260929_161442 live_20260929_161537
-    ./.venv/Scripts/python.exe -X utf8 scripts/compare_takes.py --json rapport.json live_A live_B
+    python -X utf8 scripts/compare_takes.py prises_live/live_20260929_161442 prises_live/live_20260929_161537
+    python -X utf8 scripts/compare_takes.py live_20260929_161442 live_20260929_161537
+    python -X utf8 scripts/compare_takes.py --json rapport.json live_A live_B
 """
 from __future__ import annotations
 

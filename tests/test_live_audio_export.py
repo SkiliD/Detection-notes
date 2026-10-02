@@ -1,4 +1,4 @@
-"""The take's audio, written on request (workstream 6, 2026-09-26).
+"""The take's audio, written on request (workstream 6).
 
 The "record audio" box is read at the take's START (a mid-take toggle
 does not change what this take writes) and only acts live: a file
@@ -91,12 +91,9 @@ def test_the_audio_box_is_read_when_the_take_starts():
 
 
 def test_a_new_take_never_keeps_the_previous_take_signal(qapp):
-    """The 2026-09-26 user report ("the audio does not match what I
-    sang"): every WAV export described the PREVIOUS take —
-    `on_start_live` never reset `_live_signal` to None and
-    `_on_live_analysis_done` only picked the signal bytes up when it was
-    None. The real takes' durations chain showed it: every json carried
-    ITS take, every .wav the one before."""
+    """Every WAV export must describe ITS take: `on_start_live` resets
+    `_live_signal` to None and `_on_live_analysis_done` picks the signal
+    bytes up ALWAYS (the stale-signal family)."""
     from v2m.gui import main_window as mw
 
     win = mw.MainWindow()

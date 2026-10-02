@@ -52,9 +52,9 @@ from .compare import LIVE_DATING_LEAD_S
 # The two reports' tempo disagreement that still counts as "the same
 # phrase": beyond this relative gap the timing shift is dominated by the
 # tempo change itself and the report says so instead of listing every
-# note as shifted (measured on the 2026-09-29 corpus: five takes of one
-# phrase sat within 2% of each other; a rehearsal speeding up 15% is a
-# different reading, and each note's shift would say nothing useful).
+# note as shifted (measured: takes of one phrase sit within 2% of each
+# other; a rehearsal speeding up 15% is a different reading, and each
+# note's shift would say nothing useful).
 TEMPO_TOLERANCE = 0.05
 
 

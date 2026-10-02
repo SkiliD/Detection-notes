@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Shell scripts run inside the Linux container: a CRLF checkout would
+# break bash (`env: '\r': No such file or directory`). Keep them LF.
+*.sh text eol=lf

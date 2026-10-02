@@ -20,7 +20,7 @@ fail (graine list given when partial). A "vibrato debutant tenu" cell
 reads OK only when the single sung note comes back as exactly ONE note.
 
 Usage:
-    ./.venv/Scripts/python.exe scripts/liveseg_sweep.py                # full grid
+    python scripts/liveseg_sweep.py                                  # full grid
     ... --holds 0.6,0.8 --reartics 0.3 --seeds 1,2                     # targeted
 """
 

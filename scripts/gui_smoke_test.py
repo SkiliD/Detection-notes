@@ -68,7 +68,7 @@ def main() -> int:
     # polish: guidance card, PDF badge and empty-state text are translated
     from v2m.core.i18n import tr as _tr
 
-    assert win._steps.text() == _tr("ui steps")
+    assert win.page_home.steps.text() == _tr("ui steps")
     assert win.page_results.lbl_pdf_note.text() == _tr("ui pdf badge")
     assert win.page_results.results._waiting.text() == _tr("ui panel waiting")
 
@@ -97,7 +97,7 @@ def main() -> int:
     assert len(win.page_finder.keys._whites) == 52
     win.page_finder.keys.set_pressed({57})
     assert win.page_finder.keys._active == {57}
-    assert win.btn_finder.text() == _tr("ui finder button")
+    assert win.page_home.btn_finder.text() == _tr("ui finder button")
     assert win.page_finder.label_hint.text() == _tr("ui finder hint")
     assert win.page_finder.label_note.text() == _tr("ui finder idle")
     # first run must read as states, not as a blank page: the mic says whether
@@ -116,17 +116,17 @@ def main() -> int:
     from v2m.core.i18n import get_language, set_language
 
     set_language("fr")
-    fr_text = win.btn_file.text()
+    fr_text = win.page_home.btn_file.text()
     win.on_toggle_language()
     assert get_language() == "en"
-    assert win.btn_file.text() != fr_text, "button label must change language"
-    assert win.btn_file.text() == "📁  Analyze an audio file"
+    assert win.page_home.btn_file.text() != fr_text, "button label must change language"
+    assert win.page_home.btn_file.text() == "📁  Analyze an audio file"
     # the roll's axis titles follow too (they used to stay French)
     assert win.page_results.piano.getPlotItem().getAxis("bottom").labelText == _tr("ui axis time")
     assert win.page_results.piano.getPlotItem().getAxis("left").labelText == _tr("ui axis note")
     win.on_toggle_language()
     assert get_language() == "fr"
-    assert win.btn_file.text() == fr_text
+    assert win.page_home.btn_file.text() == fr_text
     print("language toggle ok", flush=True)
 
     # tuning meter: the cents needle follows the sung pitch, clamped at ±50

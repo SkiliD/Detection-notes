@@ -1,6 +1,6 @@
 """The finder's "what does the mic hear" channel: heard(), level, silence.
 
-"Il entend mal la voix" (user report) decomposed and measured:
+"Il entend mal la voix" decomposed and measured:
 - a steady tone at ANY usable amplitude was already heard (the gate is
   absolute 0.008, a sung voice lands far above) — the REAL gap was the
   DISPLAY: nothing on the page told "the mic hears this" while the

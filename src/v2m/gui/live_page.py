@@ -71,10 +71,9 @@ LIVE_SILENCE_WARN_S = 2.0
 
 # a weak mic is named BEFORE the take starts: nothing above the gate yet
 # (the singer is settling) and the page says so after 3 s — with an
-# action, not a judgment. Motivated by the 2026-09-29 corpus: that day's
-# takes sat at RMS 0.019..0.062, 3-7x under the previous day's, and the
-# weakest degraded the PITCH (12/22 labels off), not the note count — a
-# level the singer must know about before wasting a take. More patient
+# action, not a judgment. Measured: a level 3-7x under the usual one
+# degraded the PITCH labels, not the note count — a level the singer
+# must know about before wasting a take. More patient
 # than the during-take watch (3 s vs 2 s): settling before singing is
 # normal, silence DURING a take is not. One watch per phase: once one
 # block clears the gate the take has started and `watch_silence` owns
@@ -108,6 +107,7 @@ class LivePage(QWidget):
         self._expected_note = expected_note
         self._silence_message = silence_message
         self._gate_rms = gate_rms
+        self._replacement_mode = False
         # the accuracy history is the PAGE's domain state (it is the only
         # writer, note by note) — the window consumes it for the archive
         self.accuracy = AccuracyHistory()
@@ -168,9 +168,7 @@ class LivePage(QWidget):
         # optional: keep the take's AUDIO beside its artifacts, only in
         # live mode. The box is read when the take STARTS (a mid-take
         # toggle must not change what this take writes). ON by default:
-        # the audio is the only way a failed take stays diagnosable —
-        # measured on the 2026-09-29 corpus, where the takes that needed
-        # auditing (2 notes live vs 18 final) had no WAV to audit.
+        # the audio is the only way a failed take stays diagnosable.
         rec = QHBoxLayout()
         self.chk_record_audio = QCheckBox("")
         self.chk_record_audio.setChecked(True)
@@ -208,8 +206,12 @@ class LivePage(QWidget):
 
     def retranslate(self) -> None:
         """The page's user-facing strings (the window's retranslate calls it)."""
-        self.btn_stop_live.setText(tr("ui stop live"))
-        self.label_hint.setText(tr("ui live hint"))
+        self.btn_stop_live.setText(
+            tr("ui finish replacement") if self._replacement_mode else tr("ui stop live")
+        )
+        self.label_hint.setText(
+            tr("ui replacement prompt") if self._replacement_mode else tr("ui live hint")
+        )
         self.chk_metronome.setText(tr("ui metronome"))
         self.spin_bpm.setToolTip(tr("ui metronome tooltip"))
         self.label_bpm.setText(tr("ui bpm unit"))
@@ -219,6 +221,9 @@ class LivePage(QWidget):
             self.label_beat.setText("")
         self.chk_record_audio.setText(tr("ui record audio"))
         self.chk_record_audio.setToolTip(tr("ui record audio tooltip"))
+        if self._replacement_mode:
+            self.label_hint.setText(tr("ui replacement prompt"))
+            self.btn_stop_live.setText(tr("ui finish replacement"))
 
     # ------------------------------------------------------------------
     # lifecycle the window drives
@@ -232,6 +237,11 @@ class LivePage(QWidget):
     def timer_active(self) -> bool:
         """The controller reads this fact, it never reaches into the timer."""
         return self._timer.isActive()
+
+    def set_replacement_mode(self, active: bool) -> None:
+        """Show the replacement-specific prompt and finish action."""
+        self._replacement_mode = active
+        self.retranslate()
 
     def begin_take(self) -> None:
         """A new take: drop the previous pitch cloud and its curve."""

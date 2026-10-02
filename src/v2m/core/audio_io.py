@@ -20,6 +20,11 @@ except Exception:  # pragma: no cover - no audio device in CI
 SR = 22_050        # analysis sample rate
 GATE_RMS = 0.008   # below this level a live block counts as silence
 
+# How long a stop waits for the drain to finish the backlog before it
+# counts the rest as dropped (a constant, so the honesty test can shrink
+# it instead of sleeping past a literal 5 s).
+DRAIN_JOIN_TIMEOUT_S = 5.0
+
 # A capture stream opener: the SAME signature and contract as
 # `sd.InputStream` (opens, `start()`s, `stop()`/`close()`), so the real
 # device and every test/replay fake are interchangeable. Injection is the
@@ -85,10 +90,17 @@ class LiveCapture:
     `on_block(block, t)` is called from a **worker thread**, never from the
     PortAudio callback: YIN and the note segmentation cost milliseconds per
     block and make the driver drop audio when they run inline (holes in the
-    take). The callback only copies the block and queues it.
+    take). The callback only copies the block and queues it; the resampling
+    to `sr` happens ONCE, in `signal()`, at read time.
 
-    Blocks are roughly resampled towards `sr` (linear) to stay consistent
-    with the analysis engine.
+    Real-time honesty: the drain thread can fall behind a hot DSP or a
+    loaded machine, and the queue grows SILENTLY — the singer watches notes
+    vanish with no explanation. Two counters make the loss visible:
+    `dropped` (blocks abandoned when a stop cannot wait for the backlog
+    any more) and `drain_progress()` (drained / captured, ~1.0 when the
+    DSP keeps up). A capture that ends with `dropped > 0` or a progress
+    far from 1.0 was a REAL-TIME loss, not a recognition failure: the
+    offline analysis of the same WAV reads it fine.
     """
 
     samplerate: int = 44_100          # device sample rate
@@ -107,6 +119,11 @@ class LiveCapture:
     _queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _worker: Optional[threading.Thread] = field(default=None, repr=False)
     _n_samples: int = field(default=0, repr=False)
+    # Real-time honesty counters: a block QUEUED by the callback is not a
+    # block HANDLED. `_n_dropped` counts the backlog abandoned at a stop;
+    # `_n_drained` feeds `drain_progress()`.
+    _n_drained: int = field(default=0, repr=False)
+    _n_dropped: int = field(default=0, repr=False)
 
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
         if status:
@@ -133,9 +150,26 @@ class LiveCapture:
                 on_block(block, t)
             except Exception as e:  # one bad block must not end the capture
                 print(f"[live] {e}")
+            finally:
+                self._n_drained += 1
 
     def elapsed(self) -> float:
         return self._n_samples / self.samplerate
+
+    @property
+    def dropped(self) -> int:
+        """Blocks the drain abandoned (a stop past the join timeout)."""
+        return self._n_dropped
+
+    def drain_progress(self) -> float:
+        """Drained / captured blocks (~1.0 when the DSP keeps up).
+
+        Below ~0.95 the drain is falling behind in real time: the live
+        reading of the trailing seconds will be incomplete even though
+        the WAV keeps everything.
+        """
+        n = self._n_drained + self._queue.qsize()
+        return self._n_drained / n if n else 1.0
 
     def start(self) -> None:
         if sd is None:  # pragma: no cover - needs a real audio device
@@ -162,7 +196,14 @@ class LiveCapture:
             self._stream = None
         if self._worker is not None:
             self._queue.put(None)  # finish the backlog before reporting the take
-            self._worker.join(timeout=5.0)
+            self._worker.join(timeout=DRAIN_JOIN_TIMEOUT_S)
+            if self._worker.is_alive():
+                # the drain could not finish the backlog: COUNT the abandoned
+                # blocks. Each is in the WAV (the callback queued it before
+                # dying), so the final analysis still reads the take whole —
+                # but this take's live reading has holes, and the counters
+                # must say so instead of a silently hollow note count.
+                self._n_dropped = max(0, self._queue.qsize())
             self._worker = None
 
     def signal(self) -> np.ndarray:

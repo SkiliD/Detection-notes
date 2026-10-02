@@ -9,9 +9,9 @@ take when its recording stops and archives the gap in its folder. The
 table is printed and archived as JSON (`--out`, default: write nothing).
 
 Usage:
-    ./.venv/Scripts/python.exe -X utf8 scripts/replay_takes.py
-    ./.venv/Scripts/python.exe -X utf8 scripts/replay_takes.py prises_live --out replay_report.json
-    ./.venv/Scripts/python.exe -X utf8 scripts/replay_takes.py --take live_20260926_140425
+    python -X utf8 scripts/replay_takes.py
+    python -X utf8 scripts/replay_takes.py prises_live --out replay_report.json
+    python -X utf8 scripts/replay_takes.py --take live_20260926_140425
 
 For each take owning a `<stem>.wav`: the WAV is read back in 1024-sample
 blocks and fed to the REAL capture (`LiveCapture`) at the real clock —
@@ -123,8 +123,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):
-        pass
+    reconfigure = getattr(sys.stdout, "reconfigure", None)  # a real TextIO may lack it
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
     raise SystemExit(main())

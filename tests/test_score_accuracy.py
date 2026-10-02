@@ -15,7 +15,7 @@ The repo's REAL takes (demo.wav, chant.wav — gitignored) are replayed
 against their golden fingerprint when present: a segmentation drift on
 a real take is then seen by the full suite, not only when we think of
 it. These replays cost ~16 s out of ~47 s (~34% of the suite —
-2026-09-23 measurement): they are marked `slow` (deselect with
+measured): they are marked `slow` (deselect with
 `-m "not slow"` for a fast loop), but stay IN the suite by default — a
 net that no longer runs is not a net.
 """

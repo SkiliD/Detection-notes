@@ -10,6 +10,10 @@ Two regressions pinned here (both silent on screen, noisy on the console):
 2. A `font-size` in **px** makes the resolved font report pointSize() == -1;
    rich-text labels (any `<b>`/`<h1>` QLabel) then hit
    `QFont::setPointSize: Point size <= 0 (-1)`. Font sizes must be in pt.
+3. A `#` line comment inside the QSS (Qt reads `#` as an id selector) makes
+   Qt discard the WHOLE stylesheet silently — no warning, the app renders in
+   the system default theme. The sheet must be rendered once and checked
+   against the palette (`test_stylesheet_actually_applies`).
 """
 
 from __future__ import annotations
@@ -62,6 +66,49 @@ def test_stylesheet_parses_without_qt_warnings(qapp, qt_messages):
     font = [m for m in qt_messages if "setPointSize" in m]
     assert not bad, f"invalid QSS: {bad}"
     assert not font, f"font warnings: {font}"
+
+
+def test_stylesheet_actually_applies(qapp):
+    """The sheet must reach the widgets, not only parse.
+
+    A `#` line comment inside the QSS (Qt's parser reads `#` as the start of
+    an id selector) makes Qt discard the WHOLE stylesheet SILENTLY — no Qt
+    warning, no exception, the app just renders in the system default theme.
+    The parse-warning test above cannot see that; this one renders a widget
+    and checks the palette actually reached its pixels.
+    """
+    from PyQt6.QtWidgets import QWidget
+
+    from v2m.gui.widgets import BG_APP
+
+    app = qapp
+    previous = app.styleSheet()
+    app.setStyleSheet(STYLESHEET)
+    try:
+        widget = QWidget()
+        widget.resize(40, 40)
+        widget.show()
+        app.processEvents()
+        image = widget.grab().toImage()
+        pixel = image.pixelColor(5, 5)
+    finally:
+        app.setStyleSheet(previous)
+        widget.close()
+    expected = BG_APP.lstrip("#")
+    actual = f"{pixel.red():02x}{pixel.green():02x}{pixel.blue():02x}"
+    assert actual == expected, (
+        f"stylesheet not applied: background {actual} != palette {BG_APP}"
+    )
+
+
+def test_no_hash_line_comment_in_the_qss():
+    """`#` opens an id selector in QSS — a '#' comment drops the whole sheet."""
+    offenders = [
+        line
+        for line in STYLESHEET.splitlines()
+        if line.lstrip().startswith("# ")
+    ]
+    assert not offenders, "invalid '#' comment inside the QSS:\n" + "\n".join(offenders)
 
 
 def test_no_double_hash_and_no_placeholder_left(qapp):

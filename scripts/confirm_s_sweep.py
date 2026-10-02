@@ -22,7 +22,7 @@ attack). A case may be "known" (LIVE_KNOWN_LIMITS): it is then judged on
 its documented limits (no invented note), not on exactness.
 
 Usage:
-    ./.venv/Scripts/python.exe scripts/confirm_s_sweep.py            # table
+    python scripts/confirm_s_sweep.py                                # table
     ... --values 0.08,0.09 --seeds 1,2,3                              # targeted
     ... --amps 0.35,0.10,0.05                                         # quiet axis
 """

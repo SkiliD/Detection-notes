@@ -282,7 +282,7 @@ def test_a_dotted_sixteenth_is_written_on_the_staff_but_snapped_in_the_file():
     assert [text_of(n.find("type")) for n in sounding] == ["eighth", "eighth"]
     assert [int(text_of(n.find("duration"))) for n in sounding] == [12, 12]
     assert "<time-modification>" not in xml       # hence no triplet
-    assert 0.375 * DIVISIONS in _TYPE_BY_STEPS    # 9 : la valeur est exprimable
+    assert 0.375 * DIVISIONS in _TYPE_BY_STEPS    # 9: the value is expressible
 
 
 def test_an_isolated_short_note_keeps_its_duration_and_rests_the_beat():

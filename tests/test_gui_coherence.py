@@ -109,7 +109,7 @@ def test_results_panel_shows_na_without_evidence(qapp):
     res.observation = None
     panel = ResultsPanel()
     panel.set_results(res)
-    assert "indisponible" in panel._values["key coherence"].text()
+    assert "unavailable" in panel._values["key coherence"].text() or "indisponible" in panel._values["key coherence"].text()
 
 
 def test_home_page_button_aggregates_the_sessions(qapp, monkeypatch, tmp_path):
@@ -149,12 +149,12 @@ def test_home_page_button_aggregates_the_sessions(qapp, monkeypatch, tmp_path):
         # QStackedWidget subtlety (AGENTS.md): a child of the CURRENT page
         # still reports isVisible()==False on the offscreen platform; the
         # explicit setVisible state is `isHidden()`
-        assert not win.coherence_text.isHidden()
-        text = win.coherence_text.toPlainText()
+        assert not win.page_home.coherence_text.isHidden()
+        text = win.page_home.coherence_text.toPlainText()
         assert "20260927" in text
         # the take count and the suspects land on the table
         assert "1" in text
-        win.coherence_text.setVisible(False)
+        win.page_home.coherence_text.setVisible(False)
     finally:
         win.close()
 
@@ -168,8 +168,8 @@ def test_home_page_button_with_no_takes_shows_the_invite(qapp, monkeypatch, tmp_
     try:
         win.stack.setCurrentWidget(win.page_home)
         win.on_show_coherence()
-        assert not win.coherence_text.isHidden()
-        assert "Aucune prise" in win.coherence_text.toPlainText() or \
-            "No take" in win.coherence_text.toPlainText()
+        assert not win.page_home.coherence_text.isHidden()
+        assert "Aucune prise" in win.page_home.coherence_text.toPlainText() or \
+            "No take" in win.page_home.coherence_text.toPlainText()
     finally:
         win.close()

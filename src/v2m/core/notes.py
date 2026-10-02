@@ -19,6 +19,29 @@ SWEEP_MIN_ST = 0.5           # travel (semitones) required to call a glide
 SWEEP_THROUGH_ST = 0.4       # how far the middle may deviate from a straight path
 SWEEP_TAIL_FRAMES = 3        # hand-over window (~60 ms)
 SWEEP_TAIL_ST = 0.30         # a glide is still moving through that window
+# A long CONTINUOUS slide (one segment, no plateau): its head and tail
+# thirds disagree by at least this much and it never settles. Measured
+# on the truth glide corpus (0.77-1.5 s slides): 0.8-1.6 st of travel;
+# real notes (vibrato included) stay under 0.2.
+SLIDE_TRAVEL_ST = 0.5
+# A run is the SLIDE (rather than a note's approach) when its FIRST and
+# LAST frame span at least this much: four times the slide's own travel,
+# i.e. two real semitones — a rung ladder covers 7-11 st over 10-13 rungs.
+SLIDE_RUN_SPAN_ST = SLIDE_TRAVEL_ST * 4
+# A continuous SLIDE can also read as a STAIRCASE: short HELD plateaus
+# (the tracker re-locks between the cleaning's ramp bridges) chained by
+# non-held bridges, every step a third or more (the real take's steps
+# read 3.1-4.6 st; the fastest REAL-note chain this must not swallow —
+# chant.wav's descending thirds at 171 BPM — steps 2.75-2.90 st) and
+# every step shorter than a melody note (0.3 s).
+SLIDE_STEP_ST = 3.0
+SLIDE_PLATEAU_MAX_S = 0.30
+# A slide is its OWN note only when the next segment starts after a REAL
+# break; sung straight INTO its arrival (hysteresis hand-over, gap of 1-3
+# frames) the arrival is the slide's destination and both stay ONE note.
+# Measured: a slide-to-arrival chain hands over with a 0.02 s gap, a slide
+# followed by a different note after a breath sits 0.12 s away.
+SLIDE_BREAK_S = 0.06
 SAME_ONSET_S = 0.100         # two onsets this close are one articulation
 # A singer's systematic offset absorbed by _measure_tuning_offset: beyond
 # this the take is TRANSPOSED (or misread), not out of tune — absorbing it
@@ -147,6 +170,25 @@ def _merge_segments(segments: list[_Segment]) -> _Segment:
         transition=trans,
         confidence=float(np.mean([s.confidence for s in segments])),
     )
+
+
+def _settle_on_tail(seg: _Segment, tail_frames: int) -> _Segment:
+    """Pin `seg`'s pitch to its own TAIL and keep only the frames near it.
+
+    The clean median of a merged glide trails the RAMP (a 400 ms portamento
+    60->67 reads 65.4 while the arrival is 67 — the ladder carries two
+    frames at each intermediate step and only a handful at the arrival):
+    the honest pitch is the median of the arrival's own frames. The trim
+    keeps the median and the reported pitch in agreement, and keeps
+    `_fuse_close` (which compares MEDIANS) from fusing the note with the
+    wrong neighbours (measured on chant.wav: 26 notes @ 154.7 BPM instead
+    of 29 @ 171.0 without the trim).
+    """
+    seg.forced_pitch = float(np.median(seg.midis[-tail_frames:]))
+    near = seg.midis[np.abs(seg.midis - seg.forced_pitch) <= NEAR_MERGE_ST]
+    if len(near):
+        seg.midis = near
+    return seg
 
 
 def _hysteresis_segments(midi, times, conf, idx, semitones: float, transition=None) -> list[_Segment]:
@@ -303,6 +345,40 @@ def _sweeps_between(seg: _Segment, prev, nxt) -> bool:
     return min(head, tail) - SWEEP_THROUGH_ST <= mid <= max(head, tail) + SWEEP_THROUGH_ST
 
 
+def _is_long_slide(seg: _Segment, nxt) -> bool:
+    """True for a segment whose pitch is one long CONTINUOUS slide.
+
+    Two shapes, both measured on the truth glide corpus:
+    - the take-opening slide: ONE long segment (the hysteresis follows
+      the ramp), no note after it. Its signature is TRAVEL — the thirds
+      disagree by more than SLIDE_TRAVEL_ST and it never settles.
+    - a rung CHAIN of a slide whose ramp the cleaning broke into 40-60 ms
+      steps: every step is short, climbs one-ish semitone (the stairs
+      test also fires, but its NOTE-LENGTH-neighbour exemption lets a
+      step pass when the arrival is already a note), and the ARRIVAL
+      plateau follows. The arrival note itself is NOT a slide: it holds
+      its pitch (`holds_pitch` True).
+    A real note under 0.2 st of third travel is never a slide (vibrato's
+    thirds oscillate around ONE centre); a fast melody's steps sit
+    BETWEEN note-length segments, which the stairs rules already keep.
+    """
+    third = len(seg.midis) // 3
+    if third < 1:
+        return False
+    head = float(np.median(seg.midis[:third]))
+    tail = float(np.median(seg.midis[-third:]))
+    if abs(tail - head) < SLIDE_TRAVEL_ST:
+        return False
+    if seg.holds_pitch():
+        return False  # it arrived and held: a note (the arrival plateau)
+    # the arrival note protects its own pitch: when a NOTE-length
+    # neighbour exists and this segment ENDS at its pitch, the sweep and
+    # arrival rules own the case (the slide-with-arrival)
+    if nxt is not None and nxt.duration >= MIN_UNCONFIRMED_S and seg.duration >= MIN_UNCONFIRMED_S:
+        return False
+    return True
+
+
 def _arrives_on_next(seg: _Segment, nxt) -> bool:
     """True when the segment slides and ENDS on the next note's pitch.
 
@@ -378,6 +454,11 @@ def _is_transition(seg: _Segment, prev, nxt, attacks: Attacks | None) -> bool:
         return True
     if _arrives_on_next(seg, nxt) and not _articulated_inside(seg, attacks):
         return True
+    # the LONG SLIDE (one continuous slide segment, no plateau): a
+    # glissando engraved as an arpeggio is the defect this gate refuses.
+    # An attack INSIDE still means a new note was articulated on the way.
+    if _is_long_slide(seg, nxt) and not _articulated_inside(seg, attacks):
+        return True
     if seg.duration >= MIN_UNCONFIRMED_S:
         return False
     if attacks is None:
@@ -436,15 +517,17 @@ def _attach_run(
     seg: _Segment,
     times,
     attacks: Attacks | None,
-) -> _Segment:
+) -> list[_Segment]:
     """Give a transition run to the note it leads to, or share it between both.
+
+    Returns the segments to emit in place of `seg` — one, or two when the
+    run is a take-opening slide the next segment does not continue.
 
     When the run starts on an attack AND has arrived (its last frames hold
     their pitch), it is a note sung with a portamento: a ladder of
     intermediate plateaus plus its arrival, which taken separately would be
     a handful of phantom notes. It becomes ONE note, at the pitch it arrived
-    at — not the median of the ladder it crossed — and the following segment
-    is a different note and stays one.
+    at — not the median of the ladder it crossed.
 
     Otherwise the run is a plain glide: its frames are shared at the pitch
     midpoint between the two notes, so the arrival note keeps the onset it
@@ -462,21 +545,7 @@ def _attach_run(
         # rung of a 500 ms glide engraved a phantom 62 between the two sung
         # notes). Real short notes keep the branch — their run is the note.
         if merged.duration >= MIN_UNCONFIRMED_S:
-            merged.forced_pitch = float(np.median(run[-1].midis))
-            # `forced_pitch` decides the note's pitch AND its frames: the clean
-            # median of a merged ladder trails the RAMP (measured on a 400 ms
-            # portamento 60->67: median 65.4 while the arrival is 67 — the ladder
-            # carries two frames at each intermediate step and only a handful at
-            # the arrival). Trim the merged frames to the arrival's neighbourhood
-            # so the median and the reported pitch agree — and because
-            # `_fuse_close` compares MEDIANS, an untrimmed ladder fuses with the
-            # wrong neighbours (measured on chant.wav: 26 notes @ 154.7 BPM
-            # instead of 29 @ 171.0 when the trim was dropped as "dead code":
-            # it never reached the exported pitch, but it steers the fusing).
-            near = merged.midis[np.abs(merged.midis - merged.forced_pitch) <= NEAR_MERGE_ST]
-            if len(near):
-                merged.midis = near
-            return merged
+            return [_settle_on_tail(merged, len(run[-1].midis))]
     if prev is not None:
         _split_between_at_attack(prev, run, seg, times, attacks)
         # the arrival keeps the glide frames to its LEFT, but its PITCH is
@@ -484,19 +553,33 @@ def _attach_run(
         # (measured on the 500 ms glide: median 66.09 for a 67 arrival — a
         # wrong semitone). The honest pitch is the median of the arrival's
         # OWN tail — the frames that hold the plateau — which is exactly
-        # what `holds_pitch` reads (measured: 66.99 = the sung 67). It is
-        # applied only when the arrival SETTLED (`holds_pitch`), because a
-        # tail median of a segment still ramping pins the ramp, and only
-        # when the run does not DOMINATE the arrival (>= 2x): on a dominant
-        # glide the tail is short and the ramp's median is the safer read
-        # (rare; the articulated branch handles most of those). Measured on
-        # the truth corpus: this settles 18/19 cases where the inverted
-        # condition once read 62 -> 61, 67 -> 66, 72 -> 71 (25 tests red).
+        # what `holds_pitch` reads (measured: 66.99 = the sung 67). Applied
+        # only when the arrival SETTLED (`holds_pitch`) — a tail median of a
+        # segment still ramping pins the ramp — and only when the run does
+        # not DOMINATE the arrival (>= 2x): on a dominant glide the tail is
+        # short and the ramp's median is the safer read (rare; the
+        # articulated branch handles most of those).
         if seg.holds_pitch() and _merge_segments(run).duration < 2.0 * seg.duration:
             tail = seg.midis[-SWEEP_TAIL_FRAMES:]
             seg.forced_pitch = float(np.median(tail))
-        return seg
-    return _merge_segments([*run, seg])  # leading transient
+        return [seg]
+    # LEADING run (no note before it): a take-opening glissando. Past a REAL
+    # break (`SLIDE_BREAK_S`) the long slide is its OWN note — the segment
+    # after the break is a different note and stays one. Sung straight INTO
+    # its arrival, the approach merges INTO the arrival note and the pitch
+    # is the arrival's plateau, never the ramp's median.
+    run_span = abs(run[-1].midis[-1] - run[0].midis[0])
+    if (
+        len(run) >= 3
+        and run_span >= SLIDE_RUN_SPAN_ST
+        and seg.start - run[-1].end >= SLIDE_BREAK_S
+    ):
+        slide = _merge_segments(run)
+        return [_settle_on_tail(slide, SWEEP_TAIL_FRAMES), seg]
+    merged = _merge_segments([*run, seg])
+    if seg.holds_pitch():
+        _settle_on_tail(merged, SWEEP_TAIL_FRAMES)
+    return [merged]
 
 
 def _split_between_at_attack(
@@ -547,6 +630,75 @@ def _split_between_at_attack(
     _split_between(left, run, right, times)
 
 
+def _slide_note(run: list[_Segment]) -> _Segment:
+    """A run of slide segments as ONE note, pitched where it ARRIVES."""
+    return _settle_on_tail(_merge_segments(run), SWEEP_TAIL_FRAMES)
+
+
+def _next_stair_step(segments: list[_Segment], i: int) -> int | None:
+    """Index of the next HELD plateau a slide-step away from `segments[i]`.
+
+    A slide-step: the next held segment (non-held bridges in between are
+    the cleaning's ramp re-lockings) is itself SHORT (`SLIDE_PLATEAU_MAX_S`
+    — a chain member that outlasts it is a melody note the chain must not
+    swallow), sits `SLIDE_STEP_ST` or more away, and the whole link is
+    CONTIGUOUS (a real break makes the chain a détaché line, each note
+    with its own attack and its own silence).
+    """
+    j = i + 1
+    while j < len(segments) and not segments[j].holds_pitch():
+        if segments[j].start - segments[j - 1].end > SLIDE_BREAK_S:
+            return None  # a real break: not one continuous chain
+        j += 1
+    if j >= len(segments):
+        return None
+    if segments[j].start - segments[j - 1].end > SLIDE_BREAK_S:
+        return None
+    if segments[j].duration >= SLIDE_PLATEAU_MAX_S:
+        return None
+    if abs(segments[j].median - segments[i].median) < SLIDE_STEP_ST:
+        return None
+    return j
+
+
+def _flag_staircase(segments: list[_Segment], flags: list[bool]) -> None:
+    """Flag every member of a contiguous staircase of >= 3 slide plateaus.
+
+    The cleaning re-locks between a long slide's ramp bridges, so the
+    slide can read as HELD mini-plateaus (the real take: 0.08-0.26 s,
+    steps 3.1-4.6 st, all contiguous). ONE link is NOT evidence: a fast
+    melody also chains two short plateaus a third apart through its
+    hand-over rung (the "croches" scale reads 60 -> bridge -> 64, a 4 st
+    step). A MELODY's chain ends at 2 — the next degree is under 2 st —
+    while a slide's staircase keeps climbing (the real take: 4 plateaus,
+    11 st end to end, MONOTONIC — a zigzag of up-then-down steps is a
+    melody's contour, never a slide). So the whole chain is flagged only
+    at 3 plateaus and up, stepping in ONE direction; the chain's plateaus
+    become transitions and the slide reads as ONE note at the arrival
+    tail.
+    """
+    i = 0
+    while i < len(segments):
+        seg = segments[i]
+        if not seg.holds_pitch() or seg.duration >= SLIDE_PLATEAU_MAX_S:
+            i += 1
+            continue
+        chain = [i]
+        direction = 0.0
+        while (j := _next_stair_step(segments, chain[-1])) is not None:
+            step = segments[j].median - segments[chain[-1]].median
+            if direction and (step > 0) != (direction > 0):
+                break  # the staircase turned around: a melody contour
+            direction = step
+            chain.append(j)
+        if len(chain) >= 3:
+            for k in chain:
+                flags[k] = True
+            i = chain[-1] + 1
+        else:
+            i += 1
+
+
 def _absorb_transitions(
     segments: list[_Segment], times, attacks: Attacks | None
 ) -> list[_Segment]:
@@ -564,6 +716,9 @@ def _absorb_transitions(
         prev = segments[i - 1] if i else None
         nxt = segments[i + 1] if i + 1 < len(segments) else None
         flags.append(_is_transition(seg, prev, nxt, attacks))
+    # the STAIRCASE pass: a contiguous chain of >= 3 held mini-plateaus
+    # stepping a third or more each is one slide, not a fast melody
+    _flag_staircase(segments, flags)
 
     notes: list[_Segment] = []
     pending: list[_Segment] = []
@@ -572,11 +727,30 @@ def _absorb_transitions(
             pending.append(seg)
             continue
         if pending:
-            seg = _attach_run(notes[-1] if notes else None, pending, seg, times, attacks)
+            notes.extend(
+                _attach_run(notes[-1] if notes else None, pending, seg, times, attacks)
+            )
             pending = []
-        notes.append(seg)
-    if pending and notes:
-        notes[-1] = _merge_segments([notes[-1], *pending])  # trailing transient
+        else:
+            notes.append(seg)
+    if pending:
+        if notes:
+            # a TRAILING chain (a glissando nobody follows): when it
+            # travels a slide's worth away from the last note, it is a
+            # slide in its own right, pitched where it ARRIVES — never the
+            # mid-slide median.
+            tail_pitch = float(np.median(pending[-1].midis[-SWEEP_TAIL_FRAMES:]))
+            if len(pending) >= 3 and abs(notes[-1].median - tail_pitch) >= SLIDE_TRAVEL_ST:
+                # a note-length head keeps its identity (the note the slide
+                # departs from); a short head is the slide's own first rung
+                if notes[-1].duration >= MIN_UNCONFIRMED_S:
+                    return notes + [_slide_note(pending)]
+                return [*notes[:-1], _slide_note([notes[-1], *pending])]
+            notes[-1] = _merge_segments([notes[-1], *pending])  # trailing transient
+        else:
+            # a take-opening chain (a pure slide): the pitch it ARRIVES at
+            # is its identity
+            notes.append(_slide_note(pending))
     return notes
 
 
@@ -653,6 +827,18 @@ def _split_rearticulated(
             note_midis = midi_curve[in_note]
             note_times = times[in_note]
             for t in cuts:
+                # a cut at t splits the note in two; a REAL re-articulation
+                # has BOTH halves at the note's pitch — the first half is
+                # the held note. A note whose first half sits FAR from the
+                # label is a slide merged with its arrival (the take-
+                # opening glissando): its "attack" is the hand-over to the
+                # arrival, not a re-articulation, and cutting it would
+                # engrave the approach as a duplicate of the arrival.
+                before = note_midis[(note_times >= n.start) & (note_times <= t)]
+                before = before[~np.isnan(before)]
+                if before.size and abs(float(np.median(before)) - n.midi) > SWEEP_MIN_ST:
+                    glide_cut = True
+                    break
                 around = note_midis[(note_times >= t - 0.08) & (note_times <= t + 0.08)]
                 around = around[~np.isnan(around)]
                 if not around.size:

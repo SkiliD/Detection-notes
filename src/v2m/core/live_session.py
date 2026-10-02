@@ -199,6 +199,18 @@ class LiveTake:
         """How many live notes the key-aware pull has retuned so far."""
         return self._snapped
 
+    @property
+    def dropped_blocks(self) -> int:
+        """Blocks the drain abandoned at stop (the capture's honesty counter).
+
+        A block QUEUED by the driver is not a block HANDLED: a stop past
+        the drain's join timeout abandons the backlog, and those blocks
+        never reached the DSP — the live note count reads hollow while
+        the WAV keeps everything (the final analysis reads the take
+        whole). The announcement at stop turns the number visible.
+        """
+        return self.capture.dropped if self.capture is not None else 0
+
     def stop(self) -> np.ndarray:
         """Stop once, drain captured blocks, flush segmentation, keep signal."""
         if self._state == "stopped":

@@ -41,9 +41,8 @@ def test_two_separate_notes():
 def test_attack_strength_lands_on_the_closed_note():
     """The attack strength travels with the flag and lands on the note.
 
-    Regression: `LiveNote` had no `strength` field, so `detect_meter`
-    (the 3/4 vs 4/4 accents stage) raised AttributeError on the first
-    live take of six notes — and the metronome pattern stayed 4/4.
+    `LiveNote` must carry a `strength` field: `detect_meter` (the 3/4 vs
+    4/4 accents stage) reads it on the first live take.
     The strength (0..1, normalized on the take's strongest attack) is
     the live counterpart of the offline `Note.strength`.
     """
@@ -70,9 +69,9 @@ def test_attack_strength_lands_on_the_closed_note():
 def test_staged_attack_keeps_its_strength():
     """An attack on a mute frame keeps its strength until the note.
 
-    Regression: the attack was staged (its time), but the strength was
-    read as the parameter of the next voiced frame — where it already
-    read 0.0. On a real sung take (consonants on mute frames), every
+    The staged attack carries (time, strength) TOGETHER: reading the
+    strength from the next voiced frame's parameter reads 0.0 there. On
+    a real sung take (consonants on mute frames), every
     downbeat read 0.0 and meter detection lost its accents.
     """
     seg = LiveNoteSegmenter()
@@ -99,9 +98,9 @@ def test_short_blip_ignored():
 def test_repetition_same_pitch_stays_two_notes():
     """Repeating the same note (aa-aa) with no attack seen: TWO notes.
 
-    Regression: the flush merge glued two full-length notes separated
-    by a real silence (60 ms) whenever the attack had not been
-    detected — every soft repetition ended up as a single note.
+    The flush merge must refuse two full-length notes separated by a
+    real silence (60 ms) whenever the attack has not been detected — a
+    soft repetition is a new note, not a longer hold.
     """
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.30)
@@ -212,9 +211,9 @@ def _feed_glide(
 def test_a_glide_does_not_become_a_note():
     """A portamento must be confirmed once, at its arrival only.
 
-    Measured regression: with an 80 ms confirmation window (two
-    frames), a scale step read as a held note and a 60->62 glissando
-    manufactured notes at 61 and 63.
+    With an 80 ms confirmation window (two frames), a scale step reads
+    as a held note and a 60->62 glissando manufactures notes at 61 and
+    63.
 
     Accepted limit: a portamento SLOWER than ~3 semitones per second
     (0.6 s for 2 semitones) transcribes as two notes, since no 140 ms
@@ -263,9 +262,9 @@ def test_re_attack_splits_a_held_note():
 def test_repeated_same_pitch_through_the_full_chain():
     """Four sung "ta" on one E must give FOUR notes (~0.25 s each).
 
-    Measured regression: the level tracker returned only one attack in
-    four (the baseline stayed at the previous notes' level), and the
-    attacks landing on mute frames were swallowed — the flush merge
+    The level tracker's baseline must move with each attack (stuck at
+    the previous notes' level it returns one attack in four), and the
+    attacks landing on mute frames are carried — the flush merge
     then glued everything into one 1.1 s note. Full chain (1024-sample
     blocks, like the mic)."""
     from voicetruth import SungNote, synthesize
@@ -329,13 +328,16 @@ def test_a_fresh_note_is_not_split_by_a_late_attack():
         t += 0.02
         seg.push(t, _hz(60), attack=(t > 0.06 and t < 0.08))
     seg.flush(0.6)
+    # exactly one frame carries the stray attack (~0.06 s, float stepping):
+    # it lands inside the fresh note and must not cut it
+    assert len(seg.notes) == 1, "the late attack cut the fresh note in two"
+    assert seg.notes[0].midi == 60
 
 
 # --------------------------------------------------------------------- #
-# The constants' own teeth (the 2026-09-28 heuristic audit's gaps):
-# each test below pins ONE constant's decision boundary at the frame
-# level — the corpus nets (test_voice_accuracy) prove the whole chain,
-# these prove the knob.
+# The constants' own teeth: each test below pins ONE constant's decision
+# boundary at the frame level — the corpus nets (test_voice_accuracy)
+# prove the whole chain, these prove the knob.
 # --------------------------------------------------------------------- #
 
 

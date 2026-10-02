@@ -1,12 +1,17 @@
 """CLI: the PDF engraving is a separate step, never fatal to the rest.
 
-Regression: `except PdfExportError` left the `try` without `stem` and
-`rep` bound (export_result raised before returning); the summary that
-followed hit an UnboundLocalError, even though .mid/.json/.csv/
-.musicxml had just been written.
+A failed engraving must not unbind the export's `stem` and `rep` (the
+.mid/.json/.csv/.musicxml artifacts are already written at that point)
+and must not reach the summary as an unbound name.
+
+Tool DISCOVERY answers beyond the PATH on every supported platform:
+Windows installer directories, macOS .app bundles and POSIX
+package-manager bin directories are probed when `shutil.which` is blind.
 """
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import numpy as np
 import soundfile as sf
@@ -79,3 +84,54 @@ def test_pdf_success_is_listed_with_the_other_artifacts(tmp_path, monkeypatch, c
     assert code == 0
     assert written, "the engraving was not requested"
     assert ".pdf" in out
+
+
+# --------------------------------------------------------------------------- #
+# Discovery beyond the PATH: one probe per platform
+# --------------------------------------------------------------------------- #
+
+
+def _no_path_tools(monkeypatch) -> None:
+    """Deterministic probe: nothing on the PATH, no real install answering."""
+    from v2m.core import pdf_export
+
+    monkeypatch.setattr(pdf_export, "shutil", SimpleNamespace(which=lambda cmd: None))
+    monkeypatch.setattr(pdf_export, "_installed_bases", lambda: [])
+    monkeypatch.setattr(pdf_export, "_mac_app_roots", lambda: [])
+    monkeypatch.setattr(pdf_export, "_POSIX_BIN_DIRS", ())
+
+
+def test_notation_tool_finds_a_windows_install_dir(tmp_path, monkeypatch):
+    """A Windows installer directory (absent from the PATH) is probed."""
+    from v2m.core import pdf_export
+
+    _no_path_tools(monkeypatch)
+    base = tmp_path / "Program Files"
+    exe = base / "MuseScore 4" / "bin" / "MuseScore4.exe"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    monkeypatch.setattr(pdf_export, "_installed_bases", lambda: [base])
+    assert pdf_export.find_notation_tool() == ("MuseScore", str(exe))
+
+
+def test_notation_tool_finds_a_macos_app_bundle(tmp_path, monkeypatch):
+    """A .app bundle is never on the PATH: the executable inside it answers."""
+    from v2m.core import pdf_export
+
+    _no_path_tools(monkeypatch)
+    exe = tmp_path / "MuseScore 4.app" / "Contents" / "MacOS" / "mscore"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    monkeypatch.setattr(pdf_export, "_mac_app_roots", lambda: [tmp_path])
+    assert pdf_export.find_notation_tool() == ("MuseScore", str(exe))
+
+
+def test_notation_tool_finds_a_posix_bin_dir(tmp_path, monkeypatch):
+    """A package-manager bin dir a minimal GUI PATH does not carry."""
+    from v2m.core import pdf_export
+
+    _no_path_tools(monkeypatch)
+    exe = tmp_path / "musescore4"
+    exe.touch()
+    monkeypatch.setattr(pdf_export, "_POSIX_BIN_DIRS", (str(tmp_path),))
+    assert pdf_export.find_notation_tool() == ("MuseScore", str(exe))

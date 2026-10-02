@@ -1,12 +1,10 @@
 """The Finder lights a key only on a CONFIRMED note (workstream 4).
 
-Measured regression (2026-09-26, user report "the keyboard lights on mic
-handling noise"): `LiveNoteSegmenter.current()` also answers during the
-PENDING state, a window that has not held `confirm_s` yet. Mic handling
-noise passes the periodicity gate for a few frames then disappears: it
-never confirms (measured: 0 notes and 0 ACTIVE blocks for 50-400 ms
-thumps) but `current()` did deliver a pitch — 19 blocks over the 1.5 s
-train below — so the 88-key keyboard lit on noise.
+`LiveNoteSegmenter.current()` also answers during the PENDING state, a
+window that has not held `confirm_s` yet. Mic handling noise passes the
+periodicity gate for a few frames then disappears: it never confirms
+(measured: 0 notes and 0 ACTIVE blocks for 50-400 ms thumps) but
+`current()` does deliver a pitch — 19 blocks over the 1.5 s train below.
 
 `confirmed()` is the answer: the note the segmenter actually admitted.
 The live indicator and the intonation needle keep reading
@@ -66,6 +64,32 @@ def test_confirmed_never_names_a_key_outside_the_piano():
         seg.push(i * 0.01, _hz(110))  # above C8
     assert seg.state == "ACTIVE"       # the segmenter holds the pitch...
     assert seg.confirmed() is None     # ...and the display does not make it a key
+
+
+def test_the_level_meter_names_a_saturated_input(qapp, monkeypatch):
+    """A block at the rail turns the fill red, a healthy level back to
+    the normal color: saturation is a decision the singer must see."""
+    from v2m.gui.finder_page import (
+        LEVEL_GATE_COLOR, LEVEL_FULL_SCALE, LevelMeter,
+    )
+    from v2m.gui.widgets import NOTE_TEXT_COLOR
+
+    meter = LevelMeter()
+    meter.resize(200, 8)
+    healthy = LEVEL_FULL_SCALE * 0.5
+    meter.set_level(healthy)
+    assert NOTE_TEXT_COLOR in meter._fill.styleSheet()
+    # at the rail: the fill goes to the gate's red ("turn the input DOWN")
+    meter.set_level(LevelMeter.CLIP_RMS_RMS)
+    assert LEVEL_GATE_COLOR in meter._fill.styleSheet()
+    assert "background:" in meter._fill.styleSheet()
+    # a healthy level again restores the normal fill
+    meter.set_level(healthy)
+    assert NOTE_TEXT_COLOR in meter._fill.styleSheet()
+    # silence hides the fill and clears the latch
+    meter.set_level(0.0)
+    assert meter._fill.isHidden()
+    assert meter._clipping is False
 
 
 def test_pending_plateau_names_without_lighting(qapp, monkeypatch):
@@ -200,10 +224,9 @@ def test_the_finder_stays_dark_on_a_mic_rumble(qapp, monkeypatch):
 
 def test_the_finder_shows_the_note_while_it_confirms(qapp, monkeypatch):
     """The "which note am I singing" feedback must NOT wait for the
-    confirmation: between the note's start and its 90 ms hold, the mute
-    screen read as "the mic is ignored" (2026-09-26 feedback). The big
-    name follows `current()` (PENDING answers), the history entry stays
-    reserved for confirmed notes."""
+    confirmation: between the note's start and its 90 ms hold, the screen
+    must not fall mute. The big name follows `current()` (PENDING
+    answers), the history entry stays reserved for confirmed notes."""
     import sounddevice as sd
 
     from v2m.gui import main_window as mw

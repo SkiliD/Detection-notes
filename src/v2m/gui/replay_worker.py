@@ -58,6 +58,12 @@ class ReplayWorker(QThread):
         self._stop_flag = True
 
     def run(self) -> None:
+        # the replay only has to finish EVENTUALLY: below the capture's
+        # priority, so a queued cross-check cannot starve a live drain
+        # (see gui/priority.py)
+        from .priority import lower_background_priority
+
+        lower_background_priority()
         wav = Path(str(self.stem) + ".wav")
         if not wav.exists():
             return  # the box was off for this take: nothing to replay

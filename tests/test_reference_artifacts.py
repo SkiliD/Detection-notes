@@ -22,7 +22,7 @@ Two accepted precautions:
   test is skipped when they are missing (another machine, a container)
   rather than failing;
 - re-freezing the reference is a decision, not a reflex: run
-  `V2M_FREEZE_REFERENCE=1 ./.venv/Scripts/python.exe -m pytest
+  `V2M_FREEZE_REFERENCE=1 python -m pytest
   tests/test_reference_artifacts.py`, after SEEING what moved (the test
   writes the fresh artifacts into its temp folder and gives the path).
 

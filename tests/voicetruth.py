@@ -60,11 +60,49 @@ def sequence(
     return [SungNote(m, start_s + i * step, dur_s) for i, m in enumerate(midis)]
 
 
+def glissando(
+    from_midi: float,
+    to_midi: float,
+    dur_s: float,
+    start_s: float = 0.0,
+) -> list[SungNote]:
+    """One pure pitch SLIDE from `from_midi` to `to_midi` over `dur_s`.
+
+    The sweep notes are deliberately FINE (30 ms): a glide is a
+    continuum, not a scale — `synthesize` renders the whole step chain
+    as ONE segment with a linear-in-midi f0 ramp. Segmentation's verdict
+    on this case is the interesting one: a glide that ARRIVES and HOLDS
+    is one note (the arrival), a pure slide engraved as several notes is
+    the arpeggio family.
+    """
+    step = 0.03
+    n = max(2, int(round(dur_s / step)))
+    midis = [
+        from_midi + (to_midi - from_midi) * i / (n - 1) for i in range(n)
+    ]
+    return [
+        # the step extends slightly over the next start, so the note list
+        # is CONTINUOUS (no gap for the interpolation to close); the
+        # overlap is what a singer's legato slide is — one airflow. The
+        # steps are rounded to the WHOLE semitone: SungNote.midi is an
+        # int and the sweep renderer only reads the endpoints (it
+        # re-interpolates the ramp itself), so the slide's shape is exact
+        SungNote(round(m), start_s + i * step, step * 1.1)
+        for i, m in enumerate(midis)
+    ]
+
+
 def _harmonic_voice(f0: np.ndarray, sr: int, f_max: float = 4000.0) -> np.ndarray:
-    """Harmonic sum with a glottal slope (1/k^1.4), capped near 4 kHz."""
+    """Harmonic sum with a glottal slope (1/k^1.4), capped near 4 kHz.
+
+    At least 8 harmonics: a low f0 still carries SOME overtones — a
+    near-sine is indistinguishable from a rumble by pYIN's periodicity and
+    the HF share gate (the synthesis must look like a voice, and a voice
+    has formants up high).
+    """
     phase = 2.0 * np.pi * np.cumsum(f0) / sr
     base = float(np.mean(f0))
-    n_harm = max(1, int(f_max / max(base, 1.0)))
+    n_harm = max(8, int(f_max / max(base, 1.0)))
     out = np.zeros_like(phase)
     for k in range(1, n_harm + 1):
         out += np.sin(k * phase) / k ** 1.4
@@ -114,6 +152,65 @@ def synthesize(
     prev_hz: float | None = None
     prev_end = 0.0
     phase0 = 0.0
+    # a sweep (voicetruth.glissando) is ONE note: the per-note envelopes
+    # would AM-gate every 30 ms step (25 ms attack + 40 ms release over a
+    # 34 ms note never reaches full level) and pYIN's voicing collapses on
+    # the resulting ripple — measured: a pure slide read vprob <= 0.4 end
+    # to end. The sweep is detected by the notes' STEP (>= 20 segments of
+    # <= 50 ms whose starts tile a slide, an arrival plateau excepted):
+    # they share one continuous envelope and an interpolated f0 ramp
+    # instead.
+    step_notes = [n for n in notes if n.dur_s <= 0.05]
+    is_sweep = (
+        len(step_notes) >= 20
+        and (max(n.midi for n in notes) - min(n.midi for n in notes)) >= 3
+    )
+    if is_sweep:
+        sweep_end = max(n.start_s + n.dur_s for n in step_notes)
+        # the WHOLE sweep renders as ONE segment: per-step segments overlap
+        # (the step extends past the next start), and two partial series a
+        # step apart sum into a beat that kills the periodicity (measured:
+        # vprob 0.01-0.4 through the whole slide; the same ramp rendered in
+        # one segment reads 0.69-0.76). One f0 array, one envelope, one
+        # add — then the AFTER-sweep notes (an arrival plateau) render
+        # normally and are CONCATENATED at full voice onto the slide's
+        # tail (a legato arrival shares the airflow).
+        from_midi = min(n.midi for n in step_notes)
+        to_midi = max(n.midi for n in step_notes)
+        descending = notes[0].midi > notes[-1].midi
+        span = sweep_end - step_notes[0].start_s
+        t = np.arange(int(span * sr)) / sr
+        midi_ramp = (
+            (to_midi + (from_midi - to_midi) * t / span)
+            if descending
+            else (from_midi + (to_midi - from_midi) * t / span)
+        )
+        f0 = 440.0 * 2.0 ** ((midi_ramp - 69) / 12.0)
+        env = np.ones_like(f0)
+        g = min(int(0.02 * sr), len(f0) // 8)
+        env[:g] = np.linspace(0.0, 1.0, g)
+        i0 = int(step_notes[0].start_s * sr)
+        tail_i = i0 + len(f0)
+        y[i0:tail_i] += _harmonic_voice(f0, sr) * env * amp
+        # the rest: the arrival plateau(s), full voice from the slide's end
+        for note in notes:
+            if note in step_notes or note.start_s < sweep_end:
+                continue
+            n0 = int(note.start_s * sr)
+            nl = max(1, int(note.dur_s * sr))
+            nf0 = np.full(nl, note.hz)
+            nenv = np.ones(nl)
+            g2 = min(int(0.02 * nl), nl // 4)
+            if g2:
+                nenv[:g2] = np.linspace(0.0, 1.0, g2)
+                nenv[-g2:] = np.linspace(1.0, 0.0, g2)
+            y[n0 : n0 + nl] += _harmonic_voice(nf0, sr) * nenv * note.amp * amp
+            if consonant_s > 0:
+                cn = min(int(consonant_s * sr), nl)
+                burst = rng.standard_normal(cn) * _consonant_envelope(cn, sr)
+                y[n0 : n0 + cn] += consonant_amp * burst * amp
+        peak = float(np.max(np.abs(y))) or 1.0
+        return (y / peak * amp).astype(np.float32)
 
     for note in notes:
         i0 = int(note.start_s * sr)
@@ -203,6 +300,44 @@ def add_breath(y: np.ndarray, at: float, dur_s: float = 0.09, amp: float = 0.25,
     n = int(dur_s * SR)
     breath = np.random.default_rng(seed).standard_normal(n) * amp * np.hanning(n)
     y[i0 : i0 + n] += breath.astype(np.float32)
+
+
+def add_consonant(y: np.ndarray, at: float, dur_s: float = 0.05,
+                  amp: float = 1.4, seed: int = 3) -> None:
+    """Adds one sung consonant (wide-band burst) into `y`, in place.
+
+    The articulation that carries a re-strike: a ta-ta-ta line is a
+    series of these over a continuous tone. The real takes' shape
+    (attacks, strengths 0.3-0.8, audible level) is what an
+    unvoiced-consonant rule would have to read WITHOUT inventing notes
+    — the corpus cases pin both sides of that study.
+    """
+    sr = SR
+    n = int(dur_s * sr)
+    burst = np.random.default_rng(seed).standard_normal(n) * amp
+    burst *= np.exp(-np.arange(n) / sr / max(0.012, 1e-9))
+    y[int(at * sr) : int(at * sr) + n] += burst.astype(np.float32)
+
+
+def consonant_line(midis, dur_s: float = 0.30, gap_s: float = 0.15,
+                   start_s: float = 0.2, consonant_s: float = 0.05,
+                   consonant_amp: float = 1.4, seed: int = 3) -> np.ndarray:
+    """A ta-ta-ta line: one continuous tone per pitch, articulated by
+    consonant bursts (a consonant at each note's start).
+
+    The pitch NEVER leaves the plateau (unlike `sequence`'s notes, there
+    is no re-onset of the tone): the articulation is carried by the
+    consonants alone. This is the real takes' measured shape (pYIN's
+    window reads vprob 0.01 through the bursts) that an
+    unvoiced-consonant study would have to read correctly — the corpus
+    case pins the truth side.
+    """
+    notes = sequence(midis, start_s=start_s, dur_s=dur_s, gap_s=gap_s)
+    y = synthesize(notes, consonant_s=0, glide_s=0)
+    for n in notes:
+        add_consonant(y, n.start_s, dur_s=consonant_s, amp=consonant_amp,
+                      seed=seed)
+    return y
 
 
 # --------------------------------------------------------------------------- #

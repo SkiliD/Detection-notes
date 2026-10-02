@@ -4,12 +4,11 @@ The stream expresses its windows in TIME units: the same duration at any
 sample rate, and the frame period it derives from them is published to
 the segmenter, which reads its frame-written ceilings there.
 
-Measured regression (2026-09-26): production fed the stream at the
-device's rate (44 100) with windows written in SAMPLES (512/256), i.e.
-11.6 ms instead of the 23 ms tuned and measured at 22 050. On
-`chant.wav` that manufactured 30 notes instead of 26, two of them
-phantoms at midi 41 (Fa2) — the exact family of the "false low note"
-the anti-rumble gate repairs.
+A windows-in-SAMPLES stream fed at 44 100 Hz would run at half its
+tuned duration (11.6 ms instead of the 23 ms tuned at 22 050): the
+sequence would manufacture phantom low notes on top of the real ones —
+the exact family the anti-rumble gate repairs. The contract is pinned
+at both rates.
 """
 
 from __future__ import annotations

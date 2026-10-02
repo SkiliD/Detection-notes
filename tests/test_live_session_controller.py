@@ -1,25 +1,23 @@
 """The controller WITHOUT Qt: the take lifecycle, one verdict per branch.
 
-`LiveSessionController` is the deep module the 2026-09-27 regressions
-pointed at; these tests walk EVERY branch of its interface — begin,
-export (once, twice), analysis queued behind a newer capture, replay
-guards (capture running / replay running / empty queue), the queue
-surviving a new take, and close. No Qt: the interface IS the test
-surface (the window applies the `Verdict`s; here the plain data is
-asserted in a unit test without an event loop).
+`LiveSessionController` owns the take in progress; these tests walk
+EVERY branch of its interface — begin, export (once, twice), analysis
+queued behind a newer capture, replay guards (capture running / replay
+running / empty queue), the queue surviving a new take, and close. No
+Qt: the interface IS the test surface (the window applies the
+`Verdict`s; here the plain data is asserted in a unit test without an
+event loop).
 
-Each pin carries the measured regression it exists to prevent:
+Each pin carries the behavior it exists to guarantee:
 
-- **the stem is minted once per take** — re-minting `live_take_name()`
-  per writer scattered one take's artifacts over timestamped folders;
-- **the signal comes from the event, ALWAYS** — an `or None` guard once
-  turned an empty payload into "keep the previous take's signal" (the
-  2026-09-26 stale-WAV family);
+- **the stem is minted once per take** — one take, one folder;
+- **the signal comes from the event, ALWAYS** — an `or None` guard
+  would turn an empty payload into "keep the previous take's signal"
+  (the stale-WAV family);
 - **the queue survives `begin_take`** — a queued replay belongs to an
   ALREADY EXPORTED take; losing it on the next start loses the audit;
-- **never pump during a capture** — a replay's real-time DSP starved
-  the live drain thread (live counter 2-12 notes vs 17-23 on replay of
-  the same WAVs, chained takes 20:45-20:46);
+- **never pump during a capture** — a replay's real-time DSP competes
+  with the live drain thread;
 - **one replay at a time** — two workers would race for the same DSP
   budget and for the same sidecar writer;
 - **the verdict follows the CURRENT capture** — stopping the timer
@@ -66,6 +64,49 @@ def test_begin_take_forgets_the_buffers_but_keeps_the_queue():
 # -- the export: sidecar stem, ONE queue entry --------------------------------
 
 
+def test_manual_correction_export_does_not_queue_a_stale_audio_replay():
+    ctl = _ctl()
+
+    stem = ctl.handle_export(None, replay=False)
+
+    assert stem is None
+    assert ctl.take_stem() is not None
+    assert ctl.replay_queue() == []
+
+
+def test_replacement_after_an_export_queues_a_fresh_replay_only_on_export():
+    ctl = _ctl()
+    ctl.handle_export({"live": 1, "final": 1})
+    stem = ctl.take_stem()
+    ctl.pump_replay()
+    ctl.replay_finished()
+
+    ctl.begin_replacement()
+    assert ctl.handle_export(None, replay=False) is None
+    assert ctl.replay_queue() == []
+    assert ctl.take_stem() == stem
+
+    ctl.begin_replacement()
+    assert ctl.handle_export({"live": 2, "final": 2}) == stem
+    assert ctl.replay_queue() == [stem]
+
+
+def test_discard_replay_reports_the_running_stem():
+    ctl = _ctl()
+    ctl.handle_export({"live": 1, "final": 1})
+    stem = ctl.replay_queue()[0]
+
+    assert ctl.discard_replay(stem) is False
+    assert ctl.replay_queue() == []
+    assert ctl.pump_replay() is None
+
+    ctl.enqueue_replay(stem)
+    assert ctl.pump_replay() == stem
+    assert ctl.discard_replay(stem) is True
+    ctl.replay_finished()
+    assert not ctl.replay_running()
+
+
 def test_handle_export_queues_once_and_names_the_sidecar_stem():
     ctl = _ctl()
     block = {"live": 3, "final": 3, "contours": 0, "off1": 0, "moved": 0,
@@ -109,7 +150,7 @@ def test_the_timer_verdict_follows_the_current_capture():
     assert ctl.handle_analysis(capture_running=False).keep_timer is False
 
 
-# -- the replay pump: the 2026-09-27 DSP-starvation guards --------------------
+# -- the replay pump: the never-compete guards --------------------------------
 
 
 def test_pump_guards_capture_running_and_one_at_a_time():
@@ -148,10 +189,10 @@ def test_close_dies_with_the_session():
 
 
 def test_fail_take_traces_a_take_that_died_before_its_first_export(tmp_path, monkeypatch):
-    """THE unreachable-path regression (ADR 0031, the six empty folders):
-    the stem is minted at the FIRST EXPORT, so a take that dies before any
-    export has no stem — the trace must mint it, or the take that most
-    needs the diagnosis is the one that never gets it."""
+    """ADR 0031's unreachable path: the stem is minted at the FIRST
+    EXPORT, so a take that dies before any export has no stem — the
+    trace must mint it, or the take that most needs the diagnosis is the
+    one that never gets it."""
     from v2m.core import takes
 
     monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)
@@ -232,8 +273,7 @@ def test_reason_for_failure_names_the_three_capture_shapes():
 
 
 def test_write_trace_leaves_the_failure_reason_in_the_take_folder(tmp_path, monkeypatch):
-    """The empty-folder hazard (six unexplained folders on 2026-09-29): a
-    take that dies before its export leaves WHY in its own folder."""
+    """A take that dies before its export leaves WHY in its own folder."""
     from v2m.core import takes
 
     monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)

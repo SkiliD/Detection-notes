@@ -79,8 +79,8 @@ def test_note_player_is_a_rendered_source():
 
 
 def test_render_sample_exact_tone_length():
-    """Regression: tone() re-derived its length through a seconds round-trip
-    (int(dur * sr)) and lost one sample on some durations -> ValueError while
+    """tone() uses the EXACT sample slice length: a seconds round-trip
+    (int(dur * sr)) loses one sample on some durations -> ValueError while
     mixing (30870 vs 30869 samples). `end` below makes i1 - i0 == 30870."""
     sr = audio_io.SR
     end = (30870 + 0.5) / sr  # int(end * sr) == 30870 exactly

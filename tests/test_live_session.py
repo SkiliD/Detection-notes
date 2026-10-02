@@ -1,8 +1,8 @@
 """Tests for the shared live-session lifecycle.
 
-Non-regression: a failed final analysis must keep the captured signal
-(recoverable without re-recording), emit the failure exactly once, and never
-write partial export artifacts.
+A failed final analysis keeps the captured signal (recoverable without
+re-recording), emits the failure exactly once, and never writes partial
+export artifacts.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ class FakeCapture:
     """Stand-in for LiveCapture: records its lifecycle, replays a signal."""
 
     samplerate = 22_050
+    dropped = 0  # the honesty counter (a stop past the join timeout)
 
     def __init__(self, **kwargs):
         self.on_block = kwargs["on_block"]
@@ -38,8 +39,8 @@ class FakeCapture:
 
 
 def _capture(take: live_session.LiveTake) -> FakeCapture:
-    """Le faux capture avec son vrai type — LiveTake ne garantit que sa propre
-    surface canard (start/stop/elapsed/signal)."""
+    """The fake capture AS ITS real type — LiveTake guarantees only its own
+    duck surface (start/stop/elapsed/signal)."""
     capture = take.capture
     assert isinstance(capture, FakeCapture)
     return capture
@@ -58,6 +59,15 @@ def test_live_take_stop_is_idempotent(monkeypatch):
     assert first is second
     assert _capture(take).stop_calls == 1
     assert [event.kind for event in events] == ["stopped"]
+
+
+def test_dropped_blocks_reach_the_take_surface(monkeypatch):
+    # the capture's dropped counter is readable through the take's surface
+    monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
+    take = live_session.LiveTake()
+    take.start()
+    _capture(take).dropped = 7
+    assert take.dropped_blocks == 7
 
 
 def test_live_take_reuses_final_result(monkeypatch):

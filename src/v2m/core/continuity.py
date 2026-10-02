@@ -1,8 +1,8 @@
 """Per-note coherence: is the pitch INSIDE each written note the note itself?
 
 A long note whose curve holds a DIFFERENT plateau for 120 ms or more is a
-swallowed phrase (re-sung notes glued into one continuity — the 2026-09-26
-user report), not a held note. The detectors already split most of them; this
+swallowed phrase (re-sung notes glued into one continuity), not a held
+note. The detectors already split most of them; this
 module is the SAFETY NET that makes what slipped through VISIBLE instead of
 silent: `report.export_result` publishes one coherence block per take, each
 suspect note carrying the plateau it hides (where it sits, how long, at which

@@ -38,10 +38,16 @@ sys.path.insert(0, str(REPO / "tests"))
 FLAG = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]+)\b")
 SCRIPT = re.compile(r"scripts/[a-z_]+\.py")
 HEADING = re.compile(r"^(#{1,3}) ", re.M)
-COMMAND = re.compile(r"^v2m\b.*$|^\./\.venv/Scripts/python\.exe .*$", re.M)
+# Every line that RUNS something, anchored at the start of a line: `v2m`
+# itself, the interpreter the Install section names per platform
+# (`py`/`python3.12`/`python`), the venv activation steps and
+# `pytest`. Both READMEs must carry the same ones.
+COMMAND = re.compile(
+    r"^(?:v2m\b|py\b|python[\d.]*\b|pytest\b|pip\b|source\b"
+    r"|QT_QPA_PLATFORM=\S+\s+python\b|\.venv\\Scripts\\activate).*$",
+    re.M,
+)
 COMMENT = re.compile(r"#.*$")
-# a command's sample values: audio files, JSON outputs…
-SAMPLE = re.compile(r"\b(\w+\.(?:wav|json|mid|musicxml|csv))\b")
 
 # flags internal to the program itself, never to be documented:
 # `--version` (version action) and `--help` (argparse's help).

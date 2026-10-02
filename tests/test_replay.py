@@ -56,29 +56,33 @@ def _save_sung_wav(tmp_path: Path) -> Path:
 
 
 @pytest.mark.slow  # a full real-time replay of the take (~2 s audio + analysis)
-def test_replay_feeds_the_real_chain_in_real_time(tmp_path, monkeypatch):
+def test_replay_feeds_the_real_chain_in_real_time(tmp_path):
     """A replay goes through LiveCapture (blocks on the real clock), not in bulk."""
     from v2m.core.compare import breakdown
 
     # the take's own chain, but the stream is INJECTED (no global swap of
-    # the real InputStream): the replay's fake feed rides LiveCapture
+    # the real InputStream): the fake feed delivers THE TAKE's audio at 1x,
+    # so the wait loop ends on the audio's duration, never on its deadline
     opened: list[dict] = []
+
+    wav = _save_sung_wav(tmp_path)
+    y = audio_io.load_file(str(wav), sr=44_100)
+    feed = _fake_input_stream(y, 44_100)
 
     class TimedFake:
         def __init__(self, samplerate, channels, blocksize, callback, **kwargs):
             opened.append({"samplerate": samplerate, "blocksize": blocksize})
-            self._fake = FakeMic(samplerate, channels, blocksize, callback, **kwargs)
+            self._stream = feed(samplerate, channels, blocksize, callback, **kwargs)
 
         def start(self) -> None:
-            self._fake.start()
+            self._stream.start()
 
         def stop(self) -> None:
-            self._fake.stop()
+            self._stream.stop()
 
         def close(self) -> None:
-            self._fake.close()
+            self._stream.close()
 
-    wav = _save_sung_wav(tmp_path)
     row = replay_take(wav, stream_factory=TimedFake)
     # the injected factory opened the stream at the MIC's rate and block
     assert opened == [{"samplerate": 44_100, "blocksize": 1024}]

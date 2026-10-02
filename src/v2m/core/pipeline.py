@@ -52,6 +52,7 @@ class AnalysisResult:
     # LiveTake.finalize when the take has a live reading: ONE source for
     # the JSON block, the results-panel explainer and the per-take archive
     live_vs_final: Optional[dict] = None
+    manual_pitch_corrections: bool = False
 
     def quantize_step(self, division: int = 16) -> float:
         """Seconds per grid division (16 = sixteenth) at the detected tempo."""

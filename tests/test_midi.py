@@ -72,7 +72,7 @@ def test_quantize_aligns_to_grid():
         key=None,
         quantize_s=step,
     )
-    # 2026-09-25: the track also carries the pedal (CC64), so a note's
+    # the track also carries the pedal (CC64), so a note's
     # RELATIVE tick is no longer its position — we read the ABSOLUTE time.
     abs_times: list[tuple[str, float]] = []
     for t in mid.tracks:

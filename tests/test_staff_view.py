@@ -98,7 +98,7 @@ def test_score_needs_no_meter_or_key(qapp):
 
 
 def test_every_system_draws_its_notes(qapp):
-    """Regression: systems 2+ drew their notes outside the widget."""
+    """Every system draws its notes INSIDE the widget."""
     notes = [_note(60 + (i % 7), i * 0.5) for i in range(16)]   # 4 measures
     view = StaffView()
     view.resize(560, 260)

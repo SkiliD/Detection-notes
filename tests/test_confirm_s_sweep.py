@@ -1,4 +1,4 @@
-"""The low-amplitude axis of the confirm_s sweep (2026-09-29 corpus).
+"""The low-amplitude axis of the confirm_s sweep (real amplitude range).
 
 The real takes sat at RMS 0.019..0.062 — 3-7x under the reference takes —
 and the question was whether the segmentation bounds hold on QUIET

@@ -1,22 +1,23 @@
-"""Enregistrement guide d'une prise de verite, note par note.
+"""Guided capture of a truth take, note by note.
 
-Le dossier `prises_verite/` rassemble des prises chantees dont chaque note
-a ete verifiee a l'oreille — la verite terrain qui manque sur les voix
-reelles. Ce script construit ce corpus :
+The `prises_verite/` folder collects sung takes whose every note was
+checked BY EAR — the ground truth missing for real voices. This script
+builds that corpus:
 
-    ./.venv/Scripts/python.exe scripts/guide_capture.py ma_prise.wav
-      1) capture le micro en continu (Ctrl+C pour arreter et annoter),
-      2) pour chaque note : Entree -> chantez la note -> Entree,
-      3) a l'arret, ecrit `prises_verite/<nom>.wav` + `<nom>.truth.json`
-         avec les bornes RAFFINEES par la courbe de hauteur (le repere
-         humain date a +-0.3 s ; la courbe decide au 40 ms),
-      4) `--audit` valide la verite et rejoue l'analyse sur la prise
-         (comparaison humain vs machine, note par note).
+    python scripts/guide_capture.py ma_prise.wav
+      1) captures the microphone continuously (Ctrl+C stops and annotates),
+      2) per note: Enter -> sing the note -> Enter,
+      3) at the stop, writes `prises_verite/<name>.wav` + `<name>.truth.json`
+         with the bounds REFINED by the pitch curve (the human marker
+         dates to +-0.3 s; the curve decides at 40 ms),
+      4) `--audit` validates the truth and replays the analysis on the take
+         (human vs machine comparison, note by note).
 
-Le JSON respecte le format documente dans `prises_verite/README.md` :
-midi + start + end par note (+ lyric optionnel), `checked_by: humain`.
+The JSON follows the format documented in `prises_verite/README.md`:
+midi + start + end per note (+ optional lyric), `checked_by: humain`
+(a data value, spelled as the corpus requires).
 
-Sans micro (CI), seul `--audit` est utilisable : il ne capture pas.
+Without a microphone (CI), only `--audit` works: it captures nothing.
 """
 
 from __future__ import annotations
@@ -40,10 +41,10 @@ from v2m.core import audio_io  # noqa: E402
 from v2m.core.music import hz_to_midi, midi_to_name  # noqa: E402
 
 TRUTH_DIR = ROOT / "prises_verite"
-FRAME_S = 0.04      # pas de la courbe de hauteur (40 ms)
-WINDOW_S = 0.08     # fenetre de lecture YIN (80 ms)
-STABLE_ST = 0.35    # spread max de 3 trames voisines pour "hauteur stable"
-REFINE_MARGIN_S = 0.30  # le repere humain peut etre en retard/en avance de ca
+FRAME_S = 0.04      # pitch-curve step (40 ms)
+WINDOW_S = 0.08     # YIN analysis window (80 ms)
+STABLE_ST = 0.35    # max spread of 3 neighbouring frames for "pitch stable"
+REFINE_MARGIN_S = 0.30  # the human marker may be this late/early
 
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +92,7 @@ def load_truth(path: Path) -> dict:
 
 
 def _pitch_of(block: np.ndarray, sr: int) -> float:
-    """Hauteur MIDI d'un bloc, NaN sous la porte de silence ou sans hauteur."""
+    """MIDI pitch of a block, NaN under the silence gate or when unvoiced."""
     from v2m.core.pitch import yin_pitch
 
     if float(np.sqrt(np.mean(block ** 2))) < audio_io.GATE_RMS:
@@ -103,11 +104,11 @@ def _pitch_of(block: np.ndarray, sr: int) -> float:
 
 
 def _stable_series(y: np.ndarray, sr: int, lo: float, hi: float) -> list[tuple[float, bool]]:
-    """[(t, stable)] : la hauteur est-elle stable autour de l'instant t ?
+    """[(t, stable)]: is the pitch stable around time t?
 
-    Une trame est stable quand 3 lectures YIN voisines (pas 40 ms, fenetre
-    80 ms) tiennent dans STABLE_ST demi-tons — c'est la definition d'une
-    note tenue, celle qui separe le chant du souffle et du portamento.
+    A frame is stable when 3 neighbouring YIN readings (40 ms step, 80 ms
+    window) fit within STABLE_ST semitones — the definition of a HELD
+    note, what separates singing from breath and from portamento.
     """
     seg = y[int(lo * sr):int(hi * sr)]
     win = int(sr * WINDOW_S)
@@ -127,16 +128,15 @@ def _stable_series(y: np.ndarray, sr: int, lo: float, hi: float) -> list[tuple[f
 
 
 def refine_bounds(y: np.ndarray, sr: int, start: float, end: float) -> tuple[float, float]:
-    """Raffine (start, end) du repere humain sur la courbe de hauteur.
+    """Refine the human marker's (start, end) on the pitch curve.
 
-    Le repere humain (Entree -> chantez -> Entree) date a +-0.3 s : on
-    cherche les PLAGES de hauteur stable dans la marge et on garde celle
-    qui contient le centre du repere (sinon la plus proche). Chercher la
-    premiere/derniere trame stable de la marge attrapait la note voisine
-    (mesure : un repere tardif sur la note 1 se raffinait jusque DANS la
-    note 2). Sans plage stable (souffle, silence) ou trop loin du repere,
-    la borne humaine est gardee — l'aide ne doit jamais degrader un
-    repere.
+    The human marker (Enter -> sing -> Enter) dates to +-0.3 s: we look
+    for the RUNS of stable pitch inside the margin and keep the one
+    containing the marker's centre (else the nearest one). Taking the
+    first/last stable frame of the margin instead caught the NEIGHBOUR
+    note (measured: a late marker on note 1 refined INTO note 2). With no
+    stable run (breath, silence) or none close enough, the human bound is
+    kept — the helper must never degrade a marker.
     """
     lo = max(0.0, start - REFINE_MARGIN_S)
     hi = end + REFINE_MARGIN_S
@@ -162,9 +162,9 @@ def refine_bounds(y: np.ndarray, sr: int, start: float, end: float) -> tuple[flo
 
     best = min(runs, key=distance)
     if distance(best) > (end - start) / 2.0 + REFINE_MARGIN_S:
-        return start, end  # aucune plage ne correspond a ce repere
+        return start, end  # no run matches this marker
     a, b = best
-    if b - a < 0.10:  # une "note" plus courte n'a pas de sens
+    if b - a < 0.10:  # a "note" shorter than this makes no sense
         return start, end
     return a, b
 
@@ -270,7 +270,7 @@ def _write_wav(path: Path, y: np.ndarray, sr: int) -> None:
 def audit(audio_path: Path) -> None:
     """Validate the truth, replay the analysis, compare note by note."""
     from v2m.core.pipeline import analyze_signal
-    from voicetruth import SungNote, measure  # le harnas testé, comme score_accuracy
+    from voicetruth import SungNote, measure  # the tested harness, as in score_accuracy
 
     truth_path = audio_path.with_name(audio_path.stem + ".truth.json")
     if not audio_path.exists():

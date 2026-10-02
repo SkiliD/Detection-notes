@@ -35,14 +35,13 @@ def build_weekly(root: Path | None = None) -> dict:
     week (the trend's rule) and the newest audits are in.
     """
     root = Path(root) if root is not None else coh.LIVE_TAKES_DIR
-    takes = coh.takes_under(root)
-    coh.update_journal(root, takes)
+    snapshot = coh.build_snapshot(root)
     return {
-        "takes": len(takes),
-        "health": coh.contour_trend(root),
-        "windows": coh.practice_time_report(takes),
-        "days": coh.day_rows(coh.session_rows(takes), takes) if takes else [],
-        "regression": coh.regression_report(coh.contour_trend(root)),
+        "takes": len(snapshot.takes),
+        "health": snapshot.health_weeks,
+        "windows": snapshot.practice_windows,
+        "days": snapshot.days,
+        "regression": snapshot.regression,
     }
 
 

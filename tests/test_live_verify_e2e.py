@@ -68,9 +68,12 @@ def test_recorded_take_passes_verify_and_coherence(
         # after on_stop_live dropped the thread)
         assert win._closed_live_notes, "les notes live n'ont pas survécu à l'arrêt"
         live_count = len(win._closed_live_notes)
-        # the finished analysis reaches the results page and exports
-        exported = _pump_until(qapp, lambda: "stem" in written, timeout=60)
-        assert exported, "l'analyse finale n'a jamais débouché sur l'export"
+        # analysis stays in the results page until the user explicitly exports
+        analyzed = _pump_until(qapp, lambda: win.result is not None, timeout=60)
+        assert analyzed, "l'analyse finale n'est pas arrivée"
+        assert "stem" not in written, "la prise a été exportée sans action explicite"
+        win._export_results()
+        assert "stem" in written, "l'export explicite n'a pas écrit la prise"
 
         stem = Path(written["stem"])
         # the audio box delivered: the WAV exists, and verify_take accepts it
@@ -82,7 +85,7 @@ def test_recorded_take_passes_verify_and_coherence(
         rep = json.loads(stem.with_suffix(".json").read_text(encoding="utf-8"))
         assert rep["coherence"]["checked"] >= 1
         assert rep["coherence"]["suspects"] == []
-        # and the JSON's duration IS the WAV's (the 2026-09-26 bug would show)
+        # and the JSON's duration IS the WAV's
         assert abs(rep["duration_s"] - 1.9) < 0.5
         # the big counter followed the take: the take's LAST tick shows the
         # live count of the take itself (the final analysis may read one

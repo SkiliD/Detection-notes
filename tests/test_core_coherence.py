@@ -10,8 +10,8 @@ reason:
 2. **rate per 100 notes + delta**: the drop reads without comparing raw
    counts — 10 suspects over 200 notes beats 3 over 20;
 3. **verify_take in the loop**: a take whose WAV and JSON describe two
-   signals (the 2026-09-26 bug) is flagged in the table and its notes
-   are not counted in the rate;
+   signals is flagged in the table and its notes are not counted in the
+   rate;
 4. **persisted journal**: tidying folders does not rewrite history —
    the delta against the previous session stays reliable;
 5. **published plateau**: every suspect carries its time, pitch and the

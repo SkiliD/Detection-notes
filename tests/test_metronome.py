@@ -12,7 +12,7 @@ import pytest
 
 
 # --------------------------------------------------------------------------- #
-# core.metronome : l'ordonnancement
+# core.metronome: the scheduling
 # --------------------------------------------------------------------------- #
 
 
@@ -96,7 +96,7 @@ def test_beat_delays_are_scheduled_against_the_wall_clock():
 
 
 # --------------------------------------------------------------------------- #
-# gui.clicks : le mixage des clics dans le flux
+# gui.clicks: mixing the clicks into the stream
 # --------------------------------------------------------------------------- #
 
 

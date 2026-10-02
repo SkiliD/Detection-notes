@@ -9,7 +9,7 @@ A4_HZ = 440.0
 # English (sharp) note names, C-based
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
-# French (Latin) solfège names, same pitch-class order.
+# French (Latin) sol-fa names, same pitch-class order.
 NOTE_NAMES_FR = ("Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si")
 
 # kept as a backwards-compatible alias used by earlier revisions

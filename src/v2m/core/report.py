@@ -124,6 +124,11 @@ def export_result(
             if getattr(res, "observation", None) is not None
             else {"checked": 0, "suspects": []}
         ),
+        **(
+            {"manual_pitch_corrections": True}
+            if getattr(res, "manual_pitch_corrections", False)
+            else {}
+        ),
         "rests": [
             {
                 "start_s": round(r.start, 4),

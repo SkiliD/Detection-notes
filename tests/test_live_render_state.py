@@ -1,14 +1,10 @@
 """A live take's render state has ONE owner: LiveRenderState.
 
-Structural regression: the nine scattered attributes (`_live_signal`,
-`_closed_live_notes`, `_live_record_audio`, the pitch cloud, the grid…)
-were reset one by one in `on_start_live` — one miss and the PREVIOUS
-take's value leaked into this one (measured: the exported WAV described
-the earlier take). The take now owns one object and `on_start_live`
-swaps it wholesale: a stale value is structurally impossible, no buffer
-able to survive exists anymore. Tests simulating a mid-take state build
-THIS object (a single entry point), no need to drive the whole window;
-the `win._live_*` faces stay readable on top.
+The state is swapped WHOLESALE in `on_start_live`: a stale value is
+structurally impossible, no buffer able to survive exists anymore.
+Tests simulating a mid-take state build THIS object (a single entry
+point), no need to drive the whole window; the `win._live_*` faces
+stay readable on top.
 """
 
 from __future__ import annotations

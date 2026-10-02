@@ -54,11 +54,10 @@ ALTERNATE_SHARE = 0.75          # period-2 strong/weak agreement: dotted pulse o
 MINORITY_SHARE = 0.30           # the weaker label must still be a real party
 # A real alternation CHANGES label at almost every step (strong-weak-strong);
 # two RUNS (a loud phrase followed by a soft one) agree at lag 2 everywhere
-# while changing label only at the run boundary. Measured family: the four
-# 2026-09-27 takes of one melody — the three healthy ones change 5-8 times
-# per ~16 steps, the one that faked x1.5 (234 BPM) changed ONCE
-# (111111000000000). Below this share of lag-1 changes, the "alternation"
-# is runs: no dotted reading.
+# while changing label only at the run boundary. Measured family: healthy
+# takes change 5-8 times per ~16 steps, a take that faked x1.5 (234 BPM)
+# changed ONCE (111111000000000). Below this share of lag-1 changes, the
+# "alternation" is runs: no dotted reading.
 MIN_CHANGE_SHARE = 0.25
 
 
@@ -101,10 +100,9 @@ def reads_dotted_pulse(notes) -> bool:
         return False
     # the lag-2 agreement above also self-validates two RUNS of constant
     # level (a loud phrase then a soft one): their labels flip only at the
-    # run boundary, a real alternation flips at almost every step. The
-    # 2026-09-27 regression measured the family: `111111000000000` — one
-    # run boundary on 14 steps — scored 11/13 at lag 2 and faked x1.5
-    # (156 -> 234 BPM) on a take whose three siblings read ~156 directly.
+    # run boundary, a real alternation flips at almost every step.
+    # `111111000000000` — one run boundary on 14 steps — scores 11/13 at
+    # lag 2 and fakes the x1.5 reading; the share guard refuses it.
     changes = sum(1 for a, b in zip(labels[1:], labels) if a != b)
     return changes / (len(labels) - 1) >= MIN_CHANGE_SHARE
 

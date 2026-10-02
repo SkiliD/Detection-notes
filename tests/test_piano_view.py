@@ -6,11 +6,21 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtTest import QTest
 
 from v2m.core.liveseg import LiveNote
 from v2m.core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI
 from v2m.core.notes import Note
-from v2m.gui.widgets import PianoRoll, PianoView, PitchAxis, WaveformView, figure_color
+from v2m.gui.widgets import (
+    ACCENT,
+    PianoRoll,
+    PianoView,
+    PitchAxis,
+    WaveformView,
+    figure_color,
+)
 
 
 @pytest.fixture(scope="module")
@@ -33,6 +43,20 @@ def test_set_notes_indexes_spans(qapp):
     pv.set_notes(_notes())
     assert set(pv._spans) == {60, 64, 61}
     assert pv._spans[60] == [(0.0, 0.5)]
+
+
+def test_clicking_the_piano_emits_the_key_under_the_pointer(qapp):
+    pv = PianoView(min_midi=60, max_midi=64)
+    pv.resize(500, 100)
+    pv.show()
+    clicked = []
+    pv.key_clicked.connect(clicked.append)
+
+    QTest.mouseClick(pv, Qt.MouseButton.LeftButton, pos=QPoint(50, 80))
+    assert clicked == [60]
+
+    QTest.mouseClick(pv, Qt.MouseButton.LeftButton, pos=QPoint(130, 20))
+    assert clicked[-1] == 61  # C# overlays the adjacent white keys
 
 
 def test_playhead_lights_sounding_keys_only(qapp):
@@ -67,9 +91,8 @@ def test_the_keyboard_range_is_a_parameter(qapp):
 
 
 def test_every_black_key_of_the_piano_is_drawn(qapp):
-    """Regression: the keyboard drew only a C# and an F# per octave (the
-    rule tested the wrong pitch classes), so D#, G# and A# did not exist
-    — no other black note could ever light."""
+    """Every black key is drawn: the rule must test the right pitch
+    classes, all five black notes per octave can light."""
     pv = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
     drawn = {
         pv._white_midi(i) + 1
@@ -250,6 +273,129 @@ def test_seek_moves_the_playhead_without_yanking_the_view(qapp):
     assert _xrange(roll)[0] > 0.0
 
 
+# ------------------------------------------------------- graph selection
+
+
+def _ev(roll, ev_type, t: float, midi: float, held: Qt.MouseButton) -> QMouseEvent:
+    """A real QMouseEvent aimed at a (time, pitch) data point.
+
+    The position is expressed in VIEWPORT coordinates — what `_hit`
+    maps back through `mapToScene`, exactly like an event delivered by
+    QGraphicsView's viewport routing. `held` is the button mask (the
+    button that caused a press/release is always the left one).
+    """
+    vb = roll.getPlotItem().vb
+    scene = vb.mapViewToScene(QPointF(t, midi))
+    vp_point = roll.viewport().mapFrom(roll, roll.mapFromScene(scene))
+    point = QPointF(vp_point)
+    cause = (
+        Qt.MouseButton.NoButton
+        if ev_type == QEvent.Type.MouseMove
+        else Qt.MouseButton.LeftButton
+    )
+    return QMouseEvent(
+        ev_type, point, scene, point, cause, held, Qt.KeyboardModifier.NoModifier
+    )
+
+
+def _selectable_roll() -> PianoRoll:
+    roll = PianoRoll(selectable=True)
+    roll.resize(640, 480)
+    roll.set_notes(_notes())
+    return roll
+
+
+def test_pressing_a_bar_selects_and_emits_that_note(qapp):
+    roll = _selectable_roll()
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton))
+    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.25, 60, Qt.MouseButton.NoButton))
+
+    assert got == [[0]]  # one press = one note, one emission
+    assert roll._selection == [0]
+    assert roll._bar_items[0].opts["brush"] == ACCENT
+    assert roll._bar_items[1].opts["brush"] == roll._color_for_conf(0.9)  # untouched
+
+
+def test_dragging_across_bars_extends_the_range_and_an_empty_click_clears(qapp):
+    roll = _selectable_roll()
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    # press on note 0, drag onto note 1…
+    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton))
+    roll.mouseMoveEvent(_ev(roll, QEvent.Type.MouseMove, 0.75, 64, Qt.MouseButton.LeftButton))
+    # …over a gap (t=0.5, off-pitch): the range built so far is kept
+    roll.mouseMoveEvent(_ev(roll, QEvent.Type.MouseMove, 0.5, 62, Qt.MouseButton.LeftButton))
+    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.5, 62, Qt.MouseButton.NoButton))
+    assert got == [[0], [0, 1]]
+    assert roll._selection == [0, 1]
+
+    # a click on empty space (no pan) clears the selection
+    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.75, 70, Qt.MouseButton.LeftButton))
+    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.75, 70, Qt.MouseButton.NoButton))
+    assert got == [[0], [0, 1], []]
+    assert roll._selection == []
+    assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
+
+
+def test_a_non_selectable_roll_ignores_the_whole_gesture(qapp):
+    """The live page's roll has no table: `selectable` gates both the
+    gesture AND a pushed selection — a stray call can never highlight it."""
+    roll = PianoRoll()
+    roll.resize(640, 480)
+    roll.set_notes(_notes())
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton))
+    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.25, 60, Qt.MouseButton.NoButton))
+    assert got == []
+
+    roll.set_selection([0])
+    assert roll._selection == []
+    assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
+
+
+def test_a_rebuild_keeps_the_selection_visible(qapp):
+    """set_notes rebuilds every bar (figure labeling, mode toggle): the
+    highlight must survive it, since the TABLE still holds the selection."""
+    roll = _selectable_roll()
+    roll.set_selection([1])
+    assert roll._bar_items[1].opts["brush"] == ACCENT
+
+    roll.set_notes(_notes(), force=True)  # a full rebuild
+    assert roll._bar_items[1].opts["brush"] == ACCENT
+    assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
+
+    roll.set_selection([])  # cleared: the bar's own color comes back
+    assert roll._bar_items[1].opts["brush"] == roll._color_for_conf(0.9)
+
+
+def test_set_selectable_gates_both_directions_and_clears_the_pick(qapp):
+    """The live roll's take lifecycle: frozen out during a capture, open
+    when the take stops — and starting the next take drops whatever was
+    picked, from the highlight and from the gesture alike."""
+    roll = PianoRoll(selectable=True)
+    roll.resize(640, 480)
+    roll.set_notes(_notes())
+    roll.set_selection([1])
+    assert roll._bar_items[1].opts["brush"] == ACCENT
+
+    roll.set_selectable(False)  # the next take begins
+    assert roll._selection == []
+    assert roll._bar_items[1].opts["brush"] == roll._color_for_conf(0.9)
+    roll.set_selection([0])  # both directions refused
+    assert roll._selection == []
+
+    roll.set_selectable(True)  # the take stopped: the notes open up
+    roll.set_selection([0])
+    assert roll._selection == [0]
+    assert roll._bar_items[0].opts["brush"] == ACCENT
+
+
 # ---------------------------------------------------------------- waveform
 
 
@@ -261,8 +407,8 @@ def _envelope(wf: WaveformView) -> tuple[float, float, int]:
 
 
 def test_waveform_envelope_keeps_the_true_peaks(qapp):
-    """Regression: the preview decimated one point in N, so isolated peaks
-    disappeared and a long take looked flat."""
+    """The envelope keeps the true peaks: a naive one-point-in-N decimation
+    makes isolated peaks disappear and a long take look flat."""
     wf = WaveformView()
     y = np.zeros(600_000, dtype=np.float32)  # x12 decimation at display
     y[5] = 1.0                               # peak never reached by y[::12]

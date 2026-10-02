@@ -107,12 +107,10 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 class LiveSession:
     """The `v2m live` adapter: print a shared LiveTake, export its result.
 
-    Lived in `v2m/live.py` until 2026-09-28 — two modules answered to
-    "the live session" (this CLI adapter and the core's `LiveTake`, the
-    actual owner) and the name could not be trusted when navigating.
-    The adapter is thin by construction (~60 lines of printing and the
-    export call): it is absorbed here, and "live session" now names ONE
-    module — `core/live_session.py`. Consumption-only, per ADR 0001.
+    One module answers to "the live session" — `core/live_session.py`,
+    the actual owner; this CLI adapter is thin by construction (~60
+    lines of printing and the export call) and lives here so the name
+    stays unambiguous when navigating. Consumption-only, per ADR 0001.
     """
 
     def __init__(self, min_conf: float = LIVE_CONF, transpose: int = 0, out_stem: str | None = None):

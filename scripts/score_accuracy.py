@@ -85,7 +85,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 # --------------------------------------------------------------------------- #
-# Analyse
+# Analysis
 # --------------------------------------------------------------------------- #
 
 
@@ -233,7 +233,7 @@ def live_diagnosis(path: str) -> dict:
 
 
 def notes_table(result) -> list[str]:
-    """Une ligne par note : hauteur, temps, figure, position, force."""
+    """One line per note: pitch, time, figure, position, strength."""
     lines = []
     positions = result.note_positions or []
     for i, n in enumerate(result.notes):

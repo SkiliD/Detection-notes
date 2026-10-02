@@ -15,9 +15,10 @@ SR = 22_050
 def _sandbox_language_file(tmp_path_factory):
     """The suite neither reads nor writes the user's ~/.v2m_lang.
 
-    Regression: a manual `--lang en` (or an anglophone user's persisted
-    choice) made the suite NON-reproducible — `cli.main` without --lang
-    and MainWindow both call `get_language()`, which re-read that file
+    Without the sandbox a manual `--lang en` (or an anglophone user's
+    persisted choice) makes the suite NON-reproducible — `cli.main`
+    without --lang and MainWindow both call `get_language()`, which
+    re-reads that file
     mid-run and flipped the whole process to English: the tests that
     expect French (the `match="décoder"` asserts, the `tr("progress
     done")` stage labels) failed depending on ambient state. We also
@@ -43,11 +44,20 @@ def _sandbox_language_file(tmp_path_factory):
 #   2026-09-27 101.7 s   677 tests  → 190 s (5 real-time replays total)
 #   2026-09-27 106.5 s   696 tests  → 197 s (weekly/retention features)
 #   2026-09-28 109.3 s   721 tests  → 205 s (comments EN sweep, no
-#                                     runtime effect)
-#   2026-09-28  81.0 s   727 tests  → 150 s (both diagnostic scripts
+#                                     runtime effect)#   2026-09-28  81.0 s   727 tests  →  150 s (both diagnostic scripts
 #                                     run in-process, the error_paths
 #                                     take analyzed once — see AGENTS.md
 #                                     Diagnostics)
+#   2026-10-02 131.9 s   853 tests — GREEN but a LOADED machine, not an
+#                                     idle calibration: the 31 s replay
+#                                     deadline wait was removed this day
+#                                     (the fake feed delivers the take's
+#                                     own audio, ~27 s saved) and the same
+#                                     files re-ran ×1.45 slower than
+#                                     earlier the same day (16.65 →
+#                                     24.23 s). Budget untouched; rerun
+#                                     on an idle machine before any
+#                                     recalibration.
 # Load margin measured the same day (spinning hog processes): 84.1 s
 # at ~60 % of 8 cores, 90.4 s at ~87 %, but 197.2 s at ~half of ONE
 # core (×2.43) — the factor covers load and ~1.8x uniform slowdown,
