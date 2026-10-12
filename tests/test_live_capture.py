@@ -66,7 +66,10 @@ def test_on_block_runs_on_a_dedicated_thread(monkeypatch):
     # the test would call the callback from the main thread: on_block must
     # NOT run there (that is the whole point of the split)
     seen: list[tuple[float, float, str]] = []
-    cap = _capture(monkeypatch, lambda blk, t: seen.append((blk[0], t, threading.current_thread().name)))
+    cap = _capture(
+        monkeypatch,
+        lambda blk, t: seen.append((blk[0], t, threading.current_thread().name)),
+    )
     try:
         _push(cap, 0.25, n=3)
         assert _wait(lambda: len(seen) == 3), "the blocks never reached on_block"
@@ -138,11 +141,38 @@ def test_a_stop_past_the_join_timeout_counts_the_dropped_blocks(monkeypatch):
         release.set()
         if cap._worker is not None and cap._worker.is_alive():
             cap._worker.join(2.0)
-    assert cap.dropped >= 2, (
-        f"the queued-but-never-handled blocks were not counted: dropped={cap.dropped}"
+    assert cap.dropped == 2, (
+        "the two queued audio blocks must be counted exactly; the stop sentinel "
+        f"is not audio: dropped={cap.dropped}"
     )
     # the WAV side is complete regardless: the callback archived every block
     assert len(cap.chunks) == 3
+
+
+def test_drain_min_witnesses_a_mid_take_starvation_that_recovers(monkeypatch):
+    """A take that starved and RECOVERED reads dropped=0 and progress 1.0 at
+    stop: the worst mid-take sample the drain itself took is the only
+    witness the hunger left."""
+    first_done = threading.Event()
+    release = threading.Event()
+
+    def on_block(block, t):
+        if not first_done.is_set():
+            first_done.set()
+            release.wait(2.0)  # the first block ties the drain up
+
+    cap = _capture(monkeypatch, on_block)
+    try:
+        _push(cap, 0.1, 3)  # 1 in flight, 2 queued behind it
+        assert _wait(first_done.is_set), "the drain never picked up the first block"
+    finally:
+        release.set()
+        cap.stop()
+    # everything was handled in the end: the stop-time numbers are clean
+    assert cap.dropped == 0
+    assert cap.drain_progress() > 0.99
+    # ... but the worst sample survived the recovery (1 handled / 2 queued)
+    assert cap.drain_min < 0.5, f"drain_min={cap.drain_min}"
 
 
 def test_drain_progress_reports_one_when_the_dsp_keeps_up(monkeypatch):

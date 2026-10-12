@@ -15,9 +15,7 @@ Three rules pinned here:
 
 from __future__ import annotations
 
-import json
-
-from v2m.core.explain import explain, write_breakdown_file
+from v2m.core.explain import explain
 
 
 def _block(**overrides) -> dict:
@@ -55,16 +53,3 @@ def test_the_off1_family_reads_as_a_rounding_not_a_mistake():
     line = explain(_block(moved=0, absorbed=0))[1]
     # the sentence names the recadre/rounding nature (fr or en per language)
     assert ("arrondi" in line) or ("rounding" in line)
-
-
-def test_write_breakdown_file_archives_beside_the_artifacts(tmp_path):
-    stem = tmp_path / "live_20260927_090000"
-    path = write_breakdown_file(stem, _block())
-    assert path is not None and path.endswith(".live_vs_final.json")
-    block = json.loads((tmp_path / "live_20260927_090000.live_vs_final.json").read_text(encoding="utf-8"))
-    assert block["off1"] == 11
-
-
-def test_write_breakdown_file_is_best_effort():
-    # an empty block: nothing to archive, no file, None — never an error
-    assert write_breakdown_file("/nonexistent-dir-xyz/take", {}) is None

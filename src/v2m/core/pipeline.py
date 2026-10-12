@@ -216,9 +216,11 @@ def interpret_observation(
     report(0.96, tr("progress rests"))
     # breaths between phrases, written as rests on the score. An addition,
     # never a prerequisite: any failure here degrades to no rests at all
-    # instead of costing the analysis the user already waited for.
+    # instead of costing the analysis the user already waited for. The
+    # observation rides along so a rest with a HEARD air intake is marked
+    # `breath` (the score shows where the singer actually took air).
     try:
-        rests = detect_rests(notes, grid)
+        rests = detect_rests(notes, grid, observation=observation)
     except (TypeError, ValueError, AttributeError):
         rests = []
 

@@ -101,11 +101,18 @@ docker-compose.override.yml
 /_dbg.log
 /out_dir
 adr/
-docs/
+docs/*
 docs/adr/
+!/docs/
+/docs/*
+!/docs/agents/
+/docs/agents/*
+!/docs/agents/issue-tracker.md
+!/docs/agents/domain.md
 /out*
 # prises_verite: the TAKES and truths stay personal (wav/json), but the
 # README committing the format and the non-drift fingerprints are tracked
 /prises_verite/*
 !/prises_verite/README.md
 !/prises_verite/*.fingerprint.json
+.superpowers

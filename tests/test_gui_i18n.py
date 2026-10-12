@@ -58,6 +58,53 @@ def test_file_dialog_speaks_the_current_language(qapp, monkeypatch):
         win.on_open_file()
         assert seen["title"] == "Choose an audio file"
         assert "All files" in seen["filter"]
+
+        save_dialog: dict[str, str] = {}
+
+        def fake_get_save_file_name(
+            parent, caption, directory, file_filter, initialFilter, options=None
+        ):  # noqa: ANN001
+            # the fake mirrors PyQt6's real signature with NO **kwargs: an
+            # invalid keyword (e.g. the PyQt5-era selectedFilter) raises
+            # TypeError here exactly as the real binding does
+            save_dialog.update(
+                title=caption,
+                filename=directory,
+                filters=file_filter,
+                initial_filter=initialFilter,
+            )
+            return "", ""
+
+        monkeypatch.setattr(
+            QFileDialog, "getSaveFileName", staticmethod(fake_get_save_file_name)
+        )
+        win._choose_export_destination(
+            mw.AnalysisResult(
+                source="/music/song.wav",
+                duration_s=1.0,
+                notes=[],
+                tempo=None,
+                key=None,
+            )
+        )
+        assert save_dialog["title"] == "Save export"
+        assert save_dialog["filename"].endswith("song.mid")
+        assert "MIDI (*.mid)" in save_dialog["filters"]
+        assert "MusicXML score (*.musicxml)" in save_dialog["filters"]
+        assert save_dialog["initial_filter"] == save_dialog["filters"].split(";;")[0]
+
+        set_language("fr")
+        win._choose_export_destination(
+            mw.AnalysisResult(
+                source="/music/chanson.wav",
+                duration_s=1.0,
+                notes=[],
+                tempo=None,
+                key=None,
+            )
+        )
+        assert save_dialog["title"] == "Enregistrer l'export"
+        assert "Partition MusicXML (*.musicxml)" in save_dialog["filters"]
     finally:
         win.close()
 
@@ -177,4 +224,78 @@ def test_results_panel_shows_the_tuning_offset_with_advice(qapp):
         panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": None}))
         assert "+0.0 c" in panel._values["key tuning offset"].text()
     finally:
+        panel.deleteLater()
+
+
+def test_results_panel_shows_the_per_take_intonation_report(qapp):
+    """The intonation row reads the SAME `intonation.summarize` the JSON
+    block carries: share of in-tune notes, a named tendency (only when
+    MIN_NOTES notes and MIN_CENTS back it), and the register leans."""
+    from types import SimpleNamespace
+
+    from v2m.core.i18n import set_language
+    from v2m.gui.widgets import ResultsPanel
+
+    # 12 notes, all sharp-leaning: each register band holds MIN_NOTES notes,
+    # so the mid and high leans are announced while the low band (a 2.5 c
+    # mean) stays silent — the summary invents nothing
+    notes = [
+        SimpleNamespace(midi=55, deviation=0.02, figure="noire"),
+        SimpleNamespace(midi=57, deviation=0.03, figure="noire"),
+        SimpleNamespace(midi=59, deviation=0.02, figure="noire"),
+        SimpleNamespace(midi=60, deviation=0.03, figure="noire"),
+        SimpleNamespace(midi=61, deviation=0.05, figure="noire"),
+        SimpleNamespace(midi=63, deviation=0.10, figure="noire"),
+        SimpleNamespace(midi=64, deviation=0.15, figure="noire"),
+        SimpleNamespace(midi=65, deviation=0.25, figure="noire"),
+        SimpleNamespace(midi=67, deviation=0.28, figure="noire"),
+        SimpleNamespace(midi=69, deviation=0.30, figure="noire"),
+        SimpleNamespace(midi=71, deviation=0.30, figure="noire"),
+        SimpleNamespace(midi=72, deviation=0.28, figure="noire"),
+    ]
+    res = SimpleNamespace(
+        source="take.wav", duration_s=1.0, tempo=None, meter=None,
+        key=None, chord=None, notes=notes,
+    )
+    panel = ResultsPanel()
+    try:
+        set_language("fr")
+        panel.set_results(res)
+        txt = panel._values["key intonation"].text()
+        assert "50 % de notes justes" in txt, txt
+        assert "tendance" in txt and "au-dessus" in txt, txt
+        assert "médiums" in txt and "+14 c" in txt, txt
+        assert "aigus" in txt and "+29 c" in txt, txt
+        assert "graves" not in txt, txt  # the low band's mean is 2.5 c: silent
+
+        set_language("en")
+        panel.set_results(res)
+        txt = panel._values["key intonation"].text()
+        assert "50% in tune" in txt, txt
+        assert "above" in txt and "mid +14 c" in txt, txt
+    finally:
+        set_language("fr")
+        panel.deleteLater()
+
+
+def test_results_panel_intonation_stays_silent_without_evidence(qapp):
+    """No notes, no report: the row shows the placeholder, never a
+    fabricated percentage."""
+    from types import SimpleNamespace
+
+    from v2m.core.i18n import set_language
+    from v2m.gui.widgets import ResultsPanel
+
+    panel = ResultsPanel()
+    try:
+        set_language("fr")
+        panel.set_results(
+            SimpleNamespace(
+                source="take.wav", duration_s=1.0, tempo=None, meter=None,
+                key=None, chord=None, notes=[],
+            )
+        )
+        assert panel._values["key intonation"].text() == "—"
+    finally:
+        set_language("fr")
         panel.deleteLater()

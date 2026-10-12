@@ -104,12 +104,28 @@ def test_the_take_name_grammar_round_trips_through_its_owner():
         assert parse_take_name(not_a_take) is None, not_a_take
 
 
-def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch):
+def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch, capsys):
     """The CLI path `v2m live` ends in the dedicated sub-folder, like the GUI."""
     from v2m.cli import LiveSession
 
     monkeypatch.chdir(tmp_path)  # the take lands under tmp, not the repo root
+    from v2m import cli
+    monkeypatch.setattr(
+        cli, "live_export_dir", lambda stem: tmp_path / "prises_live" / Path(stem).name
+    )
+    def archive_sidecar(stem, block):
+        Path(f"{stem}.live_vs_final.json").write_text(json.dumps(block), encoding="utf-8")
+        return True
+
+    monkeypatch.setattr("v2m.core.take_export._archive_sidecar", archive_sidecar)
+    retention_calls = []
+    monkeypatch.setattr(
+        "v2m.core.take_export._prune_takes",
+        lambda: retention_calls.append("pruned") or ("live_old",),
+    )
     session = LiveSession()
+    session.take._result = analyze_signal(_melody(), SR, source="live")
+    session.take._result.live_vs_final = {"live": 4, "final": 4, "rate": 0.0}
     # Pretend a capture happened: enough signal to pass the length gate.
     # The fake capture lives ON the take (its single owner): the adapter
     # no longer mirrors it — export() goes through LiveTake.finalize.
@@ -128,6 +144,42 @@ def test_cli_live_session_exports_into_a_per_take_folder(tmp_path, monkeypatch):
     assert Path(returned).exists()
     for ext in ARTIFACT_EXTENSIONS:
         assert (take_dir / f"{session.out_stem}{ext}").exists(), f"{ext} missing"
+    assert (take_dir / f"{session.out_stem}.wav").exists()
+    assert (take_dir / f"{session.out_stem}.live_vs_final.json").exists()
+    assert retention_calls == ["pruned"]
+    out, _ = capsys.readouterr()
+    assert f"{session.out_stem}.live_vs_final.json" in out
+
+
+def test_cli_live_wav_warning_is_rendered_but_transcription_survives(
+    tmp_path, monkeypatch, capsys
+):
+    """A failed WAV emits the receipt warning while all data files still write."""
+    from v2m.cli import LiveSession
+    from v2m.core import audio_io
+
+    monkeypatch.chdir(tmp_path)
+    from v2m import cli
+    monkeypatch.setattr(
+        cli, "live_export_dir",
+        lambda stem: tmp_path / "takes" / Path(stem).name,
+    )
+    monkeypatch.setattr(
+        audio_io, "save_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr("v2m.core.take_export._prune_takes", lambda: ())
+    session = LiveSession(out_stem="live_test")
+    session.take._result = analyze_signal(_melody(), SR, source="live")
+    session.take._signal = sine_note(220.0, 1.5)
+    session.take._state = "stopped"
+
+    returned = session.export()
+
+    out, err = capsys.readouterr()
+    assert returned is not None and Path(returned).exists()
+    assert "disk full" in err
+    assert "live_test.mid" in out
 
 
 def test_live_exports_are_isolated_per_take(tmp_path):

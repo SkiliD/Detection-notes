@@ -18,6 +18,7 @@ class FakeCapture:
 
     samplerate = 22_050
     dropped = 0  # the honesty counter (a stop past the join timeout)
+    drain_min = 1.0  # the drain's own mid-take witness
 
     def __init__(self, **kwargs):
         self.on_block = kwargs["on_block"]
@@ -61,6 +62,47 @@ def test_live_take_stop_is_idempotent(monkeypatch):
     assert [event.kind for event in events] == ["stopped"]
 
 
+def test_note_event_carries_pitch_readings_from_the_processed_block(monkeypatch):
+    """Queued GUI delivery keeps each block's confirmation facts intact."""
+
+    class FakeSegmenter:
+        def current(self):
+            return (60.0, 261.6)
+
+        def confirmed(self):
+            return (60.0, 261.6)
+
+        def heard(self):
+            return (60.0, 261.6)
+
+    class FakeStream:
+        def __init__(self, _sr, gate_rms):
+            assert gate_rms > 0
+            self.seg = FakeSegmenter()
+
+        def elapsed_notes(self):
+            return 0
+
+        def feed(self, _block, _t):
+            return 0.1, []
+
+    monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
+    monkeypatch.setattr(live_session, "LivePitchStream", FakeStream)
+    events = []
+    take = live_session.LiveTake(on_event=events.append)
+    take.start()
+    take._on_block(np.zeros(128, dtype=np.float32), 0.1)
+
+    note_event = next(event for event in events if event.kind == "note")
+    assert note_event.pitch == (60.0, 261.6)
+    assert note_event.confirmed_pitch == (60.0, 261.6)
+    assert note_event.heard_pitch == (60.0, 261.6)
+    assert note_event.confirmed_pitch is not None
+    assert note_event.heard_pitch is not None
+    assert note_event.confirmed_pitch == note_event.pitch
+    assert note_event.heard_pitch == note_event.pitch
+
+
 def test_dropped_blocks_reach_the_take_surface(monkeypatch):
     # the capture's dropped counter is readable through the take's surface
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
@@ -68,6 +110,27 @@ def test_dropped_blocks_reach_the_take_surface(monkeypatch):
     take.start()
     _capture(take).dropped = 7
     assert take.dropped_blocks == 7
+
+
+def test_finalize_archives_the_dropped_blocks_in_its_block(monkeypatch):
+    """The honesty counter rides IN the take's live_vs_final block: the
+    report JSON and the archived sidecar read the same dict."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
+    monkeypatch.setattr(
+        live_session,
+        "analyze_signal",
+        lambda signal, sr, source, opts: SimpleNamespace(notes=[], grid=None),
+    )
+    take = live_session.LiveTake()
+    take.start()
+    _capture(take).dropped = 5
+    _capture(take).drain_min = 0.42
+    result, _signal = take.finalize()
+    assert result.live_vs_final is not None
+    assert result.live_vs_final["dropped"] == 5
+    assert result.live_vs_final["drain_min"] == 0.42
 
 
 def test_live_take_reuses_final_result(monkeypatch):

@@ -27,6 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from v2m.core import coherence as coh
+from v2m.core import retention as ret
 from v2m.core.replay import engine_fingerprint
 from v2m.core import weekly as wk
 from v2m.core.i18n import set_language
@@ -106,7 +107,7 @@ def test_orphan_observation_caches_are_removed(tmp_path):
     (d / "live_20260927_090000.observation.npz").write_bytes(b"0" * 512)
     # the ORPHAN: no WAV sibling, the cache can never be matched again
     (tmp_path / "live_20260920_090000.observation.npz").write_bytes(b"0" * 512)
-    removed = coh.prune_observations(tmp_path)
+    removed = ret.prune_observations(tmp_path)
     assert removed == 1
     assert not (tmp_path / "live_20260920_090000.observation.npz").exists()
     assert (d / "live_20260927_090000.observation.npz").exists()
@@ -119,7 +120,7 @@ def test_retention_trims_oldest_takes_whole_and_keeps_the_journal(tmp_path):
     _take_dir(tmp_path, "live_20260920_090000", size_kb=600)
     _take_dir(tmp_path, "live_20260921_090000", size_kb=600, with_cache=True)
     _take_dir(tmp_path, "live_20260927_090000", size_kb=4)
-    pruned = coh.prune_takes(tmp_path, max_mb=1)
+    pruned = ret.prune_takes(tmp_path, max_mb=1)
     # the OLDEST was trimmed whole; the journal and the recent take survive
     assert pruned == ["live_20260920_090000"]
     assert not (tmp_path / "live_20260920_090000").exists()
@@ -133,8 +134,33 @@ def test_retention_trims_oldest_takes_whole_and_keeps_the_journal(tmp_path):
 
 def test_retention_disabled_with_negative_budget(tmp_path):
     _take_dir(tmp_path, "live_20260920_090000", size_kb=600)
-    assert coh.prune_takes(tmp_path, max_mb=-1) == []
+    assert ret.prune_takes(tmp_path, max_mb=-1) == []
     assert (tmp_path / "live_20260920_090000").exists()
+
+
+def test_v2m_weekly_runs_both_retention_sweeps(tmp_path, monkeypatch, capsys):
+    """The recap folder is the moment to trim: `v2m weekly` runs the
+    orphan-cache sweep AND the take-folder budget, and announces the
+    stems it deleted."""
+    from argparse import Namespace
+
+    from v2m.cli import _cmd_weekly
+
+    calls: dict = {}
+
+    def fake_observations(root):
+        calls["obs"] = root
+        return 0
+
+    def fake_takes(root):
+        calls["takes"] = root
+        return ["live_old"]
+
+    monkeypatch.setattr(ret, "prune_observations", fake_observations)
+    monkeypatch.setattr(ret, "prune_takes", fake_takes)
+    assert _cmd_weekly(Namespace(root=str(tmp_path), pdf=False)) == 0
+    assert calls["obs"] == tmp_path and calls["takes"] == tmp_path
+    assert "live_old" in capsys.readouterr().out  # the announcement names it
 
 
 # --------------------------------------------------------------------------- #

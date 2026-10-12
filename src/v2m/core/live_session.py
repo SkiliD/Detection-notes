@@ -39,6 +39,8 @@ class LiveEvent:
     time_s: float = 0.0
     rms: float = 0.0
     pitch: tuple[float, float] | None = None
+    confirmed_pitch: tuple[float, float] | None = None
+    heard_pitch: tuple[float, float] | None = None
     note: "LiveNote | None" = None
     grid: BeatGrid | None = None
     signal: np.ndarray | None = None
@@ -156,7 +158,18 @@ class LiveTake:
         self._emit(LiveEvent("block", time_s=t, rms=rms))
         for frame_t, hz in frames:
             self._emit(LiveEvent("pitch", time_s=frame_t, pitch=(frame_t, hz)))
-        self._emit(LiveEvent("note", time_s=t, pitch=self.stream.seg.current()))
+        segmenter = self.stream.seg
+        confirmed = getattr(segmenter, "confirmed", None)
+        heard = getattr(segmenter, "heard", None)
+        self._emit(
+            LiveEvent(
+                "note",
+                time_s=t,
+                pitch=segmenter.current(),
+                confirmed_pitch=confirmed() if confirmed is not None else None,
+                heard_pitch=heard() if heard is not None else None,
+            )
+        )
         if self.stream.elapsed_notes() > before:
             self._apply_grid_policy(notes=self.stream.seg.notes, now_s=t)
 
@@ -211,6 +224,11 @@ class LiveTake:
         """
         return self.capture.dropped if self.capture is not None else 0
 
+    @property
+    def drain_min(self) -> float:
+        """The capture's worst mid-take drain progress (1.0 = never behind)."""
+        return self.capture.drain_min if self.capture is not None else 1.0
+
     def stop(self) -> np.ndarray:
         """Stop once, drain captured blocks, flush segmentation, keep signal."""
         if self._state == "stopped":
@@ -255,18 +273,22 @@ class LiveTake:
         except Exception as exc:
             self._fail(exc)
         try:
-            from .compare import breakdown
+            from .compare import breakdown, invalidate
 
             result.live_vs_final = breakdown(
                 self.segmenter.notes if self.segmenter else [],
                 result.notes,
                 result.grid,
+                # the honesty counters travel IN the block: the report JSON
+                # and the archived sidecar read this one dict
+                dropped=self.dropped_blocks,
+                drain_min=self.drain_min,
             )
         except Exception:
             # the attach itself can fail (a result that cannot even carry the
             # attribute): the nicety must not cost the take in ANY case
             try:
-                result.live_vs_final = None
+                invalidate(result)
             except Exception:
                 pass
         self._result = result

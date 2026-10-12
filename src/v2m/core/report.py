@@ -135,6 +135,7 @@ def export_result(
                 "end_s": round(r.end, 4),
                 "duration_s": round(r.duration, 4),
                 "figure": r.figure,
+                "breath": bool(getattr(r, "breath", False)),
             }
             for r in (getattr(res, "rests", None) or [])
         ],

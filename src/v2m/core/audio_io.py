@@ -124,6 +124,11 @@ class LiveCapture:
     # `_n_drained` feeds `drain_progress()`.
     _n_drained: int = field(default=0, repr=False)
     _n_dropped: int = field(default=0, repr=False)
+    # The drain samples its OWN progress after every handled block; the
+    # WORST sample is the take's witness. No extra thread, no timer: the
+    # sampling rides the loop that already exists, and a mid-take starvation
+    # that the stop-time snapshot never sees is still in the number.
+    _worst_drain: float = field(default=1.0, repr=False)
 
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
         if status:
@@ -152,6 +157,11 @@ class LiveCapture:
                 print(f"[live] {e}")
             finally:
                 self._n_drained += 1
+                # the drain's own witness: sample AFTER the bookkeeping, when
+                # the backlog this block left behind is already counted
+                progress = self.drain_progress()
+                if progress < self._worst_drain:
+                    self._worst_drain = progress
 
     def elapsed(self) -> float:
         return self._n_samples / self.samplerate
@@ -160,6 +170,18 @@ class LiveCapture:
     def dropped(self) -> int:
         """Blocks the drain abandoned (a stop past the join timeout)."""
         return self._n_dropped
+
+    @property
+    def drain_min(self) -> float:
+        """The WORST drain progress the drain itself observed mid-take.
+
+        `drain_progress()` answers only when someone asks; the moment a
+        take starved and RECOVERED, the stop-time snapshot reads 1.0 and
+        the starvation is invisible. The drain samples after every block,
+        so the worst sample survives the recovery — a hollow live note
+        count whose counters all look clean has this number to blame.
+        """
+        return self._worst_drain
 
     def drain_progress(self) -> float:
         """Drained / captured blocks (~1.0 when the DSP keeps up).
@@ -203,7 +225,10 @@ class LiveCapture:
                 # dying), so the final analysis still reads the take whole —
                 # but this take's live reading has holes, and the counters
                 # must say so instead of a silently hollow note count.
-                self._n_dropped = max(0, self._queue.qsize())
+                # The sentinel marks the end of the backlog; if the worker
+                # is still processing a block, it remains queued and is not
+                # one of the captured audio blocks abandoned here.
+                self._n_dropped = max(0, self._queue.qsize() - 1)
             self._worker = None
 
     def signal(self) -> np.ndarray:

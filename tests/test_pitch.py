@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
 from conftest import SR, sine_note
+
+from v2m.core import pitch
 from v2m.core.music import hz_to_midi
 from v2m.core.pitch import YinBlock, track_pitch_offline, yin_pitch
 
@@ -195,3 +196,213 @@ def test_pyin_two_octaves():
     last_half = np.median(track.hz[voiced][-len(voiced) // 2 :])
     assert abs(hz_to_midi(first_half) - 57.0) < 0.7   # A3 = 220 Hz
     assert abs(hz_to_midi(last_half) - 81.0) < 0.7    # A5 = 880 Hz
+
+
+# ---------------------------------------------------------------------
+# the swallow rescue: the block-wise second reading (finalization)
+# ---------------------------------------------------------------------
+def _burst_signal(sr: int = SR, note_hz: float = 220.0, burst_s: float = 0.12,
+                  at_s: float = 0.5, noise: float = 0.10) -> np.ndarray:
+    """Silence with one short voiced burst: the swallowed-note shape.
+
+    The burst carries noise (a voice's breathiness), not a pure sine: a
+    pure sine is already voiced by pYIN (measured 11 frames on 120 ms) —
+    the swallow needs the noise-voiced shape.
+    """
+    y = np.zeros(sr * 2, dtype=np.float32)
+    n = int(burst_s * sr)
+    i0 = int(at_s * sr)
+    t = np.arange(n) / sr
+    rng = np.random.default_rng(3)
+    y[i0:i0 + n] = (
+        0.3 * np.sin(2 * np.pi * note_hz * t)
+        + noise * rng.standard_normal(n)
+    ).astype(np.float32)
+    return y
+
+
+def test_rescue_grafts_a_swallowed_voiced_burst_into_the_curve():
+    """A 120 ms voiced burst pYIN leaves NaN becomes a voiced span.
+
+    The long 2048 window reads no period there; the short-window sweep
+    (the live geometry) does, and the curve inherits it — voiced frames
+    AT the burst's pitch, the swallow the finalization used to miss.
+    """
+    y = _burst_signal()
+    import librosa
+    f0, _vf, vprob = librosa.pyin(
+        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=SR, frame_length=2048,
+        hop_length=441, fill_na=np.nan,
+    )
+    rescued_s = pitch._rescue_swallowed_spans(y, SR, 441, f0, vprob)
+    assert rescued_s > 0.0
+    voiced = ~np.isnan(f0)
+    assert voiced.sum() >= 4
+    hz = f0[voiced]
+    assert np.all(np.abs(hz - 220.0) / 220.0 < 0.05)
+
+
+def test_rescue_refuses_a_true_silence_and_a_breath_noise():
+    """Below the absolute gate, and noise without sustained period: no graft.
+
+    A true silence stays a silence (the level gate is absolute, ADR 0003's
+    no-relative-floor rule); breath-shaped noise (no periodicity at the
+    short window) is never voiced — voice presence is answered by a curve.
+    """
+    y = np.zeros(SR * 2, dtype=np.float32)
+    # a quiet NON-periodic burst (noise) at gate-clearing level
+    i0 = int(0.5 * SR)
+    rng = np.random.default_rng(7)
+    y[i0:i0 + int(0.12 * SR)] = (0.15 * rng.standard_normal(int(0.12 * SR))).astype(np.float32)
+    import librosa
+    f0, _vf, vprob = librosa.pyin(
+        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=SR, frame_length=2048,
+        hop_length=441, fill_na=np.nan,
+    )
+    rescued_s = pitch._rescue_swallowed_spans(y, SR, 441, f0, vprob)
+    assert rescued_s == 0.0
+    assert np.isnan(f0).all()
+
+
+def test_rescue_refuses_a_legato_ramp_between_two_pitches():
+    """A ramp relaying the neighbouring plateaus is a glide, not a note.
+
+    The measured intruder shape: grafting a ramp's median sprouted a fake
+    note between two sung ones. The spread bound refuses a wide ramp; the
+    bridge guard refuses a narrow one that starts on one neighbour's pitch
+    and ends on the other's.
+    """
+    sr = SR
+    y = np.zeros(sr * 2, dtype=np.float32)
+    seg0 = sine_note(220.0, 0.8, sr=sr)  # A3
+    seg1 = sine_note(293.66, 0.8, sr=sr)  # D4
+    y[: len(seg0)] = seg0
+    y[len(y) - len(seg1):] = seg1
+    # a 120 ms ramp sliding 220 -> 293.66 between them
+    n_ramp = int(0.12 * sr)
+    i0 = len(seg0)
+    t = np.arange(n_ramp) / sr
+    f_start, f_end = 220.0, 293.66
+    phase = 2 * np.pi * np.cumsum(f_start + (f_end - f_start) * (t / t[-1]) / sr)
+    y[i0:i0 + n_ramp] = (0.3 * np.sin(phase)).astype(np.float32)
+    import librosa
+    f0, _vf, vprob = librosa.pyin(
+        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=sr, frame_length=2048,
+        hop_length=441, fill_na=np.nan,
+    )
+    rescued_s = pitch._rescue_swallowed_spans(y, sr, 441, f0, vprob)
+    assert rescued_s == 0.0
+
+
+def test_rescue_reads_only_fully_absent_spans():
+    """A voiced-but-doubtful frame keeps pYIN's reading: never overwritten.
+
+    Overwriting a low-confidence-but-present reading re-dates boundaries
+    (measured: a real take's BPM moved 5 %) — the swallow shape is a span
+    the long window read NOWHERE (NaN throughout).
+    """
+    # the real take's own evidence: a rescue call must not touch any frame
+    # pYIN voiced, and on a fully-voiced span list there is nothing to read
+    import librosa
+    y = sine_note(220.0, 1.0, sr=SR)
+    f0, _vf, vprob = librosa.pyin(
+        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=SR, frame_length=2048,
+        hop_length=441, fill_na=np.nan,
+    )
+    snapshot = f0.copy()
+    rescued_s = pitch._rescue_swallowed_spans(y, SR, 441, f0, vprob)
+    assert rescued_s == 0.0
+    assert np.array_equal(f0, snapshot)
+
+
+def test_yin_pitch_closed_form_matches_the_reference_loop():
+    """The vectorized d'(tau) IS the literal YIN loop, within float64 eps.
+
+    The closed form (cumsum + one FFT autocorrelation) replaced the
+    per-tau `np.mean` loop that cost 57 % of the live DSP (profiled on a
+    real take: 655k mean dispatches for 981 frames). The thresholds
+    (0.15 / MIN_PITCH_QUALITY 0.35 / the 0.6 fallback) are calibrated on
+    the loop's MEAN definition, so this pin refuses any drift of the
+    table they read — the calibration survives the optimization.
+    """
+    from v2m.core.pitch import FMIN
+
+    def reference_dprime(x: np.ndarray) -> np.ndarray:
+        w = len(x)
+        tau_max = min(w - 1, int(SR / FMIN))
+        d = np.zeros(tau_max + 1)
+        for tau in range(1, tau_max + 1):
+            diff = x[: w - tau] - x[tau:]
+            d[tau] = np.mean(diff * diff)
+        cum = np.cumsum(d[1:]) / np.arange(1, tau_max + 1)
+        return d[1:] / np.where(cum == 0, 1e-12, cum)
+
+    def closed_dprime(x: np.ndarray) -> np.ndarray:
+        w = len(x)
+        tau_max = min(w - 1, int(SR / FMIN))
+        csum = np.concatenate(([0.0], np.cumsum(x * x)))
+        total = csum[w]
+        n_fft = 1
+        while n_fft < 2 * w:
+            n_fft <<= 1
+        spec = np.fft.rfft(x, n_fft)
+        r = np.fft.irfft(spec * np.conj(spec), n_fft)[:w]
+        taus = np.arange(1, tau_max + 1)
+        d = np.empty(tau_max + 1)
+        d[0] = 0.0
+        d[1:] = (csum[w - taus] + (total - csum[taus]) - 2.0 * r[taus]) / (w - taus)
+        cum = np.cumsum(d[1:]) / taus
+        return d[1:] / np.where(cum == 0, 1e-12, cum)
+
+    rng = np.random.default_rng(11)
+    for hz in (82.4, 220.0, 440.0, 1046.5):
+        t = np.arange(1024) / SR
+        x = np.sin(2 * np.pi * hz * t) + 0.05 * rng.standard_normal(1024)
+        ref, closed = reference_dprime(x), closed_dprime(x)
+        assert np.abs(closed - ref).max() < 1e-9
+        # the function reads THAT table and stays on pitch
+        quality: dict = {}
+        hz_read = yin_pitch(x, SR, quality_out=quality)
+        assert hz_read == hz_read
+        assert abs(hz_read - hz) / hz < 0.01
+
+
+def test_batched_pyin_matches_librosa_candidate_and_viterbi_tracks():
+    """The compiled candidate batches preserve pYIN's full pitch reading."""
+    import librosa
+
+    from v2m.core.pitch import FMAX, FMIN, _pyin_batched
+
+    # Include voiced sections, a silence, and a changing pitch so this pins
+    # threshold fallback, candidate-bin collisions, and Viterbi transitions.
+    parts = []
+    for hz, duration in ((220.0, 0.28), (None, 0.09), (261.6256, 0.31), (329.6276, 0.25)):
+        count = round(SR * duration)
+        times = np.arange(count) / SR
+        tone = np.zeros(count) if hz is None else 0.3 * np.sin(2 * np.pi * hz * times)
+        parts.append(tone)
+    signal = np.concatenate(parts).astype(np.float32)
+    hop = 441
+    reference = librosa.pyin(
+        signal,
+        fmin=FMIN,
+        fmax=FMAX,
+        sr=SR,
+        frame_length=2048,
+        hop_length=hop,
+        fill_na=np.nan,
+    )
+
+    for batch_size in (1, 17, 384):
+        actual = _pyin_batched(signal, SR, hop, batch_size=batch_size)
+        assert np.array_equal(actual[0], reference[0], equal_nan=True)
+        assert np.array_equal(actual[1], reference[1])
+        assert np.allclose(actual[2], reference[2], rtol=0.0, atol=1e-12)
+
+
+def test_batched_pyin_rejects_nonpositive_batch_size():
+    """A zero batch must fail early instead of silently returning an empty track."""
+    from v2m.core.pitch import _pyin_batched
+
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        _pyin_batched(np.ones(SR, dtype=np.float32), SR, 441, batch_size=0)

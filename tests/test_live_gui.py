@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from v2m.core import audio_io
+from v2m.core import take_export as te
 
 MELODY_HZ = [220.0, 261.63, 293.66, 329.63]  # A3 C4 D4 E4
 TONE_S = 0.35
@@ -94,7 +95,7 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
     monkeypatch.setattr(sd, "InputStream", FakeMic)
     exported: list[tuple] = []
     monkeypatch.setattr(
-        mw, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
+        te, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
     )
 
     win = mw.MainWindow()
@@ -109,8 +110,13 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         live_thread = win.live_thread
         assert live_thread is not None
 
-        # during capture: closed notes are already on the piano roll and
-        # on the scrolling staff
+        # during capture: the page groups capture settings, monitoring and
+        # feedback, while the roll and staff already show closed notes.
+        from v2m.core.i18n import tr
+
+        assert win.page_live.box_controls.title() == tr("ui live controls")
+        assert win.page_live.box_monitor.title() == tr("ui live monitor")
+        assert win.page_live.box_feedback.title() == tr("ui live feedback")
         seg = live_thread.segmenter
         assert seg is not None and seg.notes, "no note detected during live"
         assert win.page_live.piano_live._bar_items, "the live piano roll stayed empty"
@@ -140,6 +146,18 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         assert win.stack.currentWidget() is win.page_results
         assert len(win.page_results.piano._bar_items) == len(result.notes)
         assert win.page_results.piano_keys._spans
+        from v2m.core.i18n import tr, tr_key_label
+
+        summary = win.page_results.label_summary.text()
+        assert summary == tr("ui summary facts").format(
+            notes=len(result.notes),
+            duration=result.duration_s,
+            tempo=f"{result.tempo.bpm:.0f} BPM",
+            key=tr_key_label(result.key.best.label) if result.key is not None else "—",
+        )
+        assert win.page_results.summary_card.title() == tr("ui take summary")
+        assert win.page_results.progress.value() == 100
+        assert win.page_results.details_scroll.isHidden()
         staff_notes = win.page_results.staff.layout().notes
         assert len(staff_notes) == len(result.notes), "the staff does not follow the analysis"
         assert all(1 <= n.measure for n in staff_notes)
@@ -159,7 +177,7 @@ def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatc
     monkeypatch.setattr(sd, "InputStream", FakeMic)
     exported: list[tuple] = []
     monkeypatch.setattr(
-        mw, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
+        te, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
     )
 
     win = mw.MainWindow()
@@ -238,13 +256,13 @@ def test_audition_clip_of_a_real_resing_contains_the_new_singing(qapp, monkeypat
     frequency is gone."""
     import sounddevice as sd
 
-    from v2m.core.pipeline import AnalysisResult
     from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
     monkeypatch.setattr(
-        mw, "export_result", lambda res, stem, **kw: None  # the decision waits
+        te, "export_result", lambda res, stem, **kw: None  # the decision waits
     )
 
     win = mw.MainWindow()
@@ -470,8 +488,8 @@ def test_state_dropdown_jumps_to_any_previous_state(qapp, monkeypatch):
     equivalent to walking undo/redo steps, and the timeline keeps the
     states the jump passed (a slider on the take's past AND future)."""
     from v2m.core.i18n import get_language, set_language, tr
-    from v2m.core.pipeline import AnalysisResult
     from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
     from v2m.core.tempo import TempoResult
     from v2m.gui import main_window as mw
 
@@ -538,8 +556,8 @@ def test_state_dropdown_jumps_to_any_previous_state(qapp, monkeypatch):
 def test_audition_original_plays_the_selected_span_of_the_current_audio(qapp, monkeypatch):
     """▷ plays the selected notes' span of the CURRENT take's audio — the
     like-for-like companion of the re-sung phrase's audition clip."""
-    from v2m.core.pipeline import AnalysisResult
     from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
     from v2m.core.tempo import TempoResult
     from v2m.gui import main_window as mw
 
@@ -834,6 +852,224 @@ def test_del_that_would_empty_the_take_is_refused_and_announced(qapp):
         win.close()
 
 
+def test_the_status_bar_reports_a_deletion_and_a_correction(qapp):
+    """Both note edits acknowledge themselves where the eye already is:
+    the status bar names the repaired note, then the removed count."""
+    from v2m.core.i18n import note_display_pair, tr
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    result = AnalysisResult(
+        source="song.wav",
+        duration_s=1.5,
+        notes=[Note(0.1, 0.4, 60, 0.9), Note(0.5, 0.8, 64, 0.9)],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    win.result = result
+    win._show_result(result)
+    try:
+        table = win.page_results.results._notes_table
+        table.selectRow(0)
+        win.page_results.piano_keys.key_clicked.emit(62)  # correct one note
+        assert win.statusBar().currentMessage() == tr(
+            "ui status note corrected"
+        ).format(note=note_display_pair(62))
+
+        table.selectRow(1)
+        win.on_delete_selection()
+        assert win.statusBar().currentMessage() == tr(
+            "ui status notes deleted"
+        ).format(n=1)
+    finally:
+        win.close()
+
+
+def test_results_page_final_render_sets_name_progress_and_signal(qapp, monkeypatch):
+    """The final render owns its canonical label, completion and views."""
+    from v2m.core.i18n import set_language, tr
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    page = win.page_results
+    received = []
+    monkeypatch.setattr(
+        page.waveform,
+        "set_signal",
+        lambda signal, sr: received.append((signal, sr)),
+    )
+    file_result = AnalysisResult(
+        source="/music/song.wav",
+        duration_s=1.0,
+        notes=[],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    audio = np.linspace(-0.1, 0.1, 32, dtype=np.float32)
+    page.set_progress(37)
+    try:
+        page.set_result(file_result, audio)
+        assert page.label_file.text() == "song.wav"
+        assert page.summary_card.title() == tr("ui take summary")
+        assert page.label_summary.text() == tr("ui summary facts").format(
+            notes=0, duration=1.0, tempo="—", key="—"
+        )
+        assert page.details_toggle.text() == tr("ui show details")
+        assert page.details_scroll.isHidden()
+        assert page.progress.value() == 100
+
+        set_language("en")
+        page.retranslate()
+        assert page.summary_card.title() == "Your transcription"
+        assert page.label_summary.text() == "0 notes · 1.0 s · — · —"
+        assert page.details_toggle.text() == "＋ Show details"
+        page.details_toggle.setChecked(True)
+        assert page.details_toggle.text() == "− Hide details"
+        set_language("fr")
+        page.retranslate()
+        assert page.summary_card.title() == tr("ui take summary")
+        assert page.details_toggle.text() == tr("ui hide details")
+        assert received == [(audio, audio_io.SR)]
+
+        page.details_toggle.setChecked(True)
+        assert not page.details_scroll.isHidden()
+        assert page.details_toggle.text() == tr("ui hide details")
+        page.details_toggle.setChecked(False)
+        assert page.details_scroll.isHidden()
+
+        page.set_result(file_result, None)
+        page.set_result(file_result, np.zeros(0, dtype=np.float32))
+        assert received == [(audio, audio_io.SR)]  # absent audio preserves the waveform
+
+        live_result = AnalysisResult(
+            source="live",
+            duration_s=1.0,
+            notes=[],
+            tempo=None,
+            key=None,
+            pitch=None,
+        )
+        live_audio = np.ones(16, dtype=np.float32)
+        page.set_result(live_result, live_audio)
+        assert page.label_file.text() == tr("ui live file")
+        assert page.details_scroll.isHidden()
+        assert page.details_toggle.text() == tr("ui show details")
+        assert not page.btn_live_roll.isHidden()
+        assert received[-1] == (live_audio, audio_io.SR)
+    finally:
+        win.close()
+
+
+def test_show_result_resolves_audio_in_main_window_before_rendering(qapp, monkeypatch):
+    """The window resolves explicit, cached-file and current-live audio."""
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    received = []
+    monkeypatch.setattr(
+        win.page_results.waveform,
+        "set_signal",
+        lambda signal, sr: received.append(signal),
+    )
+    file_result = AnalysisResult(
+        source="/music/song.wav",
+        duration_s=1.0,
+        notes=[],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    cached = np.full(8, 0.1, dtype=np.float32)
+    explicit = np.full(8, 0.2, dtype=np.float32)
+    live = np.full(8, 0.3, dtype=np.float32)
+    try:
+        win._signal_cache = {file_result.source: cached}
+        win._show_result(file_result)
+        win._show_result(file_result, explicit)
+        assert received == [cached, explicit]
+
+        # No cache or live signal means the old waveform is left alone.
+        win._signal_cache = {}
+        win._show_result(file_result)
+        assert received == [cached, explicit]
+
+        live_result = AnalysisResult(
+            source="live",
+            duration_s=1.0,
+            notes=[],
+            tempo=None,
+            key=None,
+            pitch=None,
+        )
+        win._live_signal = live
+        win._show_result(live_result)
+        win._show_result(live_result, explicit)
+        assert received == [cached, explicit, live, explicit]
+    finally:
+        win.close()
+
+
+def test_the_results_page_reaches_the_frozen_live_roll(qapp):
+    """A live take offers a way back to its captured roll from the final
+    analysis; a file take never does. Review is the page's own mode, and
+    the way back to the results is one click."""
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    file_result = AnalysisResult(
+        source="song.wav",
+        duration_s=1.0,
+        notes=[Note(0.2, 0.7, 60, 0.9)],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    win.result = file_result
+    win._show_result(file_result)
+    try:
+        page = win.page_results
+        assert page.btn_live_roll.isHidden()  # a file take has no captured roll
+
+        live_result = AnalysisResult(
+            source="live",
+            duration_s=1.0,
+            notes=[Note(0.2, 0.7, 60, 0.9)],
+            tempo=None,
+            key=None,
+            pitch=None,
+        )
+        win.result = live_result
+        win._show_result(live_result)
+        assert not page.btn_live_roll.isHidden()
+
+        win.on_show_live_roll()
+        assert win.stack.currentWidget() is win.page_live
+        assert win.page_live.review_active()
+        assert not win.page_live.btn_review_back.isHidden()
+
+        win.on_exit_live_roll()
+        assert win.stack.currentWidget() is win.page_results
+        assert not win.page_live.review_active()
+        assert win.page_live.btn_review_back.isHidden()
+
+        # stopping (no capture running here) leaves the review behind
+        win.on_show_live_roll()
+        assert win.page_live.review_active()
+        win.on_stop_live()
+        assert not win.page_live.review_active()
+        assert win.page_live.btn_review_back.isHidden()
+    finally:
+        win.close()
+
+
 def test_the_live_roll_is_pickable_only_after_the_take_stops(qapp, monkeypatch):
     """A running take's roll is never picked; once the take stops its closed
     notes sit frozen on the live page and open up for read-only exploring —
@@ -876,11 +1112,17 @@ def test_finder_keyboard_audition_replaces_the_previous_note(qapp, monkeypatch):
     win = mw.MainWindow()
     played: list[str] = []
     try:
+        staged: list = []
+        monkeypatch.setattr(
+            win.playback,
+            "set_sources",
+            lambda **kw: staged.append(kw.get("piano")),
+        )
         monkeypatch.setattr(win.playback, "play", lambda mode: played.append(mode) or True)
-        win.on_audition_finder_note(60)
-        first = win._finder_audition.copy()
-        win.on_audition_finder_note(64)
-        second = win._finder_audition.copy()
+        win.on_audition_key(60)
+        first = staged[-1].copy()
+        win.on_audition_key(64)
+        second = staged[-1].copy()
         assert played == ["piano", "piano"]
         assert not np.array_equal(first, second)
         win.page_finder.leave()
@@ -899,7 +1141,7 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
-    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    monkeypatch.setattr(te, "export_result", lambda res, stem, **kw: None)
 
     win = mw.MainWindow()
     try:
@@ -944,7 +1186,7 @@ def test_a_failed_take_leaves_a_trace_in_its_folder(qapp, monkeypatch, tmp_path)
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
-    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    monkeypatch.setattr(te, "export_result", lambda res, stem, **kw: None)
     monkeypatch.setattr(takes, "LIVE_TAKES_DIR", tmp_path)  # the trace stays in the test
 
     win = mw.MainWindow()
@@ -1002,7 +1244,7 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
     monkeypatch.setattr(sd, "InputStream", FakeMic)
     exported: list[tuple] = []
     monkeypatch.setattr(
-        mw, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
+        te, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
     )
 
     win = mw.MainWindow()
@@ -1339,6 +1581,139 @@ def test_stopped_take_announces_the_dropped_blocks(qapp, monkeypatch):
         win.close()
 
 
+def test_dragging_a_bar_moves_the_note_as_one_recorded_edit(qapp):
+    """The roll's drag lands through `on_note_moved` like a correction: ONE
+    whole-state snapshot, the note changed, the announcement out, and one
+    undo restores the take."""
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    result = AnalysisResult(
+        source="song.wav",
+        duration_s=2.0,
+        notes=[Note(0.1, 0.5, 60, 0.9), Note(0.6, 1.0, 64, 0.9)],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    win.result = result
+    win._show_result(result)
+    try:
+        win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
+        moved = result.notes[1]
+        assert (moved.start, moved.end, moved.midi) == (0.7, 1.1, 62)
+        assert "déplacée" in win.statusBar().currentMessage(), (
+            win.statusBar().currentMessage()
+        )
+        assert win._edit_history.can_undo
+        win.on_undo_edit()
+        restored = win.result.notes[1]  # the undo lands a restored COPY
+        assert (restored.start, restored.end, restored.midi) == (0.6, 1.0, 64)
+    finally:
+        win.close()
+
+
+def test_a_drag_is_refused_where_no_edit_may_happen(qapp):
+    """The shared edit guard answers NO off the results page: the emitted
+    drag changes nothing and the bar snaps back (the roll already restored
+    its own preview)."""
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    result = AnalysisResult(
+        source="song.wav",
+        duration_s=2.0,
+        notes=[Note(0.1, 0.5, 60, 0.9), Note(0.6, 1.0, 64, 0.9)],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    win.result = result
+    win._show_result(result)
+    try:
+        win.on_back_home()  # the edits live on the results page only
+        win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
+        assert [(n.start, n.end, n.midi) for n in result.notes] == [
+            (0.1, 0.5, 60), (0.6, 1.0, 64),
+        ]
+        assert not win._edit_history.can_undo
+    finally:
+        win.close()
+
+
+def test_the_roll_drag_state_machine_previews_and_publishes_one_move(qapp):
+    """The drag's mechanics: MOVE slides the whole bar, RESIZE (last
+    quarter) drags its right edge, the pitch rides in whole semitones,
+    the preview clamps to the neighbours, a no-op release emits nothing
+    and the bar always lands back on the real note."""
+    from v2m.core.notes import Note
+    from v2m.gui.widgets import PianoRoll
+
+    piano = PianoRoll(selectable=True)
+    piano.set_editable(True)
+    notes = [
+        Note(0.1, 0.5, 60, 0.9),
+        Note(0.6, 1.0, 64, 0.9),
+        Note(1.1, 1.5, 67, 0.9),
+    ]
+    piano.set_notes(notes)
+    captured: list[tuple] = []
+    piano.note_dragged.connect(lambda i, s, e, m: captured.append((i, s, e, m)))
+    try:
+        # MOVE: the bar slides right by 0.1 s and up two semitones
+        piano._begin_note_drag(1, 0.7, 64.0)
+        piano._preview_note_drag(0.8, 66.4)
+        assert piano._bar_items[1].opts["x0"][0] == pytest.approx(0.7)
+        piano._end_note_drag(0.8, 66.4)
+        assert captured == [(1, pytest.approx(0.7), pytest.approx(1.1), 66)]
+        assert piano._bar_items[1].opts["x1"] == [1.0]  # snapped back on the truth
+
+        # RESIZE: the grab sits in the bar's last quarter, the right edge
+        # follows the DELTA (release at 1.0 = +0.05 over the grab)
+        piano._begin_note_drag(1, 0.95, 64.0)  # 0.95 >= 0.6 + 0.75*0.4
+        piano._end_note_drag(1.00, 64.0)
+        assert captured[-1] == (1, pytest.approx(0.6), pytest.approx(1.05), 64)
+
+        # the clamp: a move may not cross the next note's onset
+        piano._begin_note_drag(1, 0.7, 64.0)
+        piano._end_note_drag(1.4, 64.0)  # would need end 1.5 > next start 1.1
+        assert captured[-1] == (1, pytest.approx(0.7), pytest.approx(1.1), 64)
+
+        # a release with no movement publishes nothing
+        piano._begin_note_drag(1, 0.7, 64.0)
+        piano._end_note_drag(0.7, 64.0)
+        assert len(captured) == 3
+    finally:
+        piano.deleteLater()
+
+
+def test_ctrl_c_at_the_console_closes_the_window(qapp):
+    """Ctrl+C never raises KeyboardInterrupt into a Qt slot (PyQt aborts the
+    process on an unhandled slot exception): the installed handler routes
+    SIGINT through the window's own close path."""
+    import signal as signal_module
+
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    previous = signal_module.getsignal(signal_module.SIGINT)
+    closed = []
+    win.close = lambda: closed.append(1) or True  # type: ignore[method-assign]
+    try:
+        mw._install_console_quit(qapp, win)
+        handler = signal_module.getsignal(signal_module.SIGINT)
+        assert handler is not None and handler is not signal_module.default_int_handler
+        handler(signal_module.SIGINT, None)
+        assert closed, "SIGINT did not reach the window's close path"
+    finally:
+        signal_module.signal(signal_module.SIGINT, previous)
+        win.close()
+
+
 def test_reinterpret_button_rereads_evidence_without_pyin(qapp, monkeypatch):
     """↻ re-run the analysis: the interpretation alone, never pYIN or
     decoding (via the cached observation). The proof is the same as the
@@ -1406,6 +1781,228 @@ def test_reinterpret_button_rereads_evidence_without_pyin(qapp, monkeypatch):
         win.close()
 
 
+def test_full_reanalysis_uses_retained_audio_and_publishes_only_on_success(qapp, monkeypatch):
+    """The full action sends audio to pYIN and only then replaces the reading."""
+    from v2m.core.i18n import tr
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    class SignalProbe:
+        def __init__(self):
+            self.slots = []
+
+        def connect(self, slot):
+            self.slots.append(slot)
+
+        def emit(self, *args):
+            for slot in tuple(self.slots):
+                slot(*args)
+
+    class FakeWorker:
+        def __init__(self, signal, sr, source, opts):
+            self.audio = signal.copy()
+            self.sr = sr
+            self.source = source
+            self.opts = opts
+            self.progress = SignalProbe()
+            self.finishedOk = SignalProbe()
+            self.failed = SignalProbe()
+            self.finished = SignalProbe()
+            self.running = False
+
+        def start(self):
+            self.running = True
+
+        def isRunning(self):
+            return self.running
+
+        def succeed(self, result):
+            self.finishedOk.emit(result)
+            self.running = False
+            self.finished.emit()
+
+        def fail(self, message):
+            self.failed.emit(message)
+            self.running = False
+            self.finished.emit()
+
+    monkeypatch.setattr(mw, "FullReanalysisThread", FakeWorker)
+    win = mw.MainWindow()
+    audio = np.linspace(-0.2, 0.2, 512, dtype=np.float32)
+    original = AnalysisResult(
+        source="voice.wav",
+        duration_s=1.0,
+        notes=[Note(0.1, 0.5, 60, 0.9)],
+        tempo=None,
+        key=None,
+    )
+    win.result = original
+    win._signal_cache = {original.source: audio}
+    win._show_result(original, audio)
+    try:
+        win.page_results.spin_min_note.setValue(80)
+        win.page_results.btn_full_reanalyze.click()
+        worker = win._full_reanalysis_thread
+        assert isinstance(worker, FakeWorker)
+        assert worker.audio.dtype == np.float32
+        assert np.array_equal(worker.audio, audio)
+        assert worker.source == original.source
+        assert worker.opts.min_note_s == pytest.approx(0.08)
+        assert win.result is original  # the previous reading remains until success
+        assert win.page_results._full_reanalysis_active
+        assert not win.page_results.btn_export.isEnabled()
+
+        worker.progress.emit(0.42, "Tracking pitch (pYIN)...")
+        assert win.page_results.progress.value() == 42
+        assert win.page_results.label_play_pos.text() == "Tracking pitch (pYIN)..."
+
+        updated = AnalysisResult(
+            source="worker-source",
+            duration_s=1.0,
+            notes=[Note(0.1, 0.3, 57, 0.9), Note(0.4, 0.7, 60, 0.9)],
+            tempo=None,
+            key=None,
+        )
+        worker.succeed(updated)
+        assert win.result is updated
+        assert win.result.source == original.source
+        assert np.array_equal(win._signal_cache[original.source], audio)
+        assert win.page_results.results._values["key notes count"].text() == "2"
+        assert not win.page_results._full_reanalysis_active
+        assert win.page_results.btn_export.isEnabled()
+        assert win.statusBar().currentMessage() == tr("ui status full reanalyzed").format(n=2)
+    finally:
+        win.close()
+
+
+def test_full_reanalysis_failure_preserves_result_and_audio(qapp, monkeypatch):
+    """A failed pYIN pass unlocks the view but retains the last valid take."""
+    from v2m.core.i18n import tr
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    class SignalProbe:
+        def __init__(self):
+            self.slots = []
+
+        def connect(self, slot):
+            self.slots.append(slot)
+
+        def emit(self, *args):
+            for slot in tuple(self.slots):
+                slot(*args)
+
+    class FakeWorker:
+        def __init__(self, signal, sr, source, opts):
+            self.progress = SignalProbe()
+            self.finishedOk = SignalProbe()
+            self.failed = SignalProbe()
+            self.finished = SignalProbe()
+            self.running = False
+
+        def start(self):
+            self.running = True
+
+        def isRunning(self):
+            return self.running
+
+        def fail(self, message):
+            self.failed.emit(message)
+            self.running = False
+            self.finished.emit()
+
+    monkeypatch.setattr(mw, "FullReanalysisThread", FakeWorker)
+    win = mw.MainWindow()
+    audio = np.ones(128, dtype=np.float32)
+    original = AnalysisResult(
+        source="voice.wav",
+        duration_s=1.0,
+        notes=[Note(0.1, 0.5, 60, 0.9)],
+        tempo=None,
+        key=None,
+    )
+    win.result = original
+    win._signal_cache = {original.source: audio}
+    win._show_result(original, audio)
+    try:
+        win.on_full_reanalyze()
+        worker = win._full_reanalysis_thread
+        assert isinstance(worker, FakeWorker)
+        worker.fail("pYIN failed")
+
+        assert win.result is original
+        assert np.array_equal(win._signal_cache[original.source], audio)
+        assert not win.page_results._full_reanalysis_active
+        assert win.page_results.btn_export.isEnabled()
+        assert tr("err full reanalysis failed").format(e="pYIN failed") in win.error_banner.text()
+    finally:
+        win.close()
+
+
+def test_full_reanalysis_requires_available_audio(qapp):
+    from v2m.core.i18n import tr
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        win.result = AnalysisResult(
+            source="missing.wav",
+            duration_s=1.0,
+            notes=[],
+            tempo=None,
+            key=None,
+        )
+        win.on_full_reanalyze()
+        assert tr("err full reanalysis audio") in win.error_banner.text()
+        assert win._full_reanalysis_thread is None
+    finally:
+        win.close()
+
+
+def test_results_control_column_scrolls_at_compact_window_height(qapp):
+    """The diagnostics and lower actions stay reachable without enlarging."""
+    from PyQt6.QtCore import QRect
+
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    result = AnalysisResult(
+        source="voice.wav",
+        duration_s=4.0,
+        notes=[Note(i * 0.4, i * 0.4 + 0.25, 60 + i % 5, 0.9) for i in range(8)],
+        tempo=None,
+        key=None,
+    )
+    win.result = result
+    win._show_result(result, np.ones(4 * audio_io.SR, dtype=np.float32))
+    try:
+        win.resize(1100, 420)
+        win.show()
+        win.page_results.details_toggle.setChecked(True)
+        qapp.processEvents()
+        page = win.page_results
+        assert not page.details_scroll.isHidden()
+        assert page.right_scroll.verticalScrollBar().maximum() > 0
+
+        page.right_scroll.verticalScrollBar().setValue(
+            page.right_scroll.verticalScrollBar().maximum()
+        )
+        qapp.processEvents()
+        button_rect = QRect(
+            page.btn_open.mapTo(page.right_scroll.viewport(), page.btn_open.rect().topLeft()),
+            page.btn_open.size(),
+        )
+        assert page.right_scroll.viewport().rect().intersects(button_rect)
+        assert button_rect.bottom() <= page.right_scroll.viewport().rect().bottom()
+    finally:
+        win.close()
+
+
 def test_reinterpret_button_errors_without_evidence(qapp):
     """Without a cached observation, the button warns instead of crashing."""
     from v2m.core.i18n import tr
@@ -1448,5 +2045,204 @@ def test_live_keyboard_marks_expected_pitch(qapp):
         # +20 cents on the right note: amber (NEAR), not a binary match
         win._on_live_note((60.2, 264.6))
         assert win.page_live.piano_live_keys._active_colors[60] == AMBER_COLOR
+    finally:
+        win.close()
+
+
+def test_live_intonation_feedback_fills_as_notes_close(qapp):
+    """The take-so-far intonation line: the report's words on the live page.
+
+    Fed by CLOSED live notes only (the core's `note_closed` event), the
+    share and the tendency arrive when the evidence carries them — and
+    the wording is the per-take report's own (one rendering, two views).
+    """
+    from v2m.core.i18n import tr
+    from v2m.core.liveseg import LiveNote
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        assert win.page_live.label_intonation.text() == ""
+        for i, d in enumerate((-0.25,) * 3):
+            win.page_live.on_live_note_closed(
+                LiveNote(start=i * 0.4, end=i * 0.4 + 0.3, midi=60, dev=d)
+            )
+        # 3 notes: the share is there, the tendency is not yet
+        txt = win.page_live.label_intonation.text()
+        assert tr("ui intonation share").format(share=0) in txt, txt
+        assert "tendance" not in txt and "tendency" not in txt, txt
+        win.page_live.on_live_note_closed(LiveNote(1.2, 1.5, 60, dev=-0.25))
+        # 4 flat notes: the report's tendency line appears
+        txt = win.page_live.label_intonation.text()
+        expected = tr("ui intonation tendency").format(
+            dir=tr("ui intonation flat").format(cents=-25.0)
+        )
+        assert expected in txt, txt
+
+        # the worker's event reaches the page through its Qt signal
+        from v2m.core.live_session import LiveEvent
+
+        live_thread = mw.LiveThread()
+        live_thread.liveNoteClosed.connect(win.page_live.on_live_note_closed)
+        live_thread._on_take_event(
+            LiveEvent(kind="note_closed", note=LiveNote(1.6, 1.9, 60, dev=-0.25))
+        )
+        summary = win.page_live.intonation.summary()
+        assert summary["n_notes"] == 5
+    finally:
+        win.close()
+
+
+def test_live_intonation_feedback_follows_the_language_switch(qapp):
+    """A hot-switch mid-take re-labels the feedback line (mirror rule)."""
+    from v2m.core.i18n import set_language, tr
+    from v2m.core.liveseg import LiveNote
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        set_language("fr")
+        for i in range(4):
+            win.page_live.on_live_note_closed(
+                LiveNote(start=i * 0.4, end=i * 0.4 + 0.3, midi=60, dev=-0.25)
+            )
+        assert "en dessous" in win.page_live.label_intonation.text()
+        set_language("en")
+        win.page_live.retranslate()
+        assert "below" in win.page_live.label_intonation.text()
+        assert tr("ui intonation even") == "steady"  # sanity: en table active
+    finally:
+        set_language("fr")
+        win.close()
+
+
+def test_releasing_a_drag_auditions_the_note_before_then_after(qapp, monkeypatch):
+    """The drag's companion: the OLD note sounds, then the moved one.
+
+    Both clips come from the piano engine at the take's own gain; the
+    first clip's completion (the 33 ms tick's clock) plays the second,
+    and the second's completion leaves the fact silent.
+    """
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    result = AnalysisResult(
+        source="song.wav",
+        duration_s=2.0,
+        notes=[Note(0.1, 0.5, 60, 0.9), Note(0.6, 1.0, 64, 0.9)],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    win.result = result
+    win._show_result(result)
+    try:
+        assert win._auditions.active_identity is None
+        played: list[str] = []
+        monkeypatch.setattr(
+            win.playback, "play", lambda mode, t=0.0: played.append(mode) or True
+        )
+        win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
+
+        moved = result.notes[1]
+        assert (moved.start, moved.end, moved.midi) == (0.7, 1.1, 62)
+        # the controller owns the sequence: the drag identity is active
+        assert win._auditions.active_kind == "drag"
+        # the FIRST clip is the OLD note's render, and it is playing
+        assert played == ["piano"]
+        assert win.playback.playing is False  # play() is stubbed here
+        assert len(win.playback.piano) > 0
+        old = Note(0.6, 1.0, 64, 0.9)
+        assert np.array_equal(
+            win.playback.piano,
+            win._rendered_note(old),
+        )
+
+        # the first clip finishes -> the tick plays the moved note
+        win.playback.stop()
+        win._on_play_tick()
+        assert win._auditions.active_kind == "drag"  # the second clip runs
+        assert played == ["piano", "piano"]
+        assert np.array_equal(
+            win.playback.piano,
+            win._rendered_note(moved),
+        )
+
+        # the second clip finishes -> the state is spent, nothing restarts
+        win.playback.stop()
+        win._on_play_tick()
+        assert win._auditions.active_identity is None
+        assert played == ["piano", "piano"]
+    finally:
+        win.close()
+
+
+def test_a_stop_or_another_playback_replaces_the_move_audition(qapp, monkeypatch):
+    """One owner of what is sounding: a stop or another start resets it."""
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    result = AnalysisResult(
+        source="song.wav",
+        duration_s=2.0,
+        notes=[Note(0.1, 0.5, 60, 0.9), Note(0.6, 1.0, 64, 0.9)],
+        tempo=None,
+        key=None,
+        pitch=None,
+    )
+    win.result = result
+    win._show_result(result)
+    try:
+        monkeypatch.setattr(win.playback, "play", lambda mode, t=0.0: True)
+        win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
+        assert win._auditions.active_kind == "drag"
+
+        # an explicit stop kills the armed sequence before the second clip
+        win.stop_playback()
+        assert win._auditions.active_identity is None
+
+        # ...and a second audition of the same clip is also spent: the tick
+        # after an explicit stop must NOT resurrect the sequence
+        win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
+        assert win._auditions.active_kind == "drag"
+        win.stop_playback()
+        win._on_play_tick()  # a late tick arriving after the stop
+        assert win._auditions.active_identity is None
+
+        # another playback start (the whole take) replaces the sequence
+        win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
+        win.on_toggle_play()
+        assert win._auditions.active_identity is None  # _start() stopped it first
+    finally:
+        win.close()
+
+
+def test_live_intonation_feedback_carries_the_register_leans(qapp):
+    """The live line ends with the register verdicts, the report's rows.
+
+    The same 12-note pattern the results-panel test uses: each band holds
+    MIN_NOTES notes, so mid and high leans are announced while the low
+    band (a 2.5 c mean) stays silent — through the report's own painter,
+    so the two views cannot drift.
+    """
+    from v2m.core.liveseg import LiveNote
+    from v2m.gui import main_window as mw
+
+    devs = (0.02, 0.03, 0.02, 0.03, 0.05, 0.10, 0.15, 0.25, 0.28, 0.30, 0.30, 0.28)
+    win = mw.MainWindow()
+    try:
+        for i, d in enumerate(devs):
+            win.page_live.on_live_note_closed(
+                LiveNote(start=i * 0.4, end=i * 0.4 + 0.3, midi=55 + i, dev=d)
+            )
+        txt = win.page_live.label_intonation.text()
+        assert "registres" in txt, txt
+        assert "médiums" in txt and "+14 c" in txt, txt
+        assert "aigus" in txt and "+29 c" in txt, txt
+        assert "graves" not in txt, txt  # the low band's mean is 2.5 c: silent
     finally:
         win.close()

@@ -170,3 +170,24 @@ def test_bad_inputs_exit_cleanly(tmp_path):
     rc, _out, err = _run_main(str(text_file))
     assert rc == 1
     assert "Format non pris en charge" in err
+
+
+def test_rescue_cost_is_reported_per_run(tmp_path):
+    """The rescue's own line and JSON block: the sweep is visible per take.
+
+    The facts come from `pitch.pitch_stage_cost()` (one writer: the last
+    reading), so the line never re-times the sweep — and on a synthetic
+    melody whose bursts pYIN already reads, the cost is real while the
+    grafted seconds are 0.0 (the sweep ran, the gates refused).
+    """
+    wav = _wav(tmp_path)
+    report = tmp_path / "mesures.json"
+    rc, out, err = _run_main(wav, "--json", str(report))
+    assert rc == 0, err
+    _expect_line = "Rescue" in out and "grafted" in out
+    assert _expect_line, out
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert "rescue" in data, data.get("rescue")
+    assert set(data["rescue"]) == {"grafted_s", "cost_s"}
+    assert data["rescue"]["cost_s"] >= 0.0
+    assert data["rescue"]["grafted_s"] >= 0.0

@@ -932,6 +932,7 @@ WIDGET_OWNERS = {
     "gui/finder_page.py": "finder Page module",
     # page modules own their screen widgets and behavior
     "gui/home_page.py": "home Page module",
+    "gui/calibration_card.py": "home page's calibration card (in-page guided flow)",
     # the composition window: the stack, the central widget, the banner
     "gui/main_window.py": "window composition (stack, central, banner)",
 }

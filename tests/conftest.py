@@ -121,6 +121,28 @@ def expect_or_dump(cond: bool, msg: str, **state) -> None:
     raise AssertionError("\n".join(parts))
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_live_takes_dir(tmp_path, monkeypatch):
+    """The suite neither reads nor writes the user's prises_live/.
+
+    The coherence aggregator, the weekly recap and the regression banner
+    read `coherence_journal.json` and the take folders under that root:
+    left pointing at the project root, a GUI test's take audit lands in
+    the user's journal AND the real take history decides whether the
+    regression banner fires mid-test (a banner the test never expects).
+    Both module attributes are patched because consumers read them at
+    call time through different modules (`coh.LIVE_TAKES_DIR` in the GUI,
+    a fresh `from .takes import` inside the export path).
+    """
+    from v2m.core import coherence as coh
+    from v2m.core import takes as takes_mod
+
+    root = tmp_path / "prises_live"
+    monkeypatch.setattr(coh, "LIVE_TAKES_DIR", root)
+    monkeypatch.setattr(takes_mod, "LIVE_TAKES_DIR", root)
+    yield
+
+
 def sine_note(hz: float, dur_s: float, sr: int = SR, amp: float = 0.5) -> np.ndarray:
     """Sine wave with a simplified ADSR envelope (avoids clicks)."""
     n = int(dur_s * sr)

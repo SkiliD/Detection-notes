@@ -141,7 +141,13 @@ def _final_reading(take, wav_path: Path, y: np.ndarray):
     re-detected (cheap, librosa beat_track — a fraction of pYIN) because it
     is the caller's argument to the seam, not part of the evidence.
     """
-    from .pipeline import LIVE_CONF, AnalyzeOptions, cached_observation, detect_tempo, interpret_observation
+    from .pipeline import (
+        LIVE_CONF,
+        AnalyzeOptions,
+        cached_observation,
+        detect_tempo,
+        interpret_observation,
+    )
 
     try:
         cached = cached_observation(
@@ -192,8 +198,9 @@ def replay_take(
     replayer); `output_factory` opens an optional monitoring output, skipped
     when None; `stop` is an optional predicate polled between blocks so a
     cancelled replay returns early. The row carries the same numbers as the
-    script's table (live/final counts, contours, rate, tempo) plus the
-    error key when the take could not be replayed.
+    script's table (live/final counts, contours, rate, tempo), the replay's
+    own `dropped` honesty counter, and the error key when the take could
+    not be replayed.
     """
     from .live_session import LiveTake
 
@@ -235,5 +242,7 @@ def replay_take(
         "moved": block["moved"],
         "absorbed": block["absorbed"],
         "rate": block["rate"],
+        "dropped": take.dropped_blocks,
+        "drain_min": take.drain_min,
         "tempo_bpm": result.tempo.bpm if result and result.tempo else None,
     }

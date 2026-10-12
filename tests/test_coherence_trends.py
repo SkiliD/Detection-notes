@@ -415,6 +415,41 @@ def test_the_gui_announces_a_measured_regression(qapp, monkeypatch, tmp_path):
         win.close()
 
 
+def test_two_consecutive_snapshots_agree_and_the_second_sees_the_worse_week(tmp_path):
+    """The weekly pipeline read TWICE through `build_snapshot`.
+
+    Building is a READ over one pass of evidence: a second build over the
+    same folder must produce the same aggregates (no re-baselining, no
+    ordering jitter), and a snapshot already built stays the value it was
+    when a worse next week arrives — that next build is the one that
+    reports the measured regression.
+    """
+    # week 1 (2026-S39): two takes that moved few notes
+    _take(tmp_path, "live_20260921_090000", checked=10, rate=0.30)
+    _take(tmp_path, "live_20260922_090000", checked=10, rate=0.30)
+    first = coh.build_snapshot(tmp_path)
+    assert [w["week"] for w in first.health_weeks] == ["2026-S39"]
+    assert first.regression is None  # one week has nothing to compare to
+
+    # the next week (2026-S40) moved twice as many notes
+    _take(tmp_path, "live_20260928_090000", checked=10, rate=0.60)
+    _take(tmp_path, "live_20260929_090000", checked=10, rate=0.60)
+    second = coh.build_snapshot(tmp_path)
+    assert [w["week"] for w in second.health_weeks] == ["2026-S39", "2026-S40"]
+    assert second.regression is not None
+    assert second.regression["delta_points"] == pytest.approx(30.0)
+
+    # reading the same evidence again agrees with the reading before it
+    again = coh.build_snapshot(tmp_path)
+    assert again.health_weeks == second.health_weeks
+    assert again.regression == second.regression
+    assert again.journal == second.journal
+
+    # the first snapshot is a VALUE: the worse week never bleeds back into it
+    assert len(first.health_weeks) == 1
+    assert first.regression is None
+
+
 # --------------------------------------------------------------------------- #
 # 6. The sidecar link and corrupted CSVs
 # --------------------------------------------------------------------------- #

@@ -74,7 +74,9 @@ class StaffRest:
 
     `shape` is the canonical French rest name ("soupir", "demi-pause"...)
     or None for an off-grid gap: it is then drawn as a quarter rest scaled
-    by its written duration rather than lied about.
+    by its written duration rather than lied about. `breath` marks a HEARD
+    air intake (core/rests.py): the staff annotates it so the singer sees
+    where the breath was actually taken.
     """
 
     onset: float                     # quarter beats from the start
@@ -82,6 +84,7 @@ class StaffRest:
     measure: int                     # 1-based
     beat: float                      # displayed beat inside the measure, 1-based
     shape: str | None = None
+    breath: bool = False
 
 
 @dataclass
@@ -315,6 +318,7 @@ def _place_rest(rest, written, onset, beats_per_measure, slot_quarters) -> Staff
         measure=measure,
         beat=round(beat, 2),
         shape=shape,
+        breath=bool(getattr(rest, "breath", False)),
     )
 
 

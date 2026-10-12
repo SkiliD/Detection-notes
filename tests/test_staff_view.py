@@ -138,6 +138,39 @@ def test_live_view_scrolls_to_the_newest_notes(qapp):
     assert _ink(view, x0=int(view.width() * 0.6)) > 20
 
 
+def test_a_heard_breath_rest_carries_its_annotation():
+    """A rest marked `breath` arrives on the layout with the flag: the
+    staff paints the "B" above it; an unmarked rest carries none."""
+    from v2m.core.notation import layout_staff
+    from v2m.core.rests import Rest
+
+    grid = BeatGrid(120.0)
+    notes = [
+        Note(0.0, 0.5, 60, 0.9, figure="noire"),
+        Note(1.0, 1.5, 62, 0.9, figure="noire"),
+    ]
+    marked = [Rest(start=0.5, end=1.0, figure="soupir", breath=True)]
+    lay = layout_staff(notes, grid=grid, rests=marked)
+    assert lay.rests[0].breath is True
+    plain = [Rest(start=0.5, end=1.0, figure="soupir")]
+    lay = layout_staff(notes, grid=grid, rests=plain)
+    assert lay.rests[0].breath is False
+
+
+def test_live_view_places_notes_at_their_real_onsets(qapp):
+    """Live notes spread by the detected tempo: short notes with gaps used
+    to chain by written duration and collapse into ONE measure."""
+    notes = [LiveNote(i * 1.0, i * 1.0 + 0.1, 60 + i) for i in range(4)]
+    view = StaffView(live=True)
+    view.resize(500, 160)
+    view.set_live(notes, grid=BeatGrid(120.0))  # 1.0 s = 2 quarter beats
+
+    lay = view.layout()
+    assert lay.measures == 2
+    assert [round(n.onset, 2) for n in lay.notes] == [0.0, 2.0, 4.0, 6.0]
+    assert [n.measure for n in lay.notes] == [1, 1, 2, 2]
+
+
 def test_live_view_shows_the_note_being_sung(qapp):
     notes = [_note(60, 0.0, figure="noire")]
     view = StaffView(live=True)

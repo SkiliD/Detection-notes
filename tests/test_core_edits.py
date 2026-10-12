@@ -12,6 +12,7 @@ from v2m.core.edits import (
     EditHistory,
     correct_note_pitch,
     delete_notes,
+    move_note,
     snapshot_state,
     splice_phrase,
 )
@@ -104,6 +105,48 @@ def test_note_correction_invalidates_stale_pitch_evidence():
     assert result.pitch is None
     assert result.live_vs_final is None
     assert result.manual_pitch_corrections
+
+
+def test_move_note_drags_one_bar_and_rebuilds_the_facts():
+    """A roll drag lands as one in-place edit: the onset/duration/pitch
+    move together, every note-derived fact rebuilds, and the correction
+    flag travels (the audio no longer describes the score)."""
+    result = _result(60, 64)
+    before_key = result.key
+
+    move_note(result, 1, start_s=0.7, end_s=1.1, midi=62)
+
+    moved = result.notes[1]
+    assert (moved.start, moved.end, moved.midi) == (0.7, 1.1, 62)
+    assert moved.deviation == 0.0
+    assert result.notes[0].midi == 60  # the neighbours hold
+    assert result.notes[0].start == 0.1 and result.notes[0].end == 0.5
+    assert result.manual_pitch_corrections is True
+    assert result.key is not before_key  # the derived facts rebuilt
+
+
+def test_move_note_refuses_overlaps_and_absurd_edges():
+    """The neighbours bound the drag: a note slides inside its own gap,
+    never over the previous or the next one; a zero length, a negative
+    onset and an off-piano pitch are refused."""
+    result = _result(60, 64, 67)
+
+    with pytest.raises(ValueError, match="preceding"):
+        move_note(result, 1, start_s=0.3, end_s=0.9)
+    with pytest.raises(ValueError, match="following"):
+        move_note(result, 1, start_s=0.7, end_s=1.7)
+    with pytest.raises(ValueError, match="duration"):
+        move_note(result, 1, start_s=0.5, end_s=0.5)
+    with pytest.raises(ValueError, match="before the take"):
+        move_note(result, 0, start_s=-0.2, end_s=0.5)
+    with pytest.raises(ValueError, match="piano"):
+        move_note(result, 1, midi=12)
+    with pytest.raises(IndexError):
+        move_note(result, 9, start_s=0.5, end_s=0.9)
+    # nothing above changed the take
+    assert [(n.start, n.end, n.midi) for n in result.notes] == [
+        (0.1, 0.5, 60), (0.6, 1.0, 64), (1.1, 1.5, 67),
+    ]
 
 
 def test_delete_notes_removes_only_the_selected_rows_and_marks_checks_unavailable():
@@ -284,6 +327,28 @@ def test_redo_row_keeps_the_action_that_separates_it_from_current():
     assert rows[-1] == (None, CURRENT_ACTION)
 
 
+def test_redo_timeline_rows_are_oldest_to_newest():
+    """Multiple redo steps appear chronologically after the current row."""
+    history = EditHistory()
+    history.record(snapshot_state(_result(60), None))
+    history.record(snapshot_state(_result(62), None))
+    history.record(snapshot_state(_result(64), None))
+    current = snapshot_state(_result(66), None)
+
+    history.undo(current)
+    history.undo(snapshot_state(_result(64), None))
+    rows = history.entries(snapshot_state(_result(62), None))
+
+    assert [state.result.notes[0].midi for state, _ in rows if state is not None] == [
+        60, 64, 66,
+    ]
+    assert rows[1] == (None, CURRENT_ACTION)
+    # The UI's farthest-future row is valid and jumps through each redo step.
+    move = history.jump(snapshot_state(_result(62), None), 3)
+    assert move is not None and move.state.result.notes[0].midi == 66
+    assert move.redone == 2
+
+
 def test_snapshot_carries_the_edit_action_it_precedes():
     """`action` names the edit ABOUT to overwrite the state; it only feeds
     the history's timeline labels (undo/redo/jump treat states alike)."""
@@ -297,9 +362,9 @@ def test_snapshot_carries_the_edit_action_it_precedes():
 
 
 def test_history_lays_out_the_whole_timeline_for_the_state_browser():
-    """`entries` lists archived states oldest first, then the redo branch
-    (reversed: the redo stack stores nearest-first), then the live current
-    state (None reference — it is not jumpable-to). A new edit clears the
+    """`entries` lists archived states oldest first, then the live current
+    state (None reference — it is not jumpable-to), then redo states in
+    chronological order. A new edit clears the
     undone branch, so its states leave the timeline with it (the linear
     contract). Jumping stays undo/redo's bookkeeping: the browser reads
     rows, the window walks steps."""
@@ -319,8 +384,8 @@ def test_history_lays_out_the_whole_timeline_for_the_state_browser():
     assert rows[-1] == (None, CURRENT_ACTION), "the live state is labelled, never jumpable"
 
     # an undone state sits BETWEEN the undo rows and the redo rows: the
-    # caller now sits on the second state (62), and the redo row is the
-    # state redo would restore (66, the second correction's result)
+    # caller now sits on the second state (62), followed chronologically
+    # by the state redo would restore (66, the second correction's result)
     history.undo(snapshot_state(_result(66), None))
     rows = history.entries(snapshot_state(_result(62), None))
     assert [(state.result.notes[0].midi, action) for state, action in rows
@@ -342,6 +407,58 @@ def test_history_lays_out_the_whole_timeline_for_the_state_browser():
     ]
 
 
+def test_history_walk_returns_landed_state_and_direction_counts():
+    """The core owns multi-step branch traversal without a Qt adapter."""
+    history = EditHistory()
+    history.record(snapshot_state(_result(60), None))
+    history.record(snapshot_state(_result(62), None))
+    current = snapshot_state(_result(64), None)
+
+    undone = history.walk(current, 2)
+
+    assert undone is not None
+    assert undone.state.result.notes[0].midi == 60
+    assert (undone.undone, undone.redone) == (2, 0)
+    assert undone.acknowledgement_key == "ui edit undone"
+
+    redone = history.walk(undone.state, -2)
+
+    assert redone is not None
+    assert redone.state.result.notes[0].midi == 64
+    assert (redone.undone, redone.redone) == (0, 2)
+    assert redone.acknowledgement_key == "ui edit redone"
+
+
+def test_history_jump_uses_timeline_rows_and_reports_partial_moves():
+    """Jumps use chronological rows and preserve the undo/redo branch."""
+    history = EditHistory()
+    history.record(snapshot_state(_result(60), None))
+    history.record(snapshot_state(_result(62), None))
+    current = snapshot_state(_result(64), None)
+
+    past = history.jump(current, 0)
+
+    assert past is not None and past.state.result.notes[0].midi == 60
+    assert (past.undone, past.redone) == (2, 0)
+    assert past.acknowledgement_key == "ui edit jumped"
+    assert history.jump(past.state, 0) is None
+    middle = history.jump(past.state, 1)
+    assert middle is not None and middle.state.result.notes[0].midi == 62
+    assert middle.redone == 1
+
+    future = history.jump(middle.state, 2)
+    assert future is not None and future.state.result.notes[0].midi == 64
+    assert (future.undone, future.redone) == (0, 1)
+
+
+def test_history_walk_on_empty_or_zero_steps_returns_none():
+    history = EditHistory()
+    current = snapshot_state(_result(60), None)
+    assert history.walk(current, 0) is None
+    assert history.walk(current, 1) is None
+    assert history.walk(current, -1) is None
+
+
 def test_history_depth_bound_shows_in_the_timeline():
     """States dropped past the depth bound leave the timeline too."""
     history = EditHistory(depth=2)
@@ -353,4 +470,3 @@ def test_history_depth_bound_shows_in_the_timeline():
 
     assert [state.result.notes[0].midi for state, _ in rows if state is not None] == [62, 64]
     assert history.undo_depth == 2
-

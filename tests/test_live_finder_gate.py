@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from tests.test_live_gui import FakeMic  # the same synthetic singer
+from v2m.core import take_export as te
 from v2m.core.i18n import tr  # noqa: E402
 from v2m.core.liveseg import LiveNoteSegmenter
 
@@ -90,6 +91,48 @@ def test_the_level_meter_names_a_saturated_input(qapp, monkeypatch):
     meter.set_level(0.0)
     assert meter._fill.isHidden()
     assert meter._clipping is False
+
+
+def test_finder_history_uses_the_confirmation_captured_with_the_frame(qapp):
+    """Queued UI delivery must not replace the block's note with newer state."""
+    from v2m.gui.finder_page import FinderPage
+
+    class AdvancedSegmenter:
+        def confirmed(self):
+            return None
+
+        def heard(self):
+            return None
+
+    class QueuedThread:
+        segmenter = AdvancedSegmenter()
+
+        def isRunning(self):  # noqa: N802 (Qt naming)
+            return True
+
+    def unexpected_capture():
+        raise AssertionError("the queued reading test must not open the microphone")
+
+    page = FinderPage(
+        thread_factory=unexpected_capture,
+        go_home=lambda: None,
+        show_error=lambda _msg: None,
+        clear_error=lambda: None,
+        audition_note=lambda _midi: None,
+    )
+    setattr(page, "_thread", QueuedThread())
+    try:
+        # The audio thread confirmed C4 for this block; by the time Qt
+        # handles its queued event, the mutable segmenter has moved to idle.
+        page._on_note((60.0, 261.6), (60.0, 261.6), (60.0, 261.6))
+        assert page.session.history == [60]
+        assert page.keys._active == {60}
+
+        # Another frame in the same held note updates nothing in history.
+        page._on_note((60.0, 261.6), (60.0, 261.6), (60.0, 261.6))
+        assert page.session.history == [60]
+    finally:
+        page.deleteLater()
 
 
 def test_pending_plateau_names_without_lighting(qapp, monkeypatch):
@@ -197,7 +240,7 @@ def test_the_finder_stays_dark_on_a_mic_rumble(qapp, monkeypatch):
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(sd, "InputStream", RumbleMic)
-    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    monkeypatch.setattr(te, "export_result", lambda res, stem, **kw: None)
 
     win = mw.MainWindow()
     try:
@@ -232,7 +275,7 @@ def test_the_finder_shows_the_note_while_it_confirms(qapp, monkeypatch):
     from v2m.gui import main_window as mw
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
-    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    monkeypatch.setattr(te, "export_result", lambda res, stem, **kw: None)
 
     win = mw.MainWindow()
     try:

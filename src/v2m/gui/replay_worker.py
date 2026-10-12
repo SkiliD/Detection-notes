@@ -83,10 +83,10 @@ class ReplayWorker(QThread):
         # `core.compare.classify` writes and every reader — the coherence
         # aggregator, `core.explain` — expects), not the script table's row
         # (`live_notes`/`final_notes`)
-        from ..core.explain import write_breakdown_file
+        from ..core.compare import write_sidecar
 
         # (the sidecar PATH itself is the artifact contract's: takes.SIDECAR_SUFFIX
-        # through write_breakdown_file — this thread never spells a suffix)
+        # through write_sidecar — this thread never spells a suffix)
 
         block = {
             "live": row["live_notes"],
@@ -96,9 +96,13 @@ class ReplayWorker(QThread):
             "moved": row["moved"],
             "absorbed": row["absorbed"],
             "rate": row["rate"],
+            # the replay's own honesty counter: a hollow live reading stays
+            # legible in the archive, not only in the moment's status line
+            "dropped": row["dropped"],
+            "drain_min": row["drain_min"],
             # the engine that measured THIS audit: `scripts/replay_takes.py
             # --changed` re-derives only the takes an OLDER engine read
             "engine": engine_fingerprint(),
         }
-        write_breakdown_file(self.stem, block)
+        write_sidecar(self.stem, block)
         self.done.emit(row)

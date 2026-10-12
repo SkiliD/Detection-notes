@@ -18,6 +18,7 @@ import soundfile as sf
 
 from conftest import SR, silence, sine_note
 from v2m import cli
+from v2m.core import take_export as te
 from v2m.core.pdf_export import PdfExportError, PdfToolMissing
 
 
@@ -35,7 +36,7 @@ def test_pdf_failure_still_writes_artifacts_and_prints_summary(tmp_path, monkeyp
     def _boom(stem):
         raise PdfExportError("MuseScore failed")
 
-    monkeypatch.setattr(cli, "engrave_pdf", _boom)
+    monkeypatch.setattr(te, "engrave_pdf", _boom)
     stem = tmp_path / "out"
 
     code = cli.main(["analyze", _wav(tmp_path), "-o", str(stem), "--pdf"])
@@ -57,7 +58,7 @@ def test_missing_tool_skips_the_pdf_without_failing_the_run(tmp_path, monkeypatc
     def _no_tool(stem):
         raise PdfToolMissing("PDF ignored: installez MuseScore ou LilyPond")
 
-    monkeypatch.setattr(cli, "engrave_pdf", _no_tool)
+    monkeypatch.setattr(te, "engrave_pdf", _no_tool)
 
     code = cli.main(["analyze", _wav(tmp_path), "-o", str(tmp_path / "out"), "--pdf"])
 
@@ -76,7 +77,7 @@ def test_pdf_success_is_listed_with_the_other_artifacts(tmp_path, monkeypatch, c
         (tmp_path / "out.pdf").write_bytes(b"%PDF-1.4")
         return str(tmp_path / "out.pdf")
 
-    monkeypatch.setattr(cli, "engrave_pdf", _fake)
+    monkeypatch.setattr(te, "engrave_pdf", _fake)
 
     code = cli.main(["analyze", _wav(tmp_path), "-o", str(tmp_path / "out"), "--pdf"])
 

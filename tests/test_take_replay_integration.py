@@ -2,10 +2,10 @@
 
 Three pins, each for a bug actually met during the workstream:
 
-1. **the sidecar is written ONCE**: `_export_results` writes it via
-   `_archive_sidecar` — a second writer (the former
-   `_archive_take_breakdown`) briefly rewrote it under ANOTHER stem
-   (`live_take_name()` re-mints a timestamp on every call);
+1. **the sidecar is written ONCE**: `core.take_export.write_take` archives
+   it under the take's OWN stem the window handed over — a second writer
+   briefly rewrote it under ANOTHER stem (`live_take_name()` re-mints a
+   timestamp on every call);
 2. **the stem outlives the first export**: re-clicking "Export" reuses
    the memorized stem instead of opening a new folder;
 3. **the worker starts on the EXported take** (its stem, its folder),
@@ -30,6 +30,7 @@ import numpy as np
 import pytest
 
 from v2m.core import audio_io
+from v2m.core import take_export as te
 
 
 @pytest.fixture(scope="module")
@@ -54,7 +55,7 @@ def _redirect(monkeypatch, mw, tmp_path) -> None:
     def fake_export(res, stem, **kw) -> None:
         Path(stem).parent.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(mw, "export_result", fake_export)
+    monkeypatch.setattr(te, "export_result", fake_export)
     monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
 
 

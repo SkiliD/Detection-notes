@@ -39,6 +39,7 @@ import v2m
 from v2m.core import audio_io
 from v2m.core.i18n import tr
 from v2m.core.pipeline import AnalyzeOptions, analyze_signal
+from v2m.core.pitch import pitch_stage_cost
 from v2m.core.report import export_result
 
 LABEL_WIDTH = 38
@@ -128,6 +129,10 @@ class Measurement:
     bpm: float | None = None
     key: str = "—"
     meter: str = "—"
+    # the pitch stage's swallow-rescue facts (read AFTER the last run: with
+    # --repeat the mean is not re-derivable, the LAST run is the reported one)
+    rescue_g: float = 0.0
+    rescue_c: float = 0.0
     profile: list[FuncCost] = field(default_factory=list)
 
 
@@ -152,6 +157,12 @@ def measure(
     res = analyze_signal(y, audio_io.SR, source=str(path), opts=opts, progress=timer)
     analyze_s = time.perf_counter() - t0
     m.rows.extend(timer.close())
+    # the pitch stage's own sub-stage: the rescue reads its facts from the
+    # module that owns the sweep (one writer, reset by every reading) —
+    # never re-timed here
+    rescue = pitch_stage_cost()
+    m.rescue_g = float(rescue["seconds"])
+    m.rescue_c = float(rescue["cost_s"])
 
     t1 = time.perf_counter()
     export_result(res, out_dir / path.stem, with_pitch_curve=True)
@@ -290,6 +301,17 @@ def print_table(m: Measurement, runs: int, profile_top: int) -> None:
         f"({_share(heaviest.seconds, m.total_s):.1f}%)"
     )
 
+    # the swallow rescue runs INSIDE the pitch stage: its own line keeps the
+    # sweep visible per take without forging a stage row (the table reads
+    # the pipeline's progress boundaries, one owner), and the JSON carries
+    # the same facts — a take whose swallowed notes are hunted watches this
+    # number stay 0.0 (the sweep ran, the gates refused).
+    rescue = pitch_stage_cost()
+    print(
+        f"Rescue     : {rescue['cost_s']:.3f} s re-read at the short window, "
+        f"{rescue['seconds']:.3f} s grafted"
+    )
+
     if m.profile:
         total = sum(row.self_s for row in m.profile) or 1.0
         print(
@@ -334,6 +356,10 @@ def as_json(m: Measurement, runs: int) -> dict:
         "bpm": m.bpm,
         "key": m.key,
         "meter": m.meter,
+        "rescue": {
+            "grafted_s": round(m.rescue_g, 4),
+            "cost_s": round(m.rescue_c, 4),
+        },
         "stages": [
             {
                 "label": row.label,

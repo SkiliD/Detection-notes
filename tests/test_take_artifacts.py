@@ -11,26 +11,24 @@ take tables.
 
 from __future__ import annotations
 
-import json
-
 from v2m.core import takes
-from v2m.core.explain import write_breakdown_file
+from v2m.core.compare import write_sidecar
 
 
 def test_sidecar_round_trip_through_the_contract(tmp_path):
-    """write through `explain`, read through `read_sidecar` — one spelling."""
+    """write through `compare`, read through `read_sidecar` — one spelling."""
     stem = tmp_path / "live_20260927_204442"
     block = {"live": 23, "final": 17, "contours": 15, "off1": 9,
              "moved": 6, "absorbed": 0, "rate": 0.65,
              "engine": "a037199ccf6aecb0"}
-    written = write_breakdown_file(stem, block)
+    written = write_sidecar(stem, block)
     assert written and written.endswith(takes.SIDECAR_SUFFIX)
     # the folder-relative view (the coherence/drift readers' angle) agrees
     assert takes.read_sidecar(stem.parent, stem.name) == block
     # the folder-IS-the-stem view (one sub-folder per take) agrees too
     take_dir = tmp_path / "live_20260927_204442x"
     take_dir.mkdir()
-    write_breakdown_file(take_dir / take_dir.name, block)
+    write_sidecar(take_dir / take_dir.name, block)
     assert takes.read_sidecar(take_dir) == block
 
 

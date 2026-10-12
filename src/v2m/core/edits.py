@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from .chords import detect_chord_progression, detect_chord_segments, detect_chords
+from .compare import invalidate as invalidate_breakdown
 from .figures import label_notes
 from .grid import BeatGrid
 from .keys import detect_key
@@ -27,11 +28,11 @@ DEFAULT_EDIT_DEPTH = 20
 
 # What one archived state was BEFORE (the token that names the past state
 # in the take's history). "correction" = a pitch fix; "replacement" = a
-# kept re-sung phrase; "deletion" = notes removed from the score (the
-# audio is untouched). CURRENT_ACTION is the live timeline row's label (a
-# None state — never a state's own action: a snapshot always precedes an
-# edit).
-EDIT_ACTIONS = ("correction", "replacement", "deletion")
+# kept re-sung phrase; "deletion" = notes removed from the score; "move"
+# = a note dragged on the roll (onset, duration and/or pitch). CURRENT_ACTION
+# is the live timeline row's label (a None state — never a state's own
+# action: a snapshot always precedes an edit).
+EDIT_ACTIONS = ("correction", "replacement", "deletion", "move")
 CURRENT_ACTION = "current"
 
 
@@ -89,14 +90,24 @@ def snapshot_state(
     )
 
 
+@dataclass(frozen=True)
+class EditMove:
+    """One stepped history move, ready for an adapter to apply and render."""
+
+    state: EditState
+    undone: int
+    redone: int
+    acknowledgement_key: str
+
+
 class EditHistory:
     """Undo/redo over one take's note edits: whole states, never deltas.
 
     Linear history: `record` clears the redo branch — a new edit on top of
     an undone state invalidates the undone branch. `undo`/`redo` take the
     CURRENT state (the caller snapshots its own facts) and return the state
-    to restore, or None when the branch is empty; the caller swaps that
-    state into its views.
+    to restore, or None when the branch is empty. `walk` and `jump` compose
+    those same steps and report where they landed; the adapter applies it.
 
     Every archived state carries an `action` naming the edit that separates
     it from the current state, so `entries()` can lay out the WHOLE
@@ -111,7 +122,8 @@ class EditHistory:
         # the redo branch pairs each restorable state with the action redo
         # would REAPPLY there: `undo` pushes the caller's current snapshot
         # (whose own action means nothing — it is just "the take as it is"),
-        # so the pair keeps the popped state's action as the row's label
+        # so the pair keeps the popped state's action as the row's label.
+        # The nearest redo target is at the END of this LIFO list.
         self._redo: list[tuple[EditState, str]] = []
 
     def record(self, state: EditState) -> None:
@@ -126,23 +138,18 @@ class EditHistory:
 
         Undo rows oldest first, then the CURRENT state (a None reference
         and the `CURRENT_ACTION` label — never jumpable-to, the caller
-        holds it), then the redo rows nearest-future first: the timeline is
-        a slider on the take's past AND future. Every row is labelled by
-        the edit that separates it from the current state — applying that
-        edit to CURRENT moves the timeline to the row (backward for an
-        undo row, forward for a redo row). Row `i` sits `undo_depth - i`
-        steps from the current row (negative = redo forward) — the
-        arithmetic the window's jump applies. The caller walks to an
-        archived row through `undo`/`redo`, which keeps ONE owner of the
-        branch bookkeeping.
+        holds it), then redo rows in chronological order from nearest to
+        farthest future. Every row is labelled by the edit that separates
+        it from the current state. `jump` walks through `undo`/`redo`, which
+        keeps ONE owner of the branch bookkeeping.
         """
         rows: list[tuple[EditState | None, str]] = [
             (state, state.action) for state in self._undo
         ]
         rows.append((None, CURRENT_ACTION))
-        # the redo stack is stored nearest-first (LIFO) — already the
-        # chronological order for the rows after the current one
-        rows.extend(self._redo)
+        # the redo stack stores its nearest target last; reverse it for
+        # the timeline's chronological order after the current row
+        rows.extend(reversed(self._redo))
         return rows
 
     def undo(self, current: EditState) -> EditState | None:
@@ -167,6 +174,56 @@ class EditHistory:
             action=action,
         ))
         return state
+
+    def walk(
+        self, current: EditState, steps: int, *, acknowledgement_key: str | None = None
+    ) -> EditMove | None:
+        """Walk undo (+) or redo (-) steps and return the landed state/counts.
+
+        Each step uses the same branch bookkeeping as the one-step methods;
+        a partial walk stops at the available edge. The caller still owns
+        eligibility checks and applying the returned state to its views.
+        `acknowledgement_key` overrides the direction's default label (a
+        jump walks undo/redo steps but acknowledges as a jump).
+        """
+        state = current
+        undone = redone = 0
+        for _ in range(abs(steps)):
+            if steps > 0:
+                next_state = self.undo(state)
+                if next_state is None:
+                    break
+                state = next_state
+                undone += 1
+            elif steps < 0:
+                next_state = self.redo(state)
+                if next_state is None:
+                    break
+                state = next_state
+                redone += 1
+        if undone + redone == 0:
+            return None
+        if acknowledgement_key is None:
+            acknowledgement_key = "ui edit undone" if steps >= 0 else "ui edit redone"
+        return EditMove(
+            state=state,
+            undone=undone,
+            redone=redone,
+            acknowledgement_key=acknowledgement_key,
+        )
+
+    def jump(self, current: EditState, row_index: int) -> EditMove | None:
+        """Move to a row from `entries(current)`; current/invalid rows no-op."""
+        rows = self.entries(current)
+        if not 0 <= row_index < len(rows) or rows[row_index][0] is None:
+            return None  # out of range, or the current row (never jumpable)
+        # `entries` lays out undo rows, the current row, then redo rows, so
+        # the distance from the current row is already the signed step count
+        return self.walk(
+            current,
+            self.undo_depth - row_index,
+            acknowledgement_key="ui edit jumped",
+        )
 
     def clear(self) -> None:
         """Forget every state: a new take (or a new READING of one) starts it."""
@@ -318,7 +375,49 @@ def correct_note_pitch(result, index: int, midi: int) -> None:
         pitch=None,
         observation=None,
     )
-    result.live_vs_final = None
+    invalidate_breakdown(result)
+    result.manual_pitch_corrections = True
+
+
+def move_note(result, index: int, *, start_s=None, end_s=None, midi=None) -> None:
+    """Drag one note on the roll: a new onset, duration and/or pitch.
+
+    The audio is untouched (a visual correction, like `correct_note_pitch`):
+    every note-derived fact is rebuilt and the audio-based checks go
+    unavailable. The neighbours bound the move — a note may slide anywhere
+    inside its own gap but never overlaps the previous or the next one, so
+    the chronological invariant every downstream reader relies on holds.
+    `end_s` carries the dragged bar's RIGHT EDGE (a resize), not a duration:
+    the roll edits edges, the note keeps `end - start` its only truth.
+    """
+    if not 0 <= index < len(result.notes):
+        raise IndexError("note index is outside the result")
+    if midi is not None and not 21 <= midi <= 108:
+        raise ValueError("MIDI pitch is outside the piano range")
+    notes = [replace(note) for note in result.notes]
+    note = notes[index]
+    new_start = note.start if start_s is None else float(start_s)
+    new_end = note.end if end_s is None else float(end_s)
+    if new_end - new_start <= 0:
+        raise ValueError("the note duration must stay positive")
+    if new_start < 0:
+        raise ValueError("the note cannot start before the take")
+    if index > 0 and new_start < notes[index - 1].end:
+        raise ValueError("the moved note overlaps the preceding note")
+    if index + 1 < len(notes) and new_end > notes[index + 1].start:
+        raise ValueError("the moved note overlaps the following note")
+    note.start = new_start
+    note.end = new_end
+    if midi is not None:
+        note.midi = midi
+        note.deviation = 0.0
+    refresh_result_facts(
+        result,
+        notes,
+        pitch=None,
+        observation=None,
+    )
+    invalidate_breakdown(result)
     result.manual_pitch_corrections = True
 
 
@@ -345,5 +444,5 @@ def delete_notes(result, indices) -> None:
         pitch=None,
         observation=None,
     )
-    result.live_vs_final = None
+    invalidate_breakdown(result)
     result.manual_pitch_corrections = True

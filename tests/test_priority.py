@@ -86,6 +86,3 @@ def test_a_raising_platform_degrades_to_the_status_quo(monkeypatch):
     monkeypatch.setattr(ctypes, "windll", None)  # attribute walk raises
     out = _in_thread(priority.lower_background_priority)
     assert out == [False], f"expected a silent False, got {out}"
-
-
-

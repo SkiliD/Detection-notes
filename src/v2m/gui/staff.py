@@ -32,6 +32,7 @@ INK = QColor("#e6ebf2")          # noteheads, stems, barlines
 STAFF_INK = QColor("#8f9aa6")    # staff lines, clef, ledger lines
 SOFT_INK = QColor("#9fb3c8")     # header text, measure numbers
 REST_INK = QColor("#c9d3dd")     # rests: readable, but dimmer than notes
+BREATH_INK = QColor("#7fd4a0")   # the heard-breath "B" annotation
 PREVIEW_INK = QColor("#ffc86e")  # the note being sung (piano roll amber)
 CURSOR_INK = QColor("#ff9642")
 
@@ -84,14 +85,19 @@ class StaffView(QWidget):
         """Show a take in progress: the notes so far + the note being sung.
 
         The grid of a live take has no meter yet (the fallback 4/4 stands)
-        and its tempo comes from the notes sung so far.
+        and its tempo comes from the notes sung so far. The notes sit at
+        their REAL onsets on that tempo (the grid path): chaining written
+        durations from zero distorted the timeline — short notes with gaps
+        collapsed into one measure, the measure count told the singer a
+        different story than the seconds they actually sang.
         """
         self._notes = list(notes or [])
         self._rests = []  # no rest timing during the take: notes only
         self._preview = preview
         self._grid = grid or BeatGrid(None)
         self._key = None
-        self._positions = None  # chained by written durations
+        # real onsets, on the detected tempo: (measure, beat) per note
+        self._positions = self._grid.positions(self._notes) if self._notes else None
         self.update()
 
     def clear(self) -> None:
@@ -507,6 +513,15 @@ def _paint_rest(p: QPainter, x: float, staff_top: float, rest) -> None:
         p.setFont(font)
         p.setPen(REST_INK)
         p.drawText(QPointF(x - 0.45 * S, staff_top + 6.2 * S), tr_figure(rest.shape))
+    if getattr(rest, "breath", False):
+        # the heard air intake: a compact "B" ABOVE the rest — the same
+        # annotation a vocal score prints where the singer takes air
+        font = QFont()
+        font.setPointSizeF(max(6.0, S * 0.8))
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(BREATH_INK)
+        p.drawText(QPointF(x - 0.25 * S, staff_top - 0.6 * S), "B")
     if dots:
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(REST_INK)

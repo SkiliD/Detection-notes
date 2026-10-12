@@ -86,12 +86,7 @@ def test_quantize_aligns_to_grid():
 
 
 def test_a_held_note_writes_sustain_pedal_events():
-    """The sustain pedal (user request): a HELD note (>= HELD_MIN_S) writes
-    CC64=127 at its attack and CC64=0 after its end + tail (the same
-    arithmetic as playback.render_notes), so the file played on any synth
-    keeps the resonance. A short note writes no CC64. The order at the
-    same instant: pedal BEFORE the note (key 0), so the string rings from
-    the attack."""
+    """A held note writes sustain over its duration and render-matched tail."""
     from v2m.core import playback as pb
     from v2m.core.grid import BeatGrid
 
@@ -122,3 +117,90 @@ def test_a_held_note_writes_sustain_pedal_events():
     # at the same instant, the pedal comes before the note
     order = [(kind, tick) for kind, tick, _ in seq]
     assert order.index(("cc", 0.4)) < order.index(("on", 0.4))
+
+
+def test_overlapping_held_notes_keep_sustain_down_until_both_tails_end():
+    """One note's tail must not release the global pedal under another note."""
+    from v2m.core.playback import PEDAL_TAIL_FACTOR
+
+    notes = [
+        Note(start=0.0, end=0.8, midi=60, confidence=0.9),
+        Note(start=0.4, end=1.2, midi=64, confidence=0.9),
+    ]
+    mid = build_midi(notes, GRID, key=None)
+
+    pedal_events: list[tuple[float, int]] = []
+    for track in mid.tracks:
+        tick = 0
+        for event in track:
+            tick += event.time
+            if event.type == "control_change" and event.control == 64:
+                pedal_events.append((tick / 960.0, event.value))
+
+    assert [value for _at, value in pedal_events] == [127, 0]
+    assert pedal_events[0][0] == pytest.approx(0.0)
+    assert pedal_events[1][0] == pytest.approx(1.44, abs=0.001)
+    assert not any(value == 0 and at < 1.2 for at, value in pedal_events)
+    assert PEDAL_TAIL_FACTOR == 0.30
+
+
+def test_adjacent_held_notes_do_not_create_a_pedal_gap():
+    """A repeated note at the first note's release keeps the pedal continuous."""
+    notes = [
+        Note(start=0.0, end=0.6, midi=60, confidence=0.9),
+        Note(start=0.6, end=1.0, midi=62, confidence=0.9),
+    ]
+    mid = build_midi(notes, GRID, key=None)
+
+    pedal_events: list[tuple[float, int]] = []
+    for track in mid.tracks:
+        tick = 0
+        for event in track:
+            tick += event.time
+            if event.type == "control_change" and event.control == 64:
+                pedal_events.append((tick / 960.0, event.value))
+
+    assert [value for _at, value in pedal_events] == [127, 0]
+    assert pedal_events[0][0] == pytest.approx(0.0)
+    assert pedal_events[1][0] == pytest.approx(1.12, abs=0.001)
+
+
+def test_non_overlapping_held_notes_release_between_tails():
+    """A real gap between sustain windows still produces a pedal release."""
+    notes = [
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),
+        Note(start=1.0, end=1.5, midi=64, confidence=0.9),
+    ]
+    mid = build_midi(notes, GRID, key=None)
+
+    pedal_events: list[tuple[float, int]] = []
+    for track in mid.tracks:
+        tick = 0
+        for event in track:
+            tick += event.time
+            if event.type == "control_change" and event.control == 64:
+                pedal_events.append((tick / 960.0, event.value))
+
+    assert [value for _at, value in pedal_events] == [127, 0, 127, 0]
+    assert pedal_events[1][0] == pytest.approx(0.65)
+    assert pedal_events[2][0] == pytest.approx(1.0)
+    assert pedal_events[3][0] == pytest.approx(1.65)
+
+
+def test_quantized_held_note_uses_quantized_sustain_window():
+    """Pedal duration follows the written, quantized note event times."""
+    note = Note(start=0.13, end=0.49, midi=60, confidence=0.9)
+    mid = build_midi([note], GRID, key=None, quantize_s=0.125)
+
+    pedal_events: list[tuple[float, int]] = []
+    for track in mid.tracks:
+        tick = 0
+        for event in track:
+            tick += event.time
+            if event.type == "control_change" and event.control == 64:
+                pedal_events.append((tick / 960.0, event.value))
+
+    # Written span is 0.125..0.5 (>= HELD_MIN_S after quantization).
+    assert [value for _at, value in pedal_events] == [127, 0]
+    assert pedal_events[0][0] == pytest.approx(0.125)
+    assert pedal_events[1][0] == pytest.approx(0.6125, abs=0.001)

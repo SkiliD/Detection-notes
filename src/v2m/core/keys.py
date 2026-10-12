@@ -6,9 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .music import NOTE_NAMES  # the one pitch-class name table (the music seam)
 from .notes import AMBIGUOUS_DEV_ST  # the ambiguity threshold lives with its producer
-
-PC_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 KS_MAJ = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09,
                    2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -70,13 +69,13 @@ def detect_key(notes, top_k: int = 3) -> KeyResult:
 
     cands: list[KeyCandidate] = []
     for shift in range(12):
-        # tonic = PC_NAMES[shift]: profile degree j maps to pitch class
+        # tonic = NOTE_NAMES[shift]: profile degree j maps to pitch class
         # (shift + j) % 12 -> roll by -shift
         rolled = np.roll(hist, -shift)
         for mode, profile in KEY_PROFILES.items():
             cands.append(
                 KeyCandidate(
-                    tonic=PC_NAMES[shift],
+                    tonic=NOTE_NAMES[shift],
                     mode=mode,
                     score=_pearson(rolled, profile),
                 )
@@ -90,7 +89,7 @@ def detect_key(notes, top_k: int = 3) -> KeyResult:
 def scale_pitch_classes(key: KeyCandidate) -> set[int]:
     """The key's 7 diatonic pitch classes (major or natural minor)."""
     steps = (0, 2, 4, 5, 7, 9, 11) if key.mode == "major" else (0, 2, 3, 5, 7, 8, 10)
-    tonic = PC_NAMES.index(key.tonic)
+    tonic = NOTE_NAMES.index(key.tonic)
     return {(tonic + s) % 12 for s in steps}
 
 

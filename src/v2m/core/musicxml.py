@@ -26,11 +26,9 @@ from xml.sax.saxutils import escape
 
 from .grid import BeatGrid, CATALOGUE
 from .grid import MUSICXML_DIVISIONS as DIVISIONS
-from .music import midi_to_name_fr
+from .music import NOTE_NAMES, midi_to_name_fr
 from .i18n import tr_chord_label
 
-
-STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 # Below this overlap a "note" on a beat is a segmentation artifact, not a
 # sound: the beat is written without it.
@@ -58,15 +56,22 @@ _REST_FILL_ORDER = [
 ]
 
 
-def _rest_run_xml(steps: int, figure: str | None) -> str:
+def _rest_run_xml(steps: int, figure: str | None, breath: bool = False) -> str:
     """One or more rest <note> elements covering exactly `steps` divisions.
 
     A labeled figure (soupir, demi-pause...) is engraved as many times as
     it fits the span; the remainder — and unlabeled runs — fall back to the
     largest drawable plain value, so a silent run of N beats reads as the
     rest an engraver would write, not a sequence of generic quarters.
+    A HEARD breath carries a <words> direction — where the singer took air,
+    the annotation a vocalist reads on any printed part.
     """
     parts: list[str] = []
+    if breath:
+        parts.append(
+            '<direction placement="above"><direction-type><words>Respiration</words>'
+            "</direction-type></direction>"
+        )
     rest_figure = (
         _REST_BY_NAME.get(figure) if figure is not None else None
     )
@@ -97,7 +102,7 @@ _ENH = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
 def _key_fifths(tonic: str, mode: str) -> int:
     t = tonic
     if mode == "minor":
-        t = STEP_NAMES[(STEP_NAMES.index(t) + 3) % 12]  # relative majeure
+        t = NOTE_NAMES[(NOTE_NAMES.index(t) + 3) % 12]  # relative majeure
     # the table covers sharps AND common flats; enharmonic fallback otherwise
     if t in _FIFTHS_MAJ:
         return _FIFTHS_MAJ[t]
@@ -105,7 +110,7 @@ def _key_fifths(tonic: str, mode: str) -> int:
 
 
 def _pitch_xml(midi: int) -> str:
-    name = STEP_NAMES[midi % 12]
+    name = NOTE_NAMES[midi % 12]
     octave = midi // 12 - 1
     step, alter = (name[:-1], 1) if name.endswith("#") else (name, 0)
     alter_xml = "<alter>1</alter>" if alter else ""
@@ -256,13 +261,13 @@ def _render_triplet_block(
 
 
 def _rest_figure(t0: float, t1: float, rests) -> str | None:
-    """Figure of the detected breath covering the most of [t0, t1].
+    """Figure of the detected rest covering the most of [t0, t1].
 
     A labeled rest counts when its center falls inside the written gap; the
     longest overlap wins (a gap can straddle a rest boundary after
     snapping). Unlabeled or missing rests return None (generic fill).
 
-    Used by the silent-run decomposition, so a labeled breath engraves as
+    Used by the silent-run decomposition, so a labeled rest engraves as
     the figure a musician would write instead of generic quarters; the
     duration itself is what types each rest (`_note_xml`).
     """
@@ -278,6 +283,27 @@ def _rest_figure(t0: float, t1: float, rests) -> str | None:
         if t0 - 1e-6 <= mid <= t1 + 1e-6:
             best, best_ov = fig, ov
     return best
+
+
+def _rest_is_breath(t0: float, t1: float, rests) -> bool:
+    """True when a HEARD-breath rest covers most of the written gap [t0, t1].
+
+    Same center rule as `_rest_figure`: after snapping, a silent run can
+    straddle a rest's boundary — the overlap decides.
+    """
+    for r in rests or []:
+        if not getattr(r, "breath", False):
+            continue
+        ov = min(r.end, t1) - max(r.start, t0)
+        if ov <= 0:
+            continue
+        span = t1 - t0
+        if ov >= 0.5 * span:
+            return True
+        mid = (r.start + r.end) / 2
+        if t0 - 1e-6 <= mid <= t1 + 1e-6:
+            return True
+    return False
 
 
 def build_score_xml(
@@ -479,7 +505,11 @@ def build_score_xml(
             run_steps = run * grid_steps
             run_end = m_start + (b + run) * grid_s
             out.append(
-                _rest_run_xml(run_steps, _rest_figure(b_start, run_end, rests))
+                _rest_run_xml(
+                    run_steps,
+                    _rest_figure(b_start, run_end, rests),
+                    breath=_rest_is_breath(b_start, run_end, rests),
+                )
             )
             b += run
         out.append("    </measure>\n")

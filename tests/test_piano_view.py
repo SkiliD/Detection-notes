@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QKeyEvent, QMouseEvent
 from PyQt6.QtTest import QTest
 
 from v2m.core.liveseg import LiveNote
@@ -114,10 +114,24 @@ def test_pressed_keys_are_lit_directly(qapp):
     assert pv._active == set()
 
 
-def test_the_pitch_axis_names_notes_instead_of_numbers(qapp):
-    """The roll's axis reads like a keyboard, not like MIDI numbers."""
+def test_the_pitch_axis_names_notes_in_the_current_language(qapp):
+    """The roll's axis reads like a keyboard, not like MIDI numbers —
+    and it follows the language: Do/Ré in French, C/D in English."""
+    from v2m.core.i18n import get_language, set_language
+
     axis = PitchAxis(orientation="left")
-    assert axis.tickStrings([21, 60, 61, 108], 1.0, 1.0) == ["A0", "C4", "C#4", "C8"]
+    previous = get_language()
+    try:
+        set_language("fr")
+        assert axis.tickStrings([21, 60, 61, 108], 1.0, 1.0) == [
+            "La0", "Do4", "Do#4", "Do8",
+        ]
+        set_language("en")
+        assert axis.tickStrings([21, 60, 61, 108], 1.0, 1.0) == [
+            "A0", "C4", "C#4", "C8",
+        ]
+    finally:
+        set_language(previous)
 
 
 # ----------------------------------------------------------------- piano roll
@@ -158,28 +172,63 @@ def test_begin_live_empties_the_roll_and_fixes_the_window(qapp):
     assert _xrange(roll) == pytest.approx((0.0, roll.LIVE_SPAN))
 
 
-def test_outline_note_marks_the_live_final_diff(qapp):
-    """The live-vs-final mark: one outline per moved note, cleared by
-    `begin_live` (a new take restarts from a clean roll)."""
+def test_the_comparison_draws_the_final_reading_beside_the_captured_one(qapp):
+    """The live-vs-final comparison: ONE overlay bar per final note at its
+    own pitch, the moved ones accented, replaced by a second reading and
+    cleared by a rebuild or a new take."""
+    from PyQt6.QtCore import Qt
+
+    from v2m.core.notes import Note
+
     roll = PianoRoll()
     roll.set_notes(_notes())
-    assert roll._diff_items == []
-    roll.outline_note(0.6, 1.1, 64, (77, 163, 216))
-    assert len(roll._diff_items) == 1
-    # the REAL color is the palette's hex string: `tuple(color)` once
-    # shattered it into 7 characters and the mark silently never drew
-    from v2m.gui.widgets import ACCENT
+    assert roll._compare_items == []
 
-    roll.outline_note(0.7, 1.0, 62, ACCENT)
-    assert len(roll._diff_items) == 2
-    # a note rebuild (set_notes without the fast path) also clears the marks
+    final = [Note(0.6, 1.1, 64, 0.9), Note(1.2, 1.7, 62, 0.9)]
+    roll.set_comparison_notes(final, moved={1})
+    assert len(roll._compare_items) == 2  # the WHOLE final reading, not just moves
+    # the moved note carries the solid accent edge, the agreeing one none
+    assert roll._compare_items[1].opts["pen"].style() == Qt.PenStyle.SolidLine
+    assert roll._compare_items[0].opts["pen"].style() == Qt.PenStyle.NoPen
+
+    # a second reading REPLACES the first: never two overlays at once
+    roll.set_comparison_notes(final[:1])
+    assert len(roll._compare_items) == 1
+
+    # a note rebuild (set_notes without the fast path) clears the overlay
     roll.set_notes(_notes(), force=True)
-    assert roll._diff_items == []
-    # a new take too
-    roll.outline_note(0.0, 0.5, 60, (77, 163, 216))
-    assert len(roll._diff_items) == 1
+    assert roll._compare_items == []
+
+    # ...and a new take starts from a clean roll
+    roll.set_comparison_notes(final)
+    assert len(roll._compare_items) == 2
     roll.begin_live()
-    assert roll._diff_items == []
+    assert roll._compare_items == []
+
+
+def test_the_live_final_overlay_can_be_hidden_and_restored(qapp):
+    """Comparison toggle leaves captured bars intact and reuses the same final."""
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        page = win.page_live
+        roll = page.piano_live
+        roll.set_notes(_notes())
+        final = [Note(0.6, 1.1, 64, 0.9)]
+
+        page.set_comparison_notes(final, moved={0})
+        assert len(roll._bar_items) == 3
+        assert len(roll._compare_items) == 1
+
+        page.set_comparison_visible(False)
+        assert len(roll._bar_items) == 3
+        assert roll._compare_items == []
+
+        page.set_comparison_visible(True)
+        assert len(roll._compare_items) == 1
+    finally:
+        win.close()
 
 
 def test_live_indicator_counter_shows_confirmed_notes(qapp):
@@ -394,6 +443,70 @@ def test_set_selectable_gates_both_directions_and_clears_the_pick(qapp):
     roll.set_selection([0])
     assert roll._selection == [0]
     assert roll._bar_items[0].opts["brush"] == ACCENT
+
+
+def _key_press(roll: PianoRoll, key, modifiers=Qt.KeyboardModifier.NoModifier):
+    """A real QKeyEvent delivered to the roll's own key handler."""
+    return QKeyEvent(QEvent.Type.KeyPress, key, modifiers)
+
+
+def test_the_arrow_keys_step_the_selection_note_by_note(qapp):
+    """Right/Left walk a single-note cursor through the notes in time
+    order (the ends hold); Shift+arrow extends the range by one note."""
+    roll = _selectable_roll()
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    # nothing picked yet: the first arrow enters at the near end
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Right))
+    assert roll._selection == [0]
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Right))
+    assert roll._selection == [1]
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Right))
+    assert roll._selection == [2]
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Right))  # the last note holds
+    assert roll._selection == [2]
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Left))
+    assert roll._selection == [1]
+    # the highlight follows the cursor, exactly like a gesture's selection
+    assert roll._bar_items[1].opts["brush"] == ACCENT
+    assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
+
+    # Shift extends the current range by one note at the moving edge
+    roll.keyPressEvent(
+        _key_press(roll, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+    )
+    assert roll._selection == [1, 2]
+    assert got[-1] == [1, 2]
+
+    # Shift+Left walks back past the start edge, collapsing onto the note
+    roll.set_selection([1])
+    roll.keyPressEvent(
+        _key_press(roll, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier)
+    )
+    assert roll._selection == [0, 1]
+
+
+def test_the_arrow_keys_enter_from_the_far_end_when_going_left(qapp):
+    roll = _selectable_roll()
+    roll.set_selection([])
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Left))
+    assert roll._selection == [2]
+
+
+def test_a_non_selectable_roll_ignores_the_arrow_keys(qapp):
+    """A frozen-out roll (a running take) never paints a selection from
+    the keyboard either — the same gate as the mouse gesture."""
+    roll = PianoRoll()
+    roll.resize(640, 480)
+    roll.set_notes(_notes())
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Right))
+
+    assert got == []
+    assert roll._selection == []
 
 
 # ---------------------------------------------------------------- waveform

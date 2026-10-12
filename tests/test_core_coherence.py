@@ -22,10 +22,7 @@ from __future__ import annotations
 
 import csv
 import json
-import sys
 from pathlib import Path
-
-import pytest
 
 from v2m.core import coherence as coh
 from v2m.core.i18n import set_language
@@ -289,3 +286,48 @@ def test_only_real_take_names_are_aggregated(tmp_path):
     _write_csv(_take_dir(tmp_path, "chant"), "chant", [])
     _write_csv(_take_dir(tmp_path, "live_bad"), "notes", [])
     assert coh.takes_under(tmp_path) == []
+
+
+def test_the_replayed_sidecar_wins_the_trend_reading(tmp_path):
+    """A trend point reads ONE source, never a mix: the REPLAYED sidecar
+    (fresh, engine-tagged, replaced by the cross-check) beats the
+    export-time block in the report; the report fills the gap when no
+    sidecar exists, and no reading at all leaves the trend waiting."""
+    from v2m.core.compare import write_sidecar
+
+    stem = "live_20260101_120000"
+    d = _take_dir(tmp_path, stem)
+    _write_csv(d, stem, [])
+    # the export-time reading, in the take's own report
+    (d / f"{stem}.json").write_text(
+        json.dumps({
+            "coherence": {"checked": 4, "suspects": []},
+            "live_vs_final": {"live": 37, "final": 31, "contours": 37,
+                              "off1": 20, "moved": 17, "absorbed": 0,
+                              "rate": 1.0},
+        }),
+        encoding="utf-8",
+    )
+    # the replayed cross-check, archived beside the artifacts
+    sidecar = write_sidecar(d / stem, {"live": 17, "final": 31, "contours": 8,
+                                       "off1": 5, "moved": 3, "absorbed": 14,
+                                       "rate": 0.48})
+    assert sidecar is not None  # the cross-check must be archived here
+    audit = coh.load_take(d / f"{stem}{coh.CSV_NAME}")
+    assert audit.contour_rate == 0.48   # the sidecar wins
+    assert audit.live_notes == 17       # both fields from the SAME source
+    assert audit.checked == 4           # the report's own fact is untouched
+
+    # no sidecar: the export-time block fills the gap
+    Path(sidecar).unlink()
+    audit = coh.load_take(d / f"{stem}{coh.CSV_NAME}")
+    assert audit.contour_rate == 1.0
+    assert audit.live_notes == 37
+
+    # neither: the trend waits — it never guesses a number
+    (d / f"{stem}.json").write_text(
+        json.dumps({"coherence": {"checked": 4, "suspects": []}}),
+        encoding="utf-8",
+    )
+    audit = coh.load_take(d / f"{stem}{coh.CSV_NAME}")
+    assert audit.contour_rate is None and audit.live_notes is None

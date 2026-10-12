@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from v2m.core import audio_io, coherence as coh
+from v2m.core import take_export as te
 from v2m.core.replay import replay_take
 from tests.test_live_gui import FakeMic
 from tests.test_pipeline import _melody
@@ -140,7 +141,7 @@ def _redirect(monkeypatch, mw, tmp_path) -> None:
     def fake_export(res, stem, **kw) -> None:
         Path(stem).parent.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(mw, "export_result", fake_export)
+    monkeypatch.setattr(te, "export_result", fake_export)
     monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
 
 
@@ -171,28 +172,43 @@ def test_a_failing_wav_write_warns_and_still_exports(qapp, monkeypatch, tmp_path
 
 
 def test_the_export_announcement_lists_only_files_that_exist(qapp, monkeypatch, tmp_path):
+    """The status line claims exactly what is on disk — no more.
+
+    The writer here creates only `<stem>.json` while the contract has five
+    extensions: the announcement must name that one file and never the
+    others, so a half-written export (disk full mid-file) cannot read as
+    complete.
+    """
+    from v2m.core.i18n import tr
+    from v2m.core.takes import ARTIFACTS
     from v2m.gui import main_window as mw
 
-    _redirect(monkeypatch, mw, tmp_path)
+    def one_artifact(res, stem, **kw) -> None:
+        Path(stem).parent.mkdir(parents=True, exist_ok=True)
+        Path(str(stem) + ".json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(te, "export_result", one_artifact)
+    monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
+    monkeypatch.setattr("v2m.core.retention.prune_takes", lambda _root: [])
+
     win = mw.MainWindow()
     try:
-        win.result = cast(Any, _fake_live_result())
+        monkeypatch.setattr(win, "_refresh_exported_coherence", lambda: None)
+        monkeypatch.setattr(win, "_pump_replay_queue", lambda: None)
+        win.result = cast(Any, SimpleNamespace(source="live", quantize_step=lambda _d: 0.1))
         win._live_signal = np.zeros(audio_io.SR, dtype=np.float32)
         win._live_record_audio = False
         win._export_results()
-        # take_dir has exactly what the fake export wrote (nothing real):
-        # the announcement must not claim ARTIFACT_EXTENSIONS wholesale
-        take_dir = next(tmp_path.glob("*/"))
-        written = {p.name.split(".", 1)[1] for p in take_dir.iterdir() if "." in p.name}
-        stem = take_dir.name
-        from v2m.core.takes import ARTIFACTS
 
-        claimed = [
-            ext for ext in ARTIFACTS
-            if (take_dir / f"{stem}{ext}").exists()
-        ]
-        assert all(f"{stem}{ext}" not in written for ext in ())  # noqa: PT018
-        assert not claimed or claimed == sorted(claimed)
+        take_dir = next(tmp_path.glob("*/"))
+        stem = take_dir.name
+        message = win.statusBar().currentMessage()
+        assert message == tr("ui status exported").format(files=f"{stem}.json")
+        for ext in ARTIFACTS:
+            if ext == ".json":
+                continue
+            assert not (take_dir / f"{stem}{ext}").exists()
+            assert f"{stem}{ext}" not in message
     finally:
         win.close()
 

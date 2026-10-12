@@ -93,7 +93,10 @@ def test_the_quiet_controls_share_one_footer_row(page):
     right += page.btn_coherence.width()
     assert page.btn_lang.width() < page.width() / 2
     assert page.btn_coherence.width() < page.width() / 2
-    # centered as a pair: equal margins on both sides (2 px of rounding)
+    # centered as a trio: equal margins on both sides (2 px of rounding)
+    # — the calibration toggle joined the quiet row (2026-10-12 design)
+    right = page.btn_calibrate.mapTo(page, page.btn_calibrate.rect().topLeft()).x()
+    right += page.btn_calibrate.width()
     assert abs(lang_left - (page.width() - right)) <= 2
 
 

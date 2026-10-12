@@ -17,20 +17,38 @@ piano roll. The public methods (`set_result`, the playhead writes,
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 import numpy as np
-from PyQt6.QtCore import QItemSelection, QItemSelectionModel
+from PyQt6.QtCore import QEvent, QItemSelection, QItemSelectionModel, Qt
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QProgressBar, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from ..core.audio_io import SR
 from ..core.grid import BeatGrid
-from ..core.i18n import tr
+from ..core.i18n import note_display_pair, tr, tr_key_label
 from .staff import StaffView
-from .widgets import PianoRoll, PianoView, ResultsPanel, WaveformView
+from .widgets import (
+    PianoRoll,
+    PianoView,
+    ResultsPanel,
+    WaveformView,
+    action_button_style,
+)
 
 if TYPE_CHECKING:
     from ..core.pipeline import AnalysisResult
@@ -43,6 +61,7 @@ class ResultsPage(QWidget):
         self,
         on_seek: Callable[[float], None],
         correct_note: Callable[[int, int], None],
+        note_moved: Callable[[int, float, float, int], None],
         replace_phrase: Callable[[], None],
         finish_replacement: Callable[[], None],
         toggle_play: Callable[[], None],
@@ -52,6 +71,7 @@ class ResultsPage(QWidget):
         transpose_changed: Callable[[int], None],
         export_again: Callable[[], None],
         reinterpret: Callable[[], None],
+        full_reanalyze: Callable[[], None],
         open_file: Callable[[], None],
         back_home: Callable[[], None],
         undo_edit: Callable[[], None],
@@ -61,10 +81,18 @@ class ResultsPage(QWidget):
         cancel_replacement: Callable[[], None],
         audition_replacement: Callable[[], None],
         audition_original: Callable[[], None],
+        show_live_roll: Callable[[], None],
+        audition_note: Callable[[int], None],
+        audition_pitch: Callable[[int], None],
+        stop_audition: Callable[[], None],
+        toggle_live_comparison: Callable[[bool], None],
     ) -> None:
         super().__init__()
+        self.setMinimumSize(0, 0)
         self._on_seek = on_seek
         self._correct_note = correct_note
+        # the roll's drag-to-move (ONE recorded edit, like the correction)
+        self._note_moved_cb = note_moved
         self._replace_phrase = replace_phrase
         self._finish_replacement = finish_replacement
         self._toggle_play = toggle_play
@@ -74,6 +102,7 @@ class ResultsPage(QWidget):
         self._transpose_changed = transpose_changed
         self._export_again = export_again
         self._reinterpret = reinterpret
+        self._full_reanalyze = full_reanalyze
         self._open_file = open_file
         self._back_home = back_home
         self._undo_edit = undo_edit
@@ -83,6 +112,13 @@ class ResultsPage(QWidget):
         self._cancel_replacement = cancel_replacement
         self._audition_replacement = audition_replacement
         self._audition_original = audition_original
+        self._show_live_roll = show_live_roll
+        self._audition_note_cb = audition_note
+        # plays ONE candidate pitch while a key is being chosen (before Enter)
+        self._audition_pitch = audition_pitch
+        self._stop_audition_cb = stop_audition
+        self._toggle_live_comparison_cb = toggle_live_comparison
+        self._note_audition: tuple[int, int, int] | None = None
         # the file name remembered for retranslate (a progress line writes
         # the label WITHOUT replacing it — see set_file_label)
         self._file_name: str | None = None
@@ -90,8 +126,13 @@ class ResultsPage(QWidget):
         # the toolbar's selection readout needs their time spans)
         self._notes: list = []
         self._has_live_result = False
+        self._summary_facts: tuple[int, float, float | None, str | None] | None = None
         self._replacement_analyzing = False
         self._replacement_pending_ui = False
+        self._full_reanalysis_active = False
+        # the before/after reading diff kept across a retranslate (the core
+        # comparison object, or None before any re-analysis succeeded)
+        self._reading_diff = None
         # the undo/redo enabled state is a HISTORY fact (the window's edit
         # history owns it): stored here so a selection change can re-apply
         # it without the window having to re-push it
@@ -112,6 +153,18 @@ class ResultsPage(QWidget):
         self.btn_back = QPushButton("")
         self.btn_back.clicked.connect(self._back_home)
         top.addWidget(self.btn_back)
+        # the frozen live roll is a separate reading of the SAME take (the
+        # notes as they were captured): the way back to it from the final
+        # analysis, shown only for a live take
+        self.btn_live_roll = QPushButton("")
+        self.btn_live_roll.clicked.connect(self._show_live_roll)
+        self.btn_live_roll.setVisible(False)
+        top.addWidget(self.btn_live_roll)
+        self.chk_live_comparison = QCheckBox("")
+        self.chk_live_comparison.setChecked(True)
+        self.chk_live_comparison.toggled.connect(self._toggle_live_comparison_cb)
+        self.chk_live_comparison.setVisible(False)
+        top.addWidget(self.chk_live_comparison)
         self.label_file = QLabel("")
         self.label_file.setStyleSheet("font-weight: bold;")
         top.addWidget(self.label_file, stretch=1)
@@ -119,17 +172,30 @@ class ResultsPage(QWidget):
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(10)
+        self.progress.setMaximumHeight(10)
         root.addWidget(self.progress)
 
         body = QHBoxLayout()
         left = QVBoxLayout()
+        # the diff legend ABOVE the roll: names "before" vs "after" so the
+        # ghost wash reads without a second look (hidden until a diff exists)
+        self.label_diff_legend = QLabel("")
+        self.label_diff_legend.setVisible(False)
         self.waveform = WaveformView()
         self.piano = PianoRoll(selectable=True)
+        # the results roll's bars DRAG (onset/duration/pitch as one edit);
+        # the live review roll stays pick-only
+        self.piano.set_editable(True)
         self.piano.seek_requested.connect(self._on_seek)
         self.piano.note_selection.connect(self._on_roll_selection)
+        self.piano.note_dragged.connect(self._note_moved_cb)
+        self.piano.audition_requested.connect(self._audition_note_cb)
         self.staff = StaffView()
         left.addWidget(self.waveform, stretch=1)
         left.addWidget(self.staff, stretch=2)
+        left.addWidget(self.label_diff_legend)
         left.addWidget(self.piano, stretch=2)
 
         playback = QHBoxLayout()
@@ -142,11 +208,18 @@ class ResultsPage(QWidget):
         self.btn_both = QPushButton("")
         self.btn_both.setMinimumWidth(72)
         self.btn_both.clicked.connect(self._toggle_both)
+        self.btn_stop_audition = QPushButton("")
+        self.btn_stop_audition.clicked.connect(self._stop_audition_cb)
+        self.btn_stop_audition.setVisible(False)
         self.label_play_pos = QLabel("")
+        self.label_note_audition = QLabel("")
+        self.label_note_audition.setVisible(False)
         playback.addWidget(self.btn_play)
         playback.addWidget(self.btn_voice)
         playback.addWidget(self.btn_both)
         playback.addWidget(self.label_play_pos, stretch=1)
+        playback.addWidget(self.label_note_audition)
+        playback.addWidget(self.btn_stop_audition)
         # the rendered piano's volume, for comparing it with the singer's voice
         self.label_volume = QLabel("")
         self.slider_volume = QSlider(self._qt_orientation())
@@ -158,11 +231,15 @@ class ResultsPage(QWidget):
         playback.addWidget(self.slider_volume)
         left.addLayout(playback)
         self.piano_keys = PianoView()
+        self.piano_keys.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.piano_keys.setToolTip(tr("ui piano keyboard help"))
         self.piano_keys.key_clicked.connect(self._on_key_clicked)
+        self.piano_keys.installEventFilter(self)
         left.addWidget(self.piano_keys)
         body.addLayout(left, stretch=3)
 
         right = QVBoxLayout()
+        right.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinAndMaxSize)
         self.results = ResultsPanel()
         self.results._notes_table.setSelectionBehavior(
             self.results._notes_table.SelectionBehavior.SelectRows
@@ -171,7 +248,35 @@ class ResultsPage(QWidget):
             self.results._notes_table.SelectionMode.ExtendedSelection
         )
         self.results._notes_table.itemSelectionChanged.connect(self._on_table_selection)
-        right.addWidget(self.results, stretch=1)
+        self.results._notes_table.audition_requested.connect(self._audition_note_cb)
+        self.summary_card = QGroupBox("")
+        summary = QVBoxLayout(self.summary_card)
+        self.label_summary = QLabel("")
+        self.label_summary.setWordWrap(True)
+        self.label_summary.setStyleSheet("font-size: 11pt; font-weight: 600;")
+        summary.addWidget(self.label_summary)
+        self.results.setMaximumHeight(340)
+        self.results.setMinimumHeight(0)
+        self.btn_export = QPushButton("")
+        self.btn_export.setStyleSheet(action_button_style(primary=True))
+        self.btn_export.setMinimumHeight(46)
+        self.btn_export.clicked.connect(self._export_again)
+        self.details_toggle = QPushButton("")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setChecked(False)
+        self.details_toggle.toggled.connect(self._toggle_details)
+        self.results.setVisible(False)
+        self.details_toggle.setText(tr("ui show details"))
+        right.addWidget(self.summary_card)
+        right.addWidget(self.btn_export)
+        right.addWidget(self.details_toggle)
+        self.details_scroll = QScrollArea()
+        self.details_scroll.setWidgetResizable(True)
+        self.details_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.details_scroll.setMinimumHeight(0)
+        self.details_scroll.setWidget(self.results)
+        self.details_scroll.setVisible(False)
+        right.addWidget(self.details_scroll, stretch=1)
         self.label_edit_hint = QLabel("")
         self.label_edit_hint.setWordWrap(True)
         right.addWidget(self.label_edit_hint)
@@ -264,19 +369,66 @@ class ResultsPage(QWidget):
         form.addWidget(self.lbl_pdf_note, 4, 0, 1, 2)
         right.addWidget(options)
 
-        self.btn_export = QPushButton("")
-        self.btn_export.clicked.connect(self._export_again)
-        right.addWidget(self.btn_export)
-        # re-read the take's evidence with the CURRENT thresholds (the spin
-        # boxes above): interpretation only, the cached observation skips pYIN
+        # A fast cached-evidence read is deliberately distinct from a fresh
+        # pYIN pass over the retained audio.
         self.btn_reinterpret = QPushButton("")
         self.btn_reinterpret.clicked.connect(self._reinterpret)
         right.addWidget(self.btn_reinterpret)
+        self.btn_full_reanalyze = QPushButton("")
+        self.btn_full_reanalyze.setStyleSheet(action_button_style(primary=True))
+        self.btn_full_reanalyze.clicked.connect(self._full_reanalyze)
+        right.addWidget(self.btn_full_reanalyze)
         self.btn_open = QPushButton("")
         self.btn_open.clicked.connect(self._open_file)
         right.addWidget(self.btn_open)
-        body.addLayout(right, stretch=1)
+
+        # The complete control column scrolls as one unit. The compact
+        # summary and export remain at the top of this column's scroll range.
+        right_content = QWidget()
+        right_content.setLayout(right)
+        self.right_scroll = QScrollArea()
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.right_scroll.setWidget(right_content)
+        body.addWidget(self.right_scroll, stretch=1)
         root.addLayout(body, stretch=1)
+        # Keyboard traversal in task order: choose a note, pick a pitch if
+        # needed, audition, edit, then export or re-read.
+        focus_order = (
+            self.btn_back,
+            self.btn_live_roll,
+            self.chk_live_comparison,
+            self.details_toggle,
+            self.results._notes_table,
+            self.piano,
+            self.piano_keys,
+            self.btn_play,
+            self.btn_voice,
+            self.btn_both,
+            self.btn_stop_audition,
+            self.slider_volume,
+            self.btn_undo,
+            self.btn_redo,
+            self.btn_replace_phrase,
+            self.btn_audition_original,
+            self.btn_finish_replacement,
+            self.combo_edit_states,
+            self.btn_audition_replacement,
+            self.btn_accept_replacement,
+            self.btn_cancel_replacement,
+            self.spin_min_note,
+            self.chk_quantize,
+            self.spin_transpose,
+            self.chk_notation,
+            self.chk_pdf,
+            self.btn_export,
+            self.btn_reinterpret,
+            self.btn_full_reanalyze,
+            self.btn_open,
+        )
+        self._focus_order = focus_order
+        for first, second in zip(focus_order, focus_order[1:], strict=False):
+            QWidget.setTabOrder(first, second)
 
     @staticmethod
     def _qt_orientation():
@@ -284,6 +436,28 @@ class ResultsPage(QWidget):
         from PyQt6.QtCore import Qt
 
         return Qt.Orientation.Horizontal
+
+    def _render_summary(self) -> None:
+        """Render the compact facts in the active language."""
+        if self._summary_facts is None:
+            self.label_summary.setText("")
+            return
+        notes, duration, bpm, key_label = self._summary_facts
+        tempo = f"{bpm:.0f} BPM" if bpm is not None else "—"
+        key = tr_key_label(key_label) if key_label is not None else "—"
+        self.label_summary.setText(
+            tr("ui summary facts").format(
+                notes=notes, duration=duration, tempo=tempo, key=key
+            )
+        )
+
+    def _toggle_details(self, expanded: bool) -> None:
+        """Show or hide the diagnostic table without hiding the summary."""
+        self.details_scroll.setVisible(expanded)
+        self.results.setVisible(True)
+        self.details_toggle.setText(
+            tr("ui hide details") if expanded else tr("ui show details")
+        )
 
     def _on_notation_toggled(self) -> None:
         """The checkbox drives THIS page's roll only — no window fact."""
@@ -295,6 +469,19 @@ class ResultsPage(QWidget):
     def retranslate(self) -> None:
         """The page's user-facing strings (the window's retranslate calls it)."""
         self.btn_back.setText(tr("ui back home"))
+        self.summary_card.setTitle(tr("ui take summary"))
+        self._render_summary()
+        self.details_toggle.setText(
+            tr("ui hide details") if self.details_toggle.isChecked()
+            else tr("ui show details")
+        )
+        self._toggle_details(self.details_toggle.isChecked())
+        self.btn_live_roll.setText(tr("ui live roll"))
+        self.btn_live_roll.setToolTip(tr("ui live roll tooltip"))
+        self.btn_live_roll.setVisible(self._has_live_result)
+        self.chk_live_comparison.setText(tr("ui live comparison"))
+        self.chk_live_comparison.setToolTip(tr("ui live comparison tooltip"))
+        self.chk_live_comparison.setVisible(self._has_live_result)
         if self._file_name:
             self.label_file.setText(self._file_name)
         else:
@@ -304,6 +491,8 @@ class ResultsPage(QWidget):
         self._lbl_min_note.setText(tr("ui min note"))
         self.btn_reinterpret.setText(tr("ui reinterpret"))
         self.btn_reinterpret.setToolTip(tr("ui reinterpret tooltip"))
+        self.btn_full_reanalyze.setText(tr("ui full reanalyze"))
+        self.btn_full_reanalyze.setToolTip(tr("ui full reanalyze tooltip"))
         self._lbl_transpose.setText(tr("ui transpose"))
         self.chk_notation.setText(tr("ui notation mode"))
         self.chk_pdf.setText(tr("ui pdf option"))
@@ -325,6 +514,7 @@ class ResultsPage(QWidget):
         self.btn_cancel_replacement.setText(tr("ui cancel replacement"))
         self.label_edit_hint.setText(tr("ui edit hint"))
         self._update_selection_label()  # dynamic text: re-render in the new language
+        self.piano_keys.setToolTip(tr("ui piano keyboard help"))
         for row_index, (_state, action) in enumerate(self._edit_states):
             self.combo_edit_states.setItemText(row_index, tr(action))
         self.btn_open.setText(tr("ui open another"))
@@ -334,13 +524,43 @@ class ResultsPage(QWidget):
         self.btn_voice.setToolTip(tr("ui play voice"))
         self.btn_both.setText(tr("ui play both"))
         self.btn_both.setToolTip(tr("ui play both tooltip"))
+        self.btn_stop_audition.setText(tr("ui piano stop audition"))
+        self.btn_stop_audition.setToolTip(tr("ui piano stop audition tooltip"))
+        self._render_note_audition()
         self.label_volume.setText(tr("ui volume"))
         self.slider_volume.setToolTip(tr("ui volume tooltip"))
         self.label_play_pos.setText(tr("ui play pos"))
+        if self._reading_diff is not None:
+            # the kept facts re-render (the core object is untouched)
+            self.label_diff_legend.setText(self._diff_legend_text())
+            self.label_diff_legend.setVisible(True)
+            self.results.set_reading_diff(self._reading_diff)
 
     # ------------------------------------------------------------------
     # view fills
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # the named surface (ADR 0039): the window reads/writes the page's
+    # options through verbs, never through the page's spin boxes
+    # ------------------------------------------------------------------
+    def transpose_st(self) -> int:
+        """The transpose box's value (semitones; the export and voice
+        player both read it)."""
+        return self.spin_transpose.value()
+
+    def min_note_ms(self) -> int:
+        """The minimum-note threshold in milliseconds (the reinterpret
+        and analysis options read it)."""
+        return self.spin_min_note.value()
+
+    def quantize_checked(self) -> bool:
+        """Whether the MIDI export should quantize to the grid."""
+        return self.chk_quantize.isChecked()
+
+    def pdf_checked(self) -> bool:
+        """Whether the export engraves a PDF."""
+        return self.chk_pdf.isChecked()
+
     def set_source_name(self, name: str) -> None:
         """Remember the take's display name (survives a retranslate)."""
         self._file_name = name
@@ -358,6 +578,37 @@ class ResultsPage(QWidget):
 
     def set_progress(self, percent: int) -> None:
         self.progress.setValue(percent)
+
+    def set_reading_diff(self, comparison) -> None:
+        """Show one before/after comparison after a successful re-analysis.
+
+        The comparison is RENDER facts only: ghost bars on the roll (the
+        old reading), the accented changed bars, the compact count line and
+        the suspect detail — all computed by the core (`reading_diff`),
+        held here for retranslation. Clearing is `clear_reading_diff`.
+        """
+        self._reading_diff = comparison
+        changed_afters = tuple(p.after.index for p in comparison.pairs if p.status == "changed")
+        near_afters = tuple(p.after.index for p in comparison.pairs if p.status == "near")
+        self.piano.set_ghost_notes(
+            [(n.start, n.end, n.midi) for n in comparison.before_notes],
+            changed_afters=changed_afters,
+            near_afters=near_afters,
+        )
+        self.results.set_reading_diff(comparison)
+        self.label_diff_legend.setVisible(True)
+        self.label_diff_legend.setText(self._diff_legend_text())
+
+    def clear_reading_diff(self) -> None:
+        """Drop the before/after overlay and detail (a new reading/edit boundary).
+        Idempotent, and harmless before any comparison was shown."""
+        self._reading_diff = None
+        self.piano.clear_ghost_notes()
+        self.results.clear_reading_diff()
+        self.label_diff_legend.setVisible(False)
+
+    def _diff_legend_text(self) -> str:
+        return tr("ui diff legend")
 
     def ack_export(self) -> None:
         """The export's feedback, where the eye already is."""
@@ -415,6 +666,22 @@ class ResultsPage(QWidget):
         )
 
     def _update_edit_controls(self) -> None:
+        if self._full_reanalysis_active:
+            for button in (
+                self.btn_export,
+                self.btn_reinterpret,
+                self.btn_full_reanalyze,
+                self.btn_open,
+                self.btn_undo,
+                self.btn_redo,
+                self.btn_replace_phrase,
+                self.btn_audition_original,
+                self.btn_finish_replacement,
+            ):
+                button.setEnabled(False)
+            self.combo_edit_states.setEnabled(False)
+            self.label_edit_hint.setText(tr("ui full reanalysis running"))
+            return
         if self._replacement_analyzing:
             self.btn_replace_phrase.setVisible(False)
             self.btn_audition_original.setEnabled(False)
@@ -454,6 +721,7 @@ class ResultsPage(QWidget):
         )
         self.btn_export.setEnabled(not self.btn_finish_replacement.isVisible())
         self.btn_reinterpret.setEnabled(not self.btn_finish_replacement.isVisible())
+        self.btn_full_reanalyze.setEnabled(not self.btn_finish_replacement.isVisible())
         self.btn_undo.setEnabled(self._can_undo)
         self.btn_redo.setEnabled(self._can_redo)
         self.combo_edit_states.setEnabled(True)
@@ -469,6 +737,105 @@ class ResultsPage(QWidget):
         indices = self._selected_note_indices()
         if len(indices) == 1:
             self._correct_note(indices[0], midi)
+
+    def _apply_staged_key(self) -> None:
+        """Apply the pitch staged on the focused keyboard (Enter).
+
+        The staged pitch IS the widget's keyboard cursor — one fact, drawn
+        where the user looks; it exists only while the keyboard has focus.
+        """
+        midi = self.piano_keys.keyboard_cursor
+        if midi is None:
+            return
+        self.piano_keys.set_keyboard_cursor(None)
+        self._on_key_clicked(midi)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Give the focused results page a keyboard route into its note list."""
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Home, Qt.Key.Key_End):
+            self.results._notes_table.setFocus()
+            self.results._notes_table.keyPressEvent(event)
+            return
+        if event.key() == Qt.Key.Key_Space:
+            indices = self._selected_note_indices()
+            if len(indices) == 1:
+                self._audition_note_cb(indices[0])
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        """Stage, step and apply a piano-key correction from the keyboard.
+
+        Enter/Escape/arrows are consumed here so the correction is STAGED
+        (arrows choose, Enter applies, Escape cancels) instead of firing
+        on a key press. The staged pitch lives only while the keyboard is
+        focused: staged on focus from the selected note, cleared on blur.
+        """
+        if watched is not self.piano_keys:
+            return super().eventFilter(watched, event)
+        kind = event.type()
+        if kind == QEvent.Type.FocusIn:
+            indices = self._selected_note_indices()
+            midi = (
+                self._notes[indices[0]].midi
+                if len(indices) == 1 and indices[0] < len(self._notes)
+                else None
+            )
+            # stage only a pitch this keyboard renders: the mouse cannot
+            # point at an invisible key either
+            if midi is not None and not (
+                self.piano_keys.min_midi <= midi <= self.piano_keys.max_midi
+            ):
+                midi = None
+            self.piano_keys.set_keyboard_cursor(midi)
+            return super().eventFilter(watched, event)
+        if kind == QEvent.Type.FocusOut:
+            self.piano_keys.set_keyboard_cursor(None)
+            return super().eventFilter(watched, event)
+        if kind == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._apply_staged_key()
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_Escape:
+                self.piano_keys.set_keyboard_cursor(None)
+                event.accept()
+                return True
+            if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+                current = self.piano_keys.keyboard_cursor
+                if current is None:
+                    current = 60  # middle C when nothing is staged yet
+                step = -1 if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Down) else 1
+                lo, hi = self.piano_keys.min_midi, self.piano_keys.max_midi
+                staged = min(hi, max(lo, current + step))
+                self.piano_keys.set_keyboard_cursor(staged)
+                # hear the candidate NOW: the pitch is validated by Enter,
+                # never guessed from its name alone
+                self._audition_pitch(staged)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def set_full_reanalysis(self, active: bool) -> None:
+        """Lock edits and exports until a fresh evidence pass resolves."""
+        self._full_reanalysis_active = active
+        if active:
+            self.progress.setValue(0)
+            self.label_play_pos.setText(tr("ui full reanalysis running"))
+        self._update_edit_controls()
+
+    def finish_full_reanalysis(self) -> None:
+        """Restore controls and show complete progress after worker completion."""
+        self._full_reanalysis_active = False
+        self.progress.setValue(100)
+        self.label_play_pos.setText(tr("ui play pos"))
+        self._update_edit_controls()
+
+    def set_full_reanalysis_progress(self, fraction: float, message: str) -> None:
+        """Show the pipeline's own stage progress during a pYIN rerun."""
+        self.progress.setValue(max(0, min(100, int(fraction * 100))))
+        self.label_play_pos.setText(message)
 
     def set_replacement_active(self, active: bool) -> None:
         self._replacement_analyzing = False
@@ -523,8 +890,8 @@ class ResultsPage(QWidget):
     def _on_state_chosen(self, row_index: int) -> None:
         """Hand the chosen row to the window (a jump = stepped undo/redo).
 
-        The current state's row (the None reference, always last) jumps to
-        nothing; a row whose action is disabled comes through only when the
+        The current state's row (the None reference) jumps to nothing; a row
+        whose action is disabled comes through only when the
         dropdown itself was enabled — the window's guards are the authority.
         """
         if not 0 <= row_index < len(self._edit_states):
@@ -543,15 +910,32 @@ class ResultsPage(QWidget):
             button.setVisible(visible)
 
     def set_result(self, res: "AnalysisResult", signal: np.ndarray | None = None) -> None:
-        """Fill every view from one analysis result (file or live take).
+        """Render a completed result and its page-owned presentation state.
 
-        `signal` is the decoded audio the waveform shows — the window's
-        cache decides which (a file view must never show a live take);
-        None leaves the waveform untouched.
+        The window resolves `signal` from the file cache or active live take;
+        this page owns its canonical display name and completed progress.
+        Missing or empty audio leaves the waveform untouched.
         """
+        self.set_source_name(
+            tr("ui live file") if res.source == "live" else Path(res.source).name
+        )
+        self._summary_facts = (
+            len(res.notes),
+            res.duration_s,
+            res.tempo.bpm if res.tempo is not None else None,
+            res.key.best.label if res.key is not None else None,
+        )
+        self._render_summary()
+        self.set_progress(100)
+        self.details_toggle.setChecked(False)
+        self._toggle_details(False)
         self._has_live_result = res.source == "live"
+        self.btn_live_roll.setVisible(self._has_live_result)
+        self.chk_live_comparison.setVisible(self._has_live_result)
+        self.chk_live_comparison.setChecked(self._has_live_result)
         was_replacing = self.btn_finish_replacement.isVisible()
         self.results.set_results(res)
+        self.results.set_chord_progression(res)
         self._notes = list(res.notes)
         self.results._notes_table.clearSelection()
         self.piano.set_selection([])  # a new result starts with no highlight
@@ -598,6 +982,34 @@ class ResultsPage(QWidget):
             f" / {int(duration // 60):02d}:{int(duration % 60):02d}"
         )
 
+    def show_note_audition(self, index: int, midi: int, count: int) -> None:
+        """Identify the note sounding from Space and expose its stop action."""
+        self._note_audition = (index, midi, count)
+        self._render_note_audition()
+
+    def stop_note_audition(self) -> None:
+        """Hide the note-specific readout when its audition ends."""
+        self._note_audition = None
+        self._render_note_audition()
+
+    def _render_note_audition(self) -> None:
+        """Render the current note-audition fact in the active language.
+
+        The stop action sits at its permanent place in the page's ONE
+        focus order; Qt skips it while hidden, so showing or hiding the
+        readout never relinks the chain.
+        """
+        current = self._note_audition
+        self.label_note_audition.setVisible(current is not None)
+        self.btn_stop_audition.setVisible(current is not None)
+        if current is not None:
+            index, midi, count = current
+            self.label_note_audition.setText(
+                tr("ui piano audition label").format(
+                    note=note_display_pair(midi), i=index + 1, n=count
+                )
+            )
+
     def sync_play_buttons(self, mode: str | None) -> None:
         """The three buttons reflect the sounding mode (None = stopped)."""
         self.btn_play.setText("■" if mode == "piano" else "▶")
@@ -605,6 +1017,11 @@ class ResultsPage(QWidget):
         self.btn_both.setText("■" if mode == "both" else "🎹+🎙")
 
     def reset_play_buttons(self) -> None:
-        """Stopped state: every button up, every key released."""
+        """Stopped state: every button up, every key released.
+
+        The note-audition readout is NOT this method's to clear — the
+        controller's transitions are the ONE path that resolves it (the
+        window applies them).
+        """
         self.sync_play_buttons(None)
         self.piano_keys.set_playhead(-1.0)  # all keys up

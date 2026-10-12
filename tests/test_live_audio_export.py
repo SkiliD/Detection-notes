@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from v2m.core import audio_io
+from v2m.core import take_export as te
 
 
 @pytest.fixture(scope="module")
@@ -40,7 +41,7 @@ def test_export_writes_the_take_audio_only_when_asked(qapp, monkeypatch, tmp_pat
 
     from v2m.gui import main_window as mw
 
-    monkeypatch.setattr(mw, "export_result", lambda res, stem, **kw: None)
+    monkeypatch.setattr(te, "export_result", lambda res, stem, **kw: None)
     # the take folder is redirected: the test must never write into the repo
     monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
 

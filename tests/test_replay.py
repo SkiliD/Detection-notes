@@ -29,13 +29,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 
-from v2m.core import audio_io
-from v2m.core.replay import _fake_input_stream, replay_take
-
 # the synthetic singer (and the pumping helper) the harnesses own: the
 # replay tests ride the SAME voice instead of inventing one
 from tests.test_live_gui import FakeMic, _pump_until
 from tests.test_pipeline import _melody
+from v2m.core import audio_io
+from v2m.core.replay import _fake_input_stream, replay_take
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +57,6 @@ def _save_sung_wav(tmp_path: Path) -> Path:
 @pytest.mark.slow  # a full real-time replay of the take (~2 s audio + analysis)
 def test_replay_feeds_the_real_chain_in_real_time(tmp_path):
     """A replay goes through LiveCapture (blocks on the real clock), not in bulk."""
-    from v2m.core.compare import breakdown
 
     # the take's own chain, but the stream is INJECTED (no global swap of
     # the real InputStream): the fake feed delivers THE TAKE's audio at 1x,
@@ -95,8 +93,11 @@ def test_replay_feeds_the_real_chain_in_real_time(tmp_path):
     # (`live`/`final`) is the sidecar's, written by the worker test below
     assert {
         "stem", "duration_s", "live_notes", "final_notes", "contours",
-        "off1", "moved", "absorbed", "rate", "tempo_bpm",
+        "off1", "moved", "absorbed", "rate", "tempo_bpm", "dropped",
+        "drain_min",
     } <= set(row)
+    assert isinstance(row["dropped"], int) and row["dropped"] >= 0
+    assert 0.0 <= row["drain_min"] <= 1.0
 
 
 @pytest.mark.slow  # real-time delivery IS the assertion: it costs the duration

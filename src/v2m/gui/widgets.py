@@ -6,14 +6,60 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QItemSelection, QItemSelectionModel, Qt, pyqtSignal
 
 from ..core.figures import figures_summary, short_label
 from ..core.accuracy import AccuracyHistory
 from ..core.continuity import coherence_report
-from ..core.intonation import IN_TUNE_CENTS
-from ..core.i18n import note_display_pair, tr, tr_chord_label, tr_figure, tr_key_label
-from ..core.music import midi_to_name
+from ..core.intonation import IN_TUNE_CENTS, summarize as summarize_intonation
+from ..core.i18n import (
+    note_display, note_display_pair, tr, tr_chord_label, tr_figure, tr_key_label,
+)
+
+
+def intonation_lines(summary: dict) -> list[str]:
+    """The intonation report as display lines (the shared rendering).
+
+    The results panel and the live feedback both call this with a
+    `intonation.summarize` dict — the same share, the same tendency
+    wording, the same register leans — so the singer's take-so-far line
+    and the per-take report can never disagree about the words or the
+    scale. The caller supplies the evidence; this only translates it.
+    """
+    if summary["in_tune_share"] is None:
+        return []
+    lines = [
+        tr("ui intonation share").format(
+            share=round(100.0 * summary["in_tune_share"])
+        )
+    ]
+    tendency = summary["tendency"]
+    if tendency == "even":
+        direction = tr("ui intonation even")
+    elif tendency == "sharp":
+        direction = tr("ui intonation sharp").format(cents=summary["mean_cents"])
+    elif tendency == "flat":
+        direction = tr("ui intonation flat").format(cents=summary["mean_cents"])
+    else:
+        direction = None
+    if direction is not None:
+        lines.append(tr("ui intonation tendency").format(dir=direction))
+    band_names = {
+        "low": tr("ui register low"),
+        "mid": tr("ui register mid"),
+        "high": tr("ui register high"),
+    }
+    register = summary.get("by_register") or {}
+    rows = [
+        tr("ui register lean").format(
+            band=band_names[band], cents=register[band]["mean_cents"]
+        )
+        for band in ("low", "mid", "high")
+        if register.get(band) is not None
+    ]
+    if rows:
+        lines.append(tr("ui intonation registers").format(rows=" · ".join(rows)))
+    return lines
 
 # Confidence color ramp (red -> green)
 LOW_COLOR = (220, 80, 80)
@@ -46,6 +92,21 @@ def tuning_color(cents: float | None) -> tuple[int, int, int]:
         return AMBER_COLOR
     return MISMATCH_COLOR
 
+
+def tuning_advice(cents: float) -> str:
+    """One-line intonation verdict for a cents deviation.
+
+    The SAME scale `tuning_color` paints: on the note, watch it, or sit
+    noticeably off. Shared so the report's global offset and the note
+    finder's live reading can never disagree about what "in tune" means.
+    """
+    if abs(cents) <= CENTER_CENTS:
+        return tr("ui tuning ok")
+    direction = tr("ui tuning sharp") if cents > 0 else tr("ui tuning flat")
+    if abs(cents) <= NEAR_CENTS:
+        return tr("ui tuning slightly off").format(dir=direction)
+    return tr("ui tuning off").format(dir=direction)
+
 # Colors per note figure (keys match the figure names produced by figures.py)
 FIGURE_COLORS = {
     "ronde": (240, 240, 160),
@@ -57,6 +118,22 @@ FIGURE_COLORS = {
     "pointée": (200, 200, 200),
 }
 UNCLASSIFIED_COLOR = (120, 120, 130)
+
+# The live-vs-final comparison overlay: the FINAL reading drawn BESIDE the
+# captured one (a translucent wash where the two readings agree, the solid
+# accent where the offline pass moved the note, so the eye lands on the
+# differences first). ACCENT is #4da3d8 = (77, 163, 216); the alpha alone
+# tells the two tiers apart.
+COMPARE_FILL = (77, 163, 216, 70)
+COMPARE_MOVED_FILL = (77, 163, 216, 190)
+
+# The re-analysis diff overlay: the PREVIOUS reading drawn as translucent
+# ghost bars under the current one (a different question from live/final,
+# and deliberately a different colour: a cold blue wash, the current
+# reading's changed bars accented in amber).
+GHOST_FILL = (90, 130, 200, 60)
+GHOST_CHANGED_FILL = (230, 160, 60, 200)
+GHOST_NEAR_FILL = (230, 190, 60, 160)
 
 
 def figure_color(figure: str | None) -> tuple:
@@ -72,6 +149,91 @@ def figure_color(figure: str | None) -> tuple:
     return FIGURE_COLORS.get(key, UNCLASSIFIED_COLOR) + (210,)
 
 
+class NotesTable(pg.QtWidgets.QTableWidget):
+    """The results notes table: the ONE selection owner, keyboard-driven.
+
+    The table already owned the selection (the roll renders it); the
+    keyboard makes the whole take reachable without the mouse: Up/Down step
+    one note, Home/End jump to the first/last, Shift extends the range, and
+    Space asks for the cursor note's audition. These keys and the roll's
+    arrow keys write the SAME selection — the table stays the single owner,
+    the roll a renderer of it.
+    """
+
+    audition_requested = pg.QtCore.pyqtSignal(int)  # the cursor row to play alone
+
+    def __init__(self, ncols: int, parent=None) -> None:
+        super().__init__(0, ncols, parent)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.verticalHeader().setVisible(False)
+        self.setEditTriggers(pg.QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setMaximumHeight(140)
+        # focusable so the arrow keys steer the selection as soon as a row is
+        # clicked (the same contract the roll carries)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Up/Down/Home/End move the selection; Space auditions the cursor."""
+        key = event.key()
+        if key == Qt.Key.Key_Space:
+            row = self.currentRow()
+            if row >= 0:
+                self.audition_requested.emit(row)
+                event.accept()
+                return
+        if self.rowCount() and key in (
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+        ):
+            self._move_cursor(
+                key, extend=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            )
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _move_cursor(self, key, extend: bool) -> None:
+        """Move the selection cursor one row (Home/End jump to the ends).
+
+        `setCurrentCell` carries the row highlight (SelectionBehavior is
+        SelectRows); Shift then re-selects the ANCHOR-to-target range so the
+        extended selection is contiguous, exactly like a drag on the roll.
+        """
+        rows = self.rowCount()
+        column = self.currentColumn()
+        if column < 0:
+            column = 0
+        # the range's FAR edge is the fixed anchor while extending (moving
+        # right grows it forward, moving left grows it backward) — read
+        # BEFORE the cursor moves, exactly like the roll's own extend
+        selected = sorted({i.row() for i in self.selectedIndexes()})
+        current = self.currentRow()
+        if current < 0:
+            current = selected[0] if selected else (
+                0 if key in (Qt.Key.Key_Down, Qt.Key.Key_Home, Qt.Key.Key_End) else rows - 1
+            )
+        if key == Qt.Key.Key_Home:
+            target = 0
+        elif key == Qt.Key.Key_End:
+            target = rows - 1
+        elif key == Qt.Key.Key_Up:
+            target = max(0, current - 1)
+        else:
+            target = min(rows - 1, current + 1)
+        self.setCurrentCell(target, column)
+        if extend and selected:
+            edge = selected[0] if key in (Qt.Key.Key_Down, Qt.Key.Key_End) else selected[-1]
+            lo, hi = sorted((edge, target))
+            model = self.model()
+            self.selectionModel().select(
+                QItemSelection(model.index(lo, 0), model.index(hi, 0)),
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+
+
 class PitchAxis(pg.AxisItem):
     """Left axis of the roll: note names (C4, D4…) instead of MIDI numbers.
 
@@ -81,7 +243,7 @@ class PitchAxis(pg.AxisItem):
     """
 
     def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
-        return [midi_to_name(int(round(v))) for v in values]
+        return [note_display(int(round(v))) for v in values]
 
 
 class PianoRoll(pg.PlotWidget):
@@ -100,6 +262,10 @@ class PianoRoll(pg.PlotWidget):
 
     seek_requested = pg.QtCore.pyqtSignal(float)
     note_selection = pg.QtCore.pyqtSignal(list)  # selected bar indices; [] = cleared
+    audition_requested = pg.QtCore.pyqtSignal(int)  # the cursor note to play alone
+    # one dragged note (index, start_s, end_s, midi) — emitted ONCE at
+    # release, only when something moved; the window owns the edit
+    note_dragged = pg.QtCore.pyqtSignal(int, float, float, int)
 
     MIDI_MIN, MIDI_MAX = 21, 108
     LIVE_SPAN = 10.0      # seconds of history kept visible during live capture
@@ -112,13 +278,20 @@ class PianoRoll(pg.PlotWidget):
         self.set_axis_labels()   # titled by the window's retranslate()
         self._bar_items: list = []
         self._labels: list = []
-        self._diff_items: list = []  # live-vs-final outlines (outline_note)
+        self._compare_items: list = []  # the final reading beside the captured one
+        self._ghost_items: list = []  # the previous reading (a re-analysis diff)
         self._curve = None
         self._notation_mode = False
         self._last_notes: list = []
         self._rendered_figures: list = []
         self._selectable = selectable
+        self._editable = False
         self._selection: list[int] = []
+        # an EDITABLE roll drags the pressed bar instead of extending the
+        # selection: (index, mode, grab_t, grab_m, orig_start, orig_end,
+        # orig_midi) — mode 'move' slides the whole bar, 'resize' drags
+        # its right edge; pitch rides along in whole semitones
+        self._note_drag: tuple | None = None
         self._drag_anchor: int | None = None  # gesture started on this bar
         self._press_pos: tuple[float, float] | None = None  # empty press: click vs pan
         self._pan_moved = False
@@ -127,6 +300,9 @@ class PianoRoll(pg.PlotWidget):
         self._live_preview_midi: int | None = None
         self._live_band: tuple[float, float] | None = None
         self.setLimits(xMin=0)
+        # arrow keys navigate the selection on a selectable roll, so the
+        # roll must be able to take focus when a bar is pressed
+        self.setFocusPolicy(pg.QtCore.Qt.FocusPolicy.StrongFocus)
         # playhead: an orange vertical line + a glowing marker on the notes
         self._play_line = pg.InfiniteLine(
             angle=90, movable=False, pen=pg.mkPen((255, 150, 60), width=1.6)
@@ -304,7 +480,20 @@ class PianoRoll(pg.PlotWidget):
         self._selection = []
         self._drag_anchor = None
         self._press_pos = None
+        self._note_drag = None
         self._render_selection()  # any highlight goes back to the own colors
+
+    def set_editable(self, enabled: bool) -> None:
+        """Turn bar-dragging on or off (an EDITABLE roll moves its notes).
+
+        Only the results page's roll is editable: a drag there becomes ONE
+        recorded edit through the window. The live review roll stays
+        pick-only — its notes describe the CAPTURED take, the edit history
+        belongs to the final reading.
+        """
+        self._editable = bool(enabled)
+        if not self._editable:
+            self._note_drag = None
 
     def _render_selection(self) -> None:
         """Rebrush only the bars whose state changed (a click on a big
@@ -327,20 +516,53 @@ class PianoRoll(pg.PlotWidget):
         self._render_selection()
         self.note_selection.emit(list(indices))
 
+    def _move_selection(self, step: int, extend: bool = False) -> None:
+        """Walk the selection note by note with the arrow keys.
+
+        A plain arrow moves a SINGLE-note cursor to the next/previous note
+        in time order (the ends hold, no wrap); with nothing selected the
+        first arrow enters at the near end. Shift+arrow EXTENDS the current
+        range by one note at the edge the arrow moves toward — the same
+        contiguous range a drag builds. The roll stays a renderer: it EMITS
+        `note_selection`, exactly like a gesture, so the table keeps owning
+        the selection.
+        """
+        count = len(self._last_notes)
+        if count == 0:
+            return
+        if not self._selection:
+            self._emit_selection([0] if step > 0 else [count - 1])
+            return
+        edge = self._selection[-1] if step > 0 else self._selection[0]
+        target = edge + step
+        if target < 0 or target >= count:
+            return  # the ends hold: navigating past a note never wraps
+        if extend:
+            lo, hi = sorted((self._selection[0], target))
+            self._emit_selection(list(range(lo, hi + 1)))
+            return
+        self._emit_selection([target])
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        """Press on a bar selects it (a drag then extends it to a range).
+        """Press on a bar selects it; on an EDITABLE roll it starts a drag.
 
         A press on EMPTY space stays pyqtgraph's own gesture — the view
         keeps panning the timeline — and its click (no movement) clears
         the selection. On a non-selectable roll (the live page) every
-        event passes through untouched.
+        event passes through untouched. On an editable roll the drag moves
+        the bar (the range-extend drag stays available through the table
+        and the Shift+arrow keys).
         """
         if self._selectable and event.button() == pg.QtCore.Qt.MouseButton.LeftButton:
             idx = self._hit(event)
             if idx is not None:
                 self._press_pos = None
                 self._drag_anchor = idx
+                self.setFocus()  # so the arrow keys steer the selection next
                 self._emit_selection([idx])
+                if self._editable:
+                    t, m = self._view_at(event)
+                    self._begin_note_drag(idx, t, m)
                 event.accept()
                 return
             self._press_pos = (event.position().x(), event.position().y())
@@ -348,6 +570,11 @@ class PianoRoll(pg.PlotWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self._note_drag is not None:
+            t, m = self._view_at(event)
+            self._preview_note_drag(t, m)
+            event.accept()
+            return
         if self._drag_anchor is not None:
             idx = self._hit(event)
             if idx is not None:  # over a gap: keep the range built so far
@@ -363,6 +590,11 @@ class PianoRoll(pg.PlotWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if event.button() == pg.QtCore.Qt.MouseButton.LeftButton:
+            if self._note_drag is not None:
+                t, m = self._view_at(event)
+                self._end_note_drag(t, m)
+                event.accept()
+                return
             if self._drag_anchor is not None:
                 self._drag_anchor = None
                 event.accept()
@@ -372,6 +604,127 @@ class PianoRoll(pg.PlotWidget):
             if clicked_empty:
                 self._emit_selection([])  # a click on empty space clears
         super().mouseReleaseEvent(event)
+
+    # --------------------------------------------------------- note dragging
+    def _view_at(self, event) -> tuple[float, float]:
+        """The event's position in DATA coordinates (seconds, midi)."""
+        vb = self.getPlotItem().vb
+        data = vb.mapSceneToView(self.mapToScene(event.position().toPoint()))
+        return float(data.x()), float(data.y())
+
+    def _begin_note_drag(self, idx: int, t: float, m: float) -> None:
+        """Arm the bar drag: MOVE anywhere on the bar, RESIZE its last quarter.
+
+        The quarter is of the BAR's own duration (view-independent), so the
+        grab zone stays honest at every zoom level.
+        """
+        n = self._last_notes[idx]
+        mode = "resize" if t >= n.start + 0.75 * (n.end - n.start) else "move"
+        self._note_drag = (
+            idx, mode, float(t), float(m), float(n.start), float(n.end), int(n.midi),
+            self._label_for_bar(idx),
+        )
+
+    def _label_for_bar(self, idx: int):
+        """The figure label riding this bar, found by its stored position."""
+        n = self._last_notes[idx]
+        x, y = (n.start + n.end) / 2 - 0.03, n.midi + 0.45
+        for lbl in self._labels:
+            pos = lbl.pos()
+            if abs(pos.x() - x) < 0.05 and abs(pos.y() - y) < 0.6:
+                return lbl
+        return None
+
+    def _dragged_geometry(self, t: float, m: float) -> tuple[int, float, float, int]:
+        """The clamped (index, start, end, midi) for the drag at (t, m).
+
+        The clamp mirrors the core's `move_note` bounds exactly — inside
+        the take, clear of the neighbours, positive duration, piano pitch —
+        so a preview the edit would refuse never reaches the singer's eye.
+        """
+        # the drag state machine is bounded (`_note_drag` is armed on press
+        # and cleared on release) — the unpacking asserts it for the type
+        # checker without re-deriving the bounds
+        assert self._note_drag is not None
+        idx, mode, grab_t, grab_m, o_start, o_end, o_midi, _lbl = self._note_drag
+        notes = self._last_notes
+        dt = t - grab_t
+        prev_end = notes[idx - 1].end if idx > 0 else 0.0
+        next_start = notes[idx + 1].start if idx + 1 < len(notes) else float("inf")
+        if mode == "resize":
+            start = o_start
+            end = min(max(o_end + dt, start + 0.02), max(next_start, start + 0.02))
+        else:
+            # a MOVE keeps the duration: the onset slides inside the gap
+            # the neighbours leave, and a too-narrow gap means no move
+            dur = o_end - o_start
+            lo, hi = prev_end, next_start - dur
+            if lo > hi:
+                start, end = o_start, o_end
+            else:
+                start = min(max(o_start + dt, lo), hi)
+                end = start + dur
+        midi = int(min(108, max(21, o_midi + round(m - grab_m))))
+        return idx, start, end, midi
+
+    def _preview_note_drag(self, t: float, m: float) -> None:
+        """Move the bar (and its figure label) with the pointer — a preview:
+        the roll never touches the real notes, the window owns the edit."""
+        assert self._note_drag is not None
+        idx, _mode, _gt, _gm, o_start, o_end, o_midi, lbl = self._note_drag
+        _idx, start, end, midi = self._dragged_geometry(t, m)
+        item = self._bar_items[idx]
+        item.setOpts(x0=[start], x1=[end], y0=[midi - 0.4], y1=[midi + 0.4])
+        if lbl is not None:
+            lbl.setPos((start + end) / 2 - 0.03, midi + 0.45)
+
+    def _end_note_drag(self, t: float, m: float) -> None:
+        """Release: put the bar back on the real note, publish ONE move.
+
+        The window's edit re-renders the roll from the changed notes; if
+        the release is a no-op (nothing moved) the restore alone undoes
+        the preview, so the roll never disagrees with `_last_notes`.
+        """
+        assert self._note_drag is not None
+        idx, _mode, _gt, _gm, o_start, o_end, o_midi, lbl = self._note_drag
+        _idx, start, end, midi = self._dragged_geometry(t, m)
+        self._bar_items[idx].setOpts(
+            x0=[o_start], x1=[o_end], y0=[o_midi - 0.4], y1=[o_midi + 0.4]
+        )
+        if lbl is not None:
+            lbl.setPos((o_start + o_end) / 2 - 0.03, o_midi + 0.45)
+        self._note_drag = None
+        if (start, end, midi) != (o_start, o_end, o_midi):
+            self.note_dragged.emit(idx, float(start), float(end), int(midi))
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """Left/Right step the selection note by note (Shift extends).
+
+        Only a selectable roll with notes reacts; every other key falls
+        through to pyqtgraph's own handling.
+        """
+        if self._selectable and self._last_notes and event.key() in (
+            pg.QtCore.Qt.Key.Key_Left,
+            pg.QtCore.Qt.Key.Key_Right,
+        ):
+            self._move_selection(
+                -1 if event.key() == pg.QtCore.Qt.Key.Key_Left else 1,
+                extend=bool(
+                    event.modifiers() & pg.QtCore.Qt.KeyboardModifier.ShiftModifier
+                ),
+            )
+            event.accept()
+            return
+        if (
+            self._selectable
+            and event.key() == pg.QtCore.Qt.Key.Key_Space
+            and self._selection
+        ):
+            # Space auditions the cursor note (the moving edge of the range)
+            self.audition_requested.emit(self._selection[-1])
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def set_notation_mode(self, enabled: bool) -> None:
         if enabled == self._notation_mode:
@@ -454,40 +807,102 @@ class PianoRoll(pg.PlotWidget):
         b = int(LOW_COLOR[2] + (HIGH_COLOR[2] - LOW_COLOR[2]) * conf)
         return (r, g, b, 220)
 
-    def outline_note(self, start: float, end: float, midi: int, color) -> None:
-        """Draw an OUTLINE over one note's band (the live-vs-final diff mark).
+    def set_comparison_notes(self, notes, moved=None) -> None:
+        """Draw a SECOND reading BESIDE the captured one (live vs final).
 
-        The final analysis replaced this note (pitch moved, or onset beyond
-        the grid tolerance): the outline shows the singer WHERE, without
-        repainting the final bars — the roll reads "here is what I corrected".
-        Marks are cleared by `_clear_notes` (next `set_notes` rebuild) and by
-        `begin_live` (a new take starts with a clean roll).
+        The live/final gap is shown side by side, not as an outline: every
+        final note is drawn as a translucent bar at ITS OWN pitch, on the
+        same timeline as the captured bars — a note the offline pass moved
+        reads as two bars at two heights, in one glance. The notes the single
+        matching policy (`core.compare.match`) flagged carry the solid ACCENT
+        so the eye lands on them first; `moved` is the set of indices into
+        `notes` (the final reading).
+
+        The overlay belongs to the CURRENT roll: `_clear_notes` (a rebuild, a
+        new take) drops it with the bars it annotates.
         """
-        # `color` may be a hex string (the palette's ACCENT) or an RGB tuple:
-        # mkPen accepts both, tuple() would SHATTER a string into chars and
-        # the mark silently never drew (the try/except in the caller ate it)
-        pen = pg.mkPen(color, width=2)
-        item = pg.LinearRegionItem(
-            values=[start, max(end, start + 0.02)],
-            orientation="vertical",
-            brush=None,
-            pen=pen,
-            movable=False,
-        )
-        item.setZValue(5)
-        self.addItem(item)
-        self._diff_items.append(item)
+        self.clear_comparison()  # idempotent: ONE overlay per reading
+        chosen = set(moved or ())
+        for i, n in enumerate(notes):
+            is_moved = i in chosen
+            item = pg.BarGraphItem(
+                x0=[n.start],
+                x1=[n.end],
+                y0=[n.midi - 0.4],
+                y1=[n.midi + 0.4],
+                brush=pg.mkBrush(COMPARE_MOVED_FILL if is_moved else COMPARE_FILL),
+                pen=pg.mkPen(ACCENT if is_moved else None),
+            )
+            item.setZValue(1)  # over the captured bars: a translucent tint
+            self.addItem(item)
+            self._compare_items.append(item)
+
+    def clear_comparison(self) -> None:
+        """Drop the other reading's overlay (a new reading replaces it)."""
+        for it in self._compare_items:
+            self.removeItem(it)
+        self._compare_items = []
+
+    def set_ghost_notes(self, ghost_notes, changed_afters=tuple(), near_afters=tuple()) -> None:
+        """Draw the PREVIOUS reading as translucent ghost bars (a re-diff).
+
+        `ghost_notes` carry (start, end, midi) snapshots of the OLD reading;
+        `changed_afters`/`near_afters` are the AFTER-note indices whose
+        pair is 'changed'/'near', accented so the eye lands on the
+        differences first. The overlay belongs to the CURRENT roll:
+        `_clear_notes` (a rebuild, a new take) drops it with the bars it
+        annotates, exactly like the live/final comparison.
+        """
+        self.clear_ghost_notes()  # idempotent: ONE diff overlay per reading
+        changed = set(changed_afters)
+        near = set(near_afters)
+        for g in ghost_notes:
+            item = pg.BarGraphItem(
+                x0=[g[0]],
+                x1=[g[1]],
+                y0=[g[2] - 0.4],
+                y1=[g[2] + 0.4],
+                brush=pg.mkBrush(GHOST_FILL),
+                pen=pg.mkPen(None),
+            )
+            item.setZValue(1)
+            self.addItem(item)
+            self._ghost_items.append(item)
+        for idx in changed | near:
+            item = pg.BarGraphItem(
+                x0=[self._last_notes[idx].start],
+                x1=[self._last_notes[idx].end],
+                y0=[self._last_notes[idx].midi - 0.4],
+                y1=[self._last_notes[idx].midi + 0.4],
+                brush=pg.mkBrush(
+                    GHOST_CHANGED_FILL if idx in changed else GHOST_NEAR_FILL
+                ),
+                pen=pg.mkPen(None),
+            )
+            item.setZValue(2)
+            self.addItem(item)
+            self._ghost_items.append(item)
+
+    def clear_ghost_notes(self) -> None:
+        """Drop the previous-reading overlay (a new reading replaces it)."""
+        for it in self._ghost_items:
+            self.removeItem(it)
+        self._ghost_items = []
 
     def _clear_notes(self) -> None:
         for it in self._bar_items:
             self.removeItem(it)
         for it in self._labels:
             self.removeItem(it)
-        for it in self._diff_items:
+        for it in self._compare_items:
+            self.removeItem(it)
+        for it in self._ghost_items:
             self.removeItem(it)
         self._bar_items = []
         self._labels = []
-        self._diff_items = []
+        self._note_drag = None  # the dragged bar no longer exists
+        self._compare_items = []
+        self._ghost_items = []
         self._rendered_figures = []
 
 
@@ -554,7 +969,9 @@ class ResultsPanel(pg.LayoutWidget):
         "key measures count",
         "key figures",
         "key tuning offset",
+        "key intonation",
         "key coherence",
+        "key reading diff",
     )
 
     def __init__(self, parent=None):
@@ -586,7 +1003,7 @@ class ResultsPanel(pg.LayoutWidget):
 
         # Per-note table: position (measure:beat) + figure
         r = len(self.SLOT_KEYS) + 1
-        self._notes_table = self._make_table(4)
+        self._notes_table = NotesTable(4)
         self._lbl_notes = pg.QtWidgets.QLabel("")
         self.addWidget(self._lbl_notes, row=r, col=0)
         self.addWidget(self._notes_table, row=r + 1, col=0, colspan=2)
@@ -601,6 +1018,28 @@ class ResultsPanel(pg.LayoutWidget):
         )
         self._lbl_explain.setVisible(False)
         self.addWidget(self._lbl_explain, row=r + 2, col=0, colspan=2)
+        # The re-analysis DIFf detail (suspects shown with their diff label,
+        # one line each): filled by `set_reading_diff`, hidden when the page
+        # clears it (a new take, a manual edit, a failed re-analysis). The
+        # plaintext rows keep the whole detail one selectable label — no
+        # second table to keep in sync with the per-note one.
+        self._lbl_diff = pg.QtWidgets.QLabel("")
+        self._lbl_diff.setWordWrap(True)
+        self._lbl_diff.setTextInteractionFlags(
+            pg.QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._lbl_diff.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 8pt;"
+            f"background: {BG_CARD}; border: 1px solid {BORDER};"
+            "border-radius: 8px; padding: 8px;"
+        )
+        self._lbl_diff.setVisible(False)
+        self.addWidget(self._lbl_diff, row=r + 3, col=0, colspan=2)
+        # the diff facts kept across a retranslate (the counts, the detail
+        # rows, the suspects) — None = no diff shown
+        self._diff_facts: dict | None = None
+        self._diff_lines: tuple[str, ...] = ()
+        self._diff_suspect_lines: tuple[str, ...] = ()
         self._has_results: bool = False
 
         # Per-segment chord table
@@ -643,7 +1082,9 @@ class ResultsPanel(pg.LayoutWidget):
         self._labels["key measures count"].setText(f"<b>{tr('key measures count')}</b>")
         self._labels["key figures"].setText(f"<b>{tr('key figures')}</b>")
         self._labels["key tuning offset"].setText(f"<b>{tr('key tuning offset')}</b>")
+        self._labels["key intonation"].setText(f"<b>{tr('key intonation')}</b>")
         self._labels["key coherence"].setText(f"<b>{tr('key coherence')}</b>")
+        self._labels["key reading diff"].setText(f"<b>{tr('key reading diff')}</b>")
         self._lbl_notes.setText(f"<b>{tr('key notes table')}</b>")
         self._lbl_segs.setText(f"<b>{tr('key chord segments')}</b>")
         self._notes_table.setHorizontalHeaderLabels(
@@ -652,6 +1093,8 @@ class ResultsPanel(pg.LayoutWidget):
         self._seg_table.setHorizontalHeaderLabels([tr("key span col"), tr("key chord")])
         self._notes_table.resizeColumnsToContents()
         self._seg_table.resizeColumnsToContents()
+        # the kept diff facts re-render in the active language (no recompute)
+        self._render_diff_compact()
 
     def set_results(self, res) -> None:
         self._has_results = res is not None
@@ -709,17 +1152,15 @@ class ResultsPanel(pg.LayoutWidget):
             self._values["key tuning offset"].setText("—")
         else:
             c = float(cents)
-            if abs(c) <= 10.0:
-                advice = tr("ui tuning ok")
-            elif abs(c) <= 25.0:
-                advice = tr("ui tuning slightly off").format(
-                    dir=tr("ui tuning sharp") if c > 0 else tr("ui tuning flat"))
-            else:
-                advice = tr("ui tuning off").format(
-                    dir=tr("ui tuning sharp") if c > 0 else tr("ui tuning flat"))
             self._values["key tuning offset"].setText(
-                f"{c:+.1f} c — {advice}"
+                f"{c:+.1f} c — {tuning_advice(c)}"
             )
+        # The take's per-note intonation report: the SAME `intonation.
+        # summarize` the JSON block carries, through the SAME rendering the
+        # live feedback shows while singing — one writer of the words.
+        self._values["key intonation"].setText(
+            "\n".join(intonation_lines(summarize_intonation(res.notes))) or "—"
+        )
         figs = figures_summary(res.notes)
         self._values["key figures"].setText(
             ", ".join(f"{tr_figure(k)} ×{v}" for k, v in figs.items()) if figs else "—"
@@ -780,7 +1221,107 @@ class ResultsPanel(pg.LayoutWidget):
             else:
                 self._lbl_explain.setVisible(False)
 
-        # Per-measure chord progression (falls back to legacy 2 s segments)
+    # ------------------------------------------------------------------
+    # the before/after reading diff (a re-analysis's presentation; the
+    # comparison object comes from core.reading_diff — page renders only)
+    # ------------------------------------------------------------------
+    def set_reading_diff(self, comparison) -> None:
+        """Show one before/after comparison (a successful re-analysis).
+
+        `comparison` is the core's `ReadingComparison`: the panel renders
+        its counts and detail; it never re-derives. Rows are built once and
+        retranslated from the same facts.
+        """
+        self._diff_facts = {
+            "stable": comparison.count("stable"),
+            "changed": comparison.count("changed"),
+            "near": comparison.count("near"),
+            "missing": len(comparison.missing),
+            "added": len(comparison.added),
+            "suspects": len(comparison.after_suspects),
+        }
+        rows: list[str] = []
+        for pair in comparison.pairs:
+            if pair.status == "stable":
+                continue
+            rows.append(tr("ui diff pair row").format(
+                i=pair.before.index + 1,
+                before=note_display_pair(pair.before.midi),
+                after=note_display_pair(pair.after.midi),
+                status=tr(f"diff status {pair.status}"),
+                reasons=", ".join(tr(f"diff reason {r}") for r in pair.reasons) or "—",
+            ))
+        for snap in comparison.missing:
+            rows.append(tr("ui diff missing row").format(
+                i=snap.index + 1, before=note_display_pair(snap.midi),
+                status=tr("diff status missing"),
+            ))
+        for snap in comparison.added:
+            rows.append(tr("ui diff added row").format(
+                i=snap.index + 1, after=note_display_pair(snap.midi),
+                status=tr("diff status added"),
+            ))
+        self._diff_lines = tuple(rows)
+        suspect_rows: list[str] = []
+        for row in comparison.after_suspects:
+            tag = tr(f"diff suspect {row.status}") if row.status else tr("diff suspect unknown")
+            suspects_line = tr("ui diff suspect row").format(
+                midi=note_display_pair(row.midi),
+                plateau=note_display_pair(row.plateau_midi),
+                dur=row.plateau_s,
+                offset=f"{row.plateau_offset_st:+.2f} st",
+                tag=tag,
+                conf=(
+                    tr("ui diff confidence").format(c=row.confidence)
+                    if row.confidence is not None
+                    else ""
+                ),
+            )
+            suspect_rows.append(suspects_line)
+        for row in comparison.resolved_suspects:
+            suspect_rows.append(tr("ui diff suspect resolved").format(
+                midi=note_display_pair(row.midi),
+                dur=row.duration_s,
+            ))
+        self._diff_suspect_lines = tuple(suspect_rows)
+        self._render_diff_compact()
+
+    def clear_reading_diff(self) -> None:
+        """Drop the before/after presentation (a new take, an edit, a failure)."""
+        self._diff_facts = None
+        self._diff_lines = ()
+        self._diff_suspect_lines = ()
+        self._render_diff_compact()
+
+    def _render_diff_compact(self) -> None:
+        """Render the count line and the detail from the kept facts.
+
+        One literal tr() line ON PURPOSE (the tr() key guard only sees
+        literal arguments); the kept rows are retranslated, never recomputed.
+        """
+        if self._diff_facts is None:
+            self._values["key reading diff"].setText(tr("ui diff none"))
+            self._lbl_diff.setVisible(False)
+            return
+        self._values["key reading diff"].setText(
+            tr("ui diff compact").format(**self._diff_facts)
+        )
+        detail = "<br>".join(self._diff_lines)
+        suspects = "<br>".join(self._diff_suspect_lines)
+        if suspects:
+            header = tr("ui diff suspects header").format(n=len(self._diff_suspect_lines))
+            suspects = f"<b>{header}</b><br>{suspects}"
+        text = "<br>".join(part for part in (detail, suspects) if part)
+        self._lbl_diff.setText(text)
+        self._lbl_diff.setVisible(bool(text))
+
+
+    def set_chord_progression(self, res) -> None:
+        """Per-measure chord progression (falls back to legacy 2 s segments).
+
+        Split from `set_results` so the diff renderer stays off the result's
+        facts — the progression rows belong to the result, re-filled by it.
+        """
         prog = getattr(res, "chord_progression", None)
         if prog:
             self._seg_table.setRowCount(len(prog))
@@ -825,8 +1366,19 @@ class PianoView(pg.QtWidgets.QWidget):
         self._spans: dict[int, list[tuple[float, float]]] = {}
         self._active: set[int] = set()
         self._active_colors: dict[int, tuple[int, int, int]] = {}
+        self._keyboard_cursor: int | None = None
         self.setMinimumHeight(78)
         self.setCursor(pg.QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def set_keyboard_cursor(self, midi: int | None) -> None:
+        """Highlight the piano key chosen from the keyboard."""
+        self._keyboard_cursor = midi
+        self.update()
+
+    @property
+    def keyboard_cursor(self) -> int | None:
+        """The pitch staged for Enter — the highlighted key itself."""
+        return self._keyboard_cursor
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         """Publish the key under the pointer, checking black keys first."""
@@ -835,6 +1387,40 @@ class PianoView(pg.QtWidgets.QWidget):
         midi = self._midi_at(event.position().x(), event.position().y())
         if midi is not None:
             self.key_clicked.emit(midi)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """The keyboard's route: arrows stage a key, Enter publishes it.
+
+        One convention for every owner of a `PianoView`: an arrow with
+        nothing staged yet starts from middle C (clamped into this
+        keyboard's range), the arrows step one semitone, Enter emits
+        `key_clicked` for the staged key. The results page installs an
+        event filter that stages the SELECTED note first and consumes the
+        same keys, so it keeps its own semantics; this route is what a
+        keyboard with no selection (the finder's) falls back on.
+        """
+        key = event.key()
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            step = -1 if key in (Qt.Key.Key_Left, Qt.Key.Key_Down) else 1
+            current = self._keyboard_cursor
+            if current is None:
+                current = min(self.max_midi, max(self.min_midi, 60))
+            self.set_keyboard_cursor(
+                min(self.max_midi, max(self.min_midi, current + step))
+            )
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self._keyboard_cursor is not None:
+                self.key_clicked.emit(self._keyboard_cursor)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """The staged key belongs to the focused keyboard: blur clears it."""
+        self.set_keyboard_cursor(None)
+        super().focusOutEvent(event)
 
     def _midi_at(self, x: float, y: float) -> int | None:
         """Map a keyboard position to its key; black keys overlay whites."""
@@ -894,7 +1480,8 @@ class PianoView(pg.QtWidgets.QWidget):
                 QColor(*self._active_colors[midi]) if midi in self._active_colors
                 else QColor("#4da3d8") if key_on else QColor("#e9edf2"),
             )
-            p.setPen(QPen(QColor("#39424d"), 1))
+            p.setPen(QPen(QColor(ACCENT) if midi == self._keyboard_cursor else QColor("#39424d"),
+                          2 if midi == self._keyboard_cursor else 1))
             p.drawRect(int(x), 0, int(ww) - 1, h - 1)
         # black keys (drawn over)
         bw, bh = ww * 0.62, h * 0.62
@@ -908,6 +1495,9 @@ class PianoView(pg.QtWidgets.QWidget):
                     QColor(*self._active_colors[midi + 1]) if midi + 1 in self._active_colors
                 else QColor("#2f81a8") if key_on else QColor("#151a20"),
                 )
+                if midi + 1 == self._keyboard_cursor:
+                    p.setPen(QPen(QColor(ACCENT), 2))
+                    p.drawRect(int(x), 0, int(bw), int(bh))
         # note names on the white keys (all of them when they fit, else the Cs)
         p.setPen(QColor("#6a7480"))
         f = p.font()
@@ -916,7 +1506,7 @@ class PianoView(pg.QtWidgets.QWidget):
         for i in range(n_white):
             midi = self._white_midi(i)
             if show_names or midi % 12 == 0:
-                p.drawText(int(i * ww) + 2, h - 4, midi_to_name(midi))
+                p.drawText(int(i * ww) + 2, h - 4, note_display(midi))
         p.end()
 
     # keyboard mapping helpers -----------------------------------------
@@ -1038,7 +1628,7 @@ class AccuracyPlot(pg.QtWidgets.QWidget):
                 if ww >= 34.0:  # room for a compact name under each point
                     p.setPen(QColor("#6a7480"))
                     p.setFont(f)
-                    p.drawText(QPointF(x - ww / 2, h - 8), midi_to_name(midi))
+                    p.drawText(QPointF(x - ww / 2, h - 8), note_display(midi))
         p.end()
 
 

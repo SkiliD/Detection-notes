@@ -48,7 +48,9 @@ def test_recorded_take_passes_verify_and_coherence(
 
         export_result(res, stem, **kw)
 
-    monkeypatch.setattr(mw, "export_result", fake_export)
+    from v2m.core import take_export as te
+
+    monkeypatch.setattr(te, "export_result", fake_export)
     monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
 
     win = mw.MainWindow()
@@ -67,7 +69,6 @@ def test_recorded_take_passes_verify_and_coherence(
         # diff mark compares what the singer WATCHED (they arrive queued,
         # after on_stop_live dropped the thread)
         assert win._closed_live_notes, "les notes live n'ont pas survécu à l'arrêt"
-        live_count = len(win._closed_live_notes)
         # analysis stays in the results page until the user explicitly exports
         analyzed = _pump_until(qapp, lambda: win.result is not None, timeout=60)
         assert analyzed, "l'analyse finale n'est pas arrivée"
@@ -93,10 +94,11 @@ def test_recorded_take_passes_verify_and_coherence(
         # job to show, not the counter's)
         assert win.page_live.live_indicator.label_note_count.text().isdigit()
         assert win.page_live.live_indicator.label_note_count.text() != "0"
-        # the live-vs-final mark ran on the handed-over notes: every note
-        # the final pass moved keeps its ACCENT outline on the live roll
-        # (on this clean melody the two readings agree, so few outlines)
-        assert len(win.page_live.piano_live._diff_items) <= live_count
+        # the live-vs-final comparison ran on the handed-over notes: the
+        # WHOLE final reading is drawn beside the captured one (one overlay
+        # bar per final note), so a moved note reads as two bars at once
+        assert win.result is not None
+        assert len(win.page_live.piano_live._compare_items) == len(win.result.notes)
     finally:
         win.page_live.chk_record_audio.setChecked(False)
         win.close()

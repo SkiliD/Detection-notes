@@ -51,7 +51,11 @@ DEFAULT_GAP_S = 0.050        # gaps < 50 ms are interpolated
 TRANSITION_ST_S = 40.0
 # The .npz layout version: a loader that meets a file written by a DIFFERENT
 # layout refuses it (stale cache) instead of misreading its arrays.
-FORMAT_VERSION = 2
+# Bumped 2 -> 3 for the swallow rescue: the pitch curve a pre-3 cache holds
+# was read WITHOUT the block-wise second pass, so reusing it would hide the
+# rescue's notes behind a stale reading (the cache saves time, never changes
+# a reading — an engine reading change IS a version bump).
+FORMAT_VERSION = 3
 
 
 @dataclass

@@ -30,7 +30,7 @@ factory and the page stays Qt-and-audio agnostic.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, cast
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -42,7 +42,10 @@ from ..core.i18n import note_display_pair, tr
 from ..core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, on_piano
 from .display_stabilizer import DisplayStabilizer
 from .finder_session import FinderSession
-from .widgets import NOTE_TEXT_COLOR, PianoView, action_button_style
+from .widgets import (
+    NOTE_TEXT_COLOR, PianoView, TuningMeter, action_button_style,
+    cents_deviation, tuning_advice, tuning_color,
+)
 
 if TYPE_CHECKING:
     from .main_window import LiveThread
@@ -58,6 +61,7 @@ LEVEL_GATE_COLOR = "#c25b4e"  # the silence gate, drawn where it lives
 # lands 0.05..0.3, so 0.20 keeps the useful range in the left two thirds
 # and clipping a shout is honest.
 LEVEL_FULL_SCALE = 0.20
+_UNSET = object()
 
 
 class LevelMeter(QWidget):
@@ -151,6 +155,7 @@ class FinderPage(QWidget):
         self._stabilizer = DisplayStabilizer()
         self._thread: "LiveThread | None" = None
         self._gate_rms: float = 0.008  # refreshed from the capture at open
+        self._tuning_cents: float | None = None
         self._build()
 
     # ------------------------------------------------------------------
@@ -178,6 +183,20 @@ class FinderPage(QWidget):
         self.label_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label_note.setMinimumHeight(66)
         root.addWidget(self.label_note)
+
+        # the tuning verdict: is the sung note on its semitone, or off and
+        # by how much? The meter is the needle, the line below names it —
+        # the number a singer corrects by. Same scale as the report.
+        tune_row = QHBoxLayout()
+        tune_row.addStretch(1)
+        self.tuning = TuningMeter()
+        self.tuning.setMaximumWidth(360)
+        tune_row.addWidget(self.tuning)
+        tune_row.addStretch(1)
+        root.addLayout(tune_row)
+        self.label_tuning = QLabel("")
+        self.label_tuning.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.label_tuning)
 
         # the mic level, gate drawn on it: what the mic hears, at a glance
         self.level = LevelMeter()
@@ -213,8 +232,19 @@ class FinderPage(QWidget):
 
         self.keys = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
         self.keys.setMinimumHeight(150)
+        # the piano is this page's audition action FROM THE KEYBOARD: Tab
+        # reaches it, an arrow stages a key, Enter plays it (a plain
+        # QWidget is no Tab stop, so the policy is set here)
+        self.keys.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.keys.key_clicked.connect(self._audition_note)
         root.addWidget(self.keys, stretch=2)
+
+        # Keyboard traversal in task order: leave, run the listening, read
+        # the history, then audition a key on the piano.
+        focus_order = (self.btn_back, self.btn_toggle, self.history, self.keys)
+        self._focus_order = focus_order
+        for first, second in zip(focus_order, focus_order[1:], strict=False):
+            QWidget.setTabOrder(first, second)
 
     # ------------------------------------------------------------------
     # page surface (what the window composes)
@@ -246,6 +276,7 @@ class FinderPage(QWidget):
         self.label_hint.setText(tr("ui finder hint"))
         self.label_history.setText(tr("ui finder history"))
         self._refresh_state()
+        self._render_tuning()  # the verdict follows the language
         self._refresh_history()
 
     # ------------------------------------------------------------------
@@ -257,11 +288,12 @@ class FinderPage(QWidget):
             return
         self._clear_error()
         self.set_note(None)
+        self.set_tuning(None)
         self.session.reset()
         self._stabilizer.reset()
         self._refresh_history()
         self._thread = self._thread_factory()
-        self._thread.noteFrame.connect(self._on_note)
+        self._thread.finderFrame.connect(self._on_note)
         self._thread.blockStats.connect(self._on_block)
         self._thread.failed.connect(self._on_failed)
         # the gate mark on the level bar is the REAL silence gate: read
@@ -294,6 +326,7 @@ class FinderPage(QWidget):
             self.level.set_level(0.0)
             self.label_heard.setText("")
             self.set_note(None)
+            self.set_tuning(None)
 
     def _on_block(self, _t: float, rms: float) -> None:
         """The mic's ear, per block: level bar + the honest idle line."""
@@ -305,37 +338,46 @@ class FinderPage(QWidget):
         else:
             self.label_heard.setText(tr("ui finder no note"))
 
-    def _on_note(self, cur) -> None:
-        """Render the note being sung, and retain only distinct recent pitches.
+    def _on_note(self, cur, confirmed=_UNSET, heard=_UNSET) -> None:
+        """Render one block's readings and retain its confirmed pitch.
 
-        It reads `current()` for the immediate display (the PENDING window
-        answers — "the mic hears you") and `confirmed()` for the key and
-        the history (a rumble holds no 90 ms: it lights nothing, enters
-        nothing). When the segmenter holds NOTHING but the mic hears a
-        pitch (a glide, a wavering beginner tone), the RAW instant
-        reading (`heard()`) still names a note — the page must never look
-        deaf while YIN hears fine.
+        The readings arrive together from the audio thread. Qt signals are
+        queued while the GUI is busy, so querying the mutable segmenter here
+        can observe a later note (or silence) than the frame being rendered.
         """
-        seg = self._thread.segmenter if self._thread is not None else None
-        confirmed = seg.confirmed() if seg is not None else None
-        midi = int(round(confirmed[0])) if confirmed else None
+        if confirmed is _UNSET or heard is _UNSET:
+            # Legacy test doubles and callers that publish only the immediate
+            # reading retain the old behavior; production events always carry
+            # the block's full snapshot, including explicit None readings.
+            seg = self._thread.segmenter if self._thread is not None else None
+            if confirmed is _UNSET:
+                confirmed = seg.confirmed() if seg is not None else None
+            if heard is _UNSET:
+                heard = seg.heard() if seg is not None else None
+        confirmed_reading = cast(tuple[float, float] | None, confirmed)
+        heard_reading = cast(tuple[float, float] | None, heard)
+        midi = int(round(confirmed_reading[0])) if confirmed_reading else None
         # the immediate reading for the big name (PENDING answers too)
         forming = cur[0] if cur else None
         forming_midi = int(round(forming)) if forming is not None else None
         display = forming_midi if forming_midi is not None else midi
-        heard = seg.heard() if seg is not None else None
-        heard_midi = int(round(heard[0])) if heard is not None else None
+        heard_midi = int(round(heard_reading[0])) if heard_reading else None
         # heard() only fills the name when the segmenter holds nothing:
         # current() (median, confirmed window) stays the honest answer
         if display is None and heard_midi is not None:
             display = heard_midi
-        if display is None and heard is None:
+        if display is None and heard_midi is None:
             self.session.note_idle()  # the mic heard nothing on this tick
         self.session.feed(forming_midi, midi)
         shown = self._stabilizer.feed(self.session.last_reading or 0.0, forming)
         # confirmed presence lights the key even while the name channel
         # holds the previous note (a vibrato excursion near the seam)
         self.set_note(shown if shown is not None else display, light=midi is not None)
+        # the tuning follows the same reading: the note's own median (stable)
+        # when it has one, the raw instant otherwise, so the verdict never
+        # lags the name it sits under
+        probe = cur[0] if cur is not None else (heard_reading[0] if heard_reading is not None else None)
+        self.set_tuning(cents_deviation(probe) if probe is not None else None)
         self._refresh_history()
 
     def _on_failed(self, msg: str, _signal: bytes = b"") -> None:
@@ -362,6 +404,26 @@ class FinderPage(QWidget):
         self.label_note.setText(note_display_pair(midi))
         self.label_note.setStyleSheet(FINDER_NOTE_STYLE)
         self.keys.set_pressed({midi} if light else None)
+
+    def set_tuning(self, cents: float | None) -> None:
+        """The tuning verdict of the note being sung: needle + named advice.
+
+        `cents` None hides both — nothing is being sung, and the page keeps
+        the same right to say nothing the rest of it keeps on a quiet mic.
+        """
+        self._tuning_cents = cents
+        self.tuning.set_cents(cents)
+        self._render_tuning()
+
+    def _render_tuning(self) -> None:
+        """Render the current tuning fact in the active language."""
+        cents = self._tuning_cents
+        if cents is None:
+            self.label_tuning.setText("")
+            return
+        r, g, b = tuning_color(cents)
+        self.label_tuning.setStyleSheet(f"color: rgb({r}, {g}, {b}); font-size: 11pt;")
+        self.label_tuning.setText(f"{cents:+.0f} ¢ — {tuning_advice(cents)}")
 
     def _refresh_history(self) -> None:
         self.history.clear()

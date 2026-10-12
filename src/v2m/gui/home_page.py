@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 
 from ..core import coherence as coh
 from ..core.i18n import tr
+from .calibration_card import CalibrationCard
 from .widgets import (
     ACCENT,
     BG_SUNKEN,
@@ -46,7 +47,9 @@ class HomePage(QWidget):
         toggle_language: Callable[[], None],
         snapshot_factory: Callable[[], coh.EvidenceSnapshot],
         show_status: Callable[[str, int], None],
+        on_calibrate_toggled: Callable[[bool], None] | None = None,
     ) -> None:
+        self._on_calibrate_toggled = on_calibrate_toggled or (lambda _on: None)
         super().__init__()
         self._snapshot_factory = snapshot_factory
         self._show_status = show_status
@@ -141,8 +144,19 @@ class HomePage(QWidget):
         self.btn_coherence.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_coherence.clicked.connect(self.show_coherence)
         footer.addWidget(self.btn_coherence)
+        self.btn_calibrate = QPushButton("")
+        self.btn_calibrate.setMinimumHeight(40)
+        self.btn_calibrate.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_calibrate.clicked.connect(self.show_calibration)
+        footer.addWidget(self.btn_calibrate)
         footer.addStretch(1)
         layout.addLayout(footer)
+
+        # The calibration card: one guided flow (the approved design)
+        # hidden under the footer until asked.
+        self.calibration_card = CalibrationCard(self)
+        self.calibration_card.setVisible(False)
+        layout.addWidget(self.calibration_card)
         layout.addSpacing(10)
 
         self.coherence_text = QPlainTextEdit("")
@@ -187,10 +201,19 @@ class HomePage(QWidget):
         self.btn_finder.setText(tr("ui finder button"))
         self.btn_lang.setText(tr("ui lang button"))
         self.btn_coherence.setText(tr("ui coherence sessions btn"))
+        self.btn_calibrate.setText(tr("ui calibrate mic button"))
         self.hint.setText(tr("ui drop hint"))
+        self.calibration_card.retranslate()
         self.health_plot.getPlotItem().setTitle(
             tr("ui health chart title"), color=TEXT, size="9pt"
         )
+
+    def show_calibration(self) -> None:
+        """Toggle the calibration card (the window wires the timer around it)."""
+        self.calibration_card.setVisible(not self.calibration_card.isVisible())
+        self.coherence_text.setVisible(False)
+        self.health_plot.setVisible(False)
+        self._on_calibrate_toggled(self.calibration_card.isVisible())
 
     def show_coherence(self) -> None:
         """Load one evidence snapshot, then render the table and chart."""

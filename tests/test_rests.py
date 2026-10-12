@@ -162,3 +162,68 @@ def test_musicxml_fuses_a_silent_run_into_a_real_figure():
     assert rests and rests[0].figure == "demi-pause"
     xml = build_score_xml(notes, GRID, None, snap=False, rests=rests)
     assert "<type>half</type>" in xml
+
+
+# ------------------------------------------------------------------- breaths
+def test_a_heard_air_intake_is_marked_on_its_rest():
+    """A gap whose envelope clearly rises over the take's floor carries the
+    `breath` mark; a bare musical gap (near the floor) stays unmarked."""
+    import numpy as np
+
+    from v2m.core.rests import detect_breaths
+
+    hop_s = 0.01
+    env = np.full(600, 0.01, dtype=np.float32)   # a quiet floor everywhere
+    env[195:200] = 0.05                          # a SHORT bump leading gap 1
+    rests = [Rest(start=1.9, end=2.4), Rest(start=4.0, end=4.5)]
+    detect_breaths(rests, env, hop_s)
+    assert rests[0].breath is True   # the bump sits inside [1.9, 2.4]
+    assert rests[1].breath is False  # only the floor behind it
+
+
+def test_breath_marking_degrades_to_silence_without_evidence():
+    """No envelope (or a degenerate one) marks nothing: the annotation is
+    an addition, never a prerequisite of the rests."""
+    from v2m.core.rests import detect_breaths
+
+    rests = [Rest(start=0.5, end=1.0)]
+    detect_breaths(rests, None, 0.01)
+    assert rests[0].breath is False
+    detect_breaths(rests, [], 0.01)
+    assert rests[0].breath is False
+
+
+def test_musicxml_annotates_a_heard_breath():
+    """The score tells the singer where the air was taken: a breath-marked
+    rest engraves a `Respiration` direction; a silent gap engraves none."""
+    from v2m.core.musicxml import build_score_xml
+
+    notes = [_note(60, 0.0, 0.5), _note(62, 1.0, 0.5)]
+    marked = [Rest(start=0.5, end=1.0, figure="soupir", breath=True)]
+    xml = build_score_xml(notes, GRID, None, snap=False, rests=marked)
+    assert "Respiration" in xml
+    plain = [Rest(start=0.5, end=1.0, figure="soupir")]
+    xml = build_score_xml(notes, GRID, None, snap=False, rests=plain)
+    assert "Respiration" not in xml
+
+
+def test_detect_rests_annotates_from_the_observation():
+    """The pipeline path: `detect_rests` reads the observation's accent
+    envelope and marks the gap where the air intake actually sounds."""
+    import numpy as np
+
+    from v2m.core.observation import VoiceObservation
+
+    notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]
+    env = np.full(200, 0.01, dtype=np.float32)
+    env[60:85] = 0.06                       # the intake inside the gap
+    obs = VoiceObservation(
+        pitch=None, attacks=None, duration_s=2.0,
+        sample_rate=22050, frame_dt=0.02,
+        accent_envelope=env, accent_hop=220,
+    )
+    rests = detect_rests(notes, GRID, include_lead_in=False, observation=obs)
+    assert len(rests) == 1 and rests[0].breath is True
+    # the same gaps without the observation stay unmarked
+    plain = detect_rests(notes, GRID, include_lead_in=False)
+    assert plain[0].breath is False

@@ -1,10 +1,10 @@
 """The live/final marking goes through the SINGLE policy (core.compare).
 
-The ACCENT outline must no longer own its own matching rule: the GUI
+The side-by-side comparison must not own its own matching rule: the GUI
 mark and the `live_vs_final` JSON block read the same `match` — same
-window (grid sixteenth OR dating lead), same reasons. The test builds
-a final result shifted by a semitone and checks only the moved notes
-carry an outline.
+window (grid sixteenth OR dating lead), same reasons. The test builds a
+final result shifted by a semitone and checks the WHOLE final reading is
+drawn beside the captured one, with only the moved note accented.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from typing import Any, cast
 
 import pytest
 
-from v2m.core.compare import Move
 from v2m.core.liveseg import LiveNote
 from v2m.core.notes import Note
 
@@ -44,12 +43,11 @@ class _Thread:
         return self._seg
 
 
-def test_the_mark_outlines_only_the_moved_notes(qapp, monkeypatch):
-    from PyQt6.QtWidgets import QApplication
+def test_the_comparison_accents_only_the_moved_notes(qapp):
+    from PyQt6.QtCore import Qt
 
     from v2m.gui import main_window as mw
 
-    app = QApplication.instance() or QApplication([])
     win = mw.MainWindow()
     try:
         live = [LiveNote(0.0, 0.5, 69), LiveNote(0.6, 1.1, 71)]
@@ -57,9 +55,12 @@ def test_the_mark_outlines_only_the_moved_notes(qapp, monkeypatch):
         win._closed_live_notes = []
         win.result = _res()
         win._mark_live_final_diff()
-        # one final note at the same place (69) and one a semitone off (71
-        # live vs 72 final): exactly ONE outline
-        assert len(win.page_live.piano_live._diff_items) == 1
+        roll = win.page_live.piano_live
+        # the final reading is drawn WHOLE beside the captured one (2 bars),
+        # and only the moved note (final 72 vs live 71) carries the accent
+        assert len(roll._compare_items) == 2
+        assert roll._compare_items[0].opts["pen"].style() == Qt.PenStyle.NoPen
+        assert roll._compare_items[1].opts["pen"].style() == Qt.PenStyle.SolidLine
     finally:
         win.live_thread = None
         win.result = None
