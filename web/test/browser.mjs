@@ -132,7 +132,7 @@ function devtoolsPort(child) {
   });
 }
 
-async function startChrome(profile, args = []) {
+async function startChrome(profile, args = [], muteFlags = []) {
   const failures = [];
   for (const binary of chromeCandidates()) {
     const child = spawn(
@@ -143,11 +143,20 @@ async function startChrome(profile, args = []) {
         "--hide-scrollbars",
         "--no-first-run",
         "--no-default-browser-check",
-        "--mute-audio",
+        // NOT `--mute-audio`: a muted browser never opens an output stream, so
+        // an AudioContext cannot leave `suspended` and the capture check would
+        // report a dead graph on a machine that has one. Silence is asked for
+        // where it matters (`mute`, on for every caller but the capture).
+        //
+        // The pilot presses buttons through `element.click()`, which is NOT a
+        // user gesture: without this policy Chrome keeps the page's audio
+        // contexts suspended whatever the hardware is.
+        "--autoplay-policy=no-user-gesture-required",
         `--user-data-dir=${profile}`,
         "--remote-debugging-port=0",
         // Caller flags last: the capture check adds Chrome's fake microphone,
         // and no other caller passes any.
+        ...muteFlags,
         ...args,
         "about:blank",
       ],
@@ -177,14 +186,17 @@ async function startChrome(profile, args = []) {
  * caller can act on it — the module's handlers are still bound afterwards, so
  * callers that press that button retry until the page answers (see `pressDemo`).
  */
-export async function startBrowser({ root, width = 1600, height = 1000, args = [] }) {
+export async function startBrowser({ root, width = 1600, height = 1000, args = [], mute = true }) {
   const profile = await mkdtemp(join(tmpdir(), "v2m-web-"));
   const server = await servePage(root);
   const origin = `http://127.0.0.1:${server.address().port}/`;
   let chrome = null;
   let session = null;
   try {
-    chrome = await startChrome(profile, args);
+    // A page can sound (the audit's "a row being heard" state does): the run
+    // stays quiet unless the caller NEEDS an output stream to exist, which is
+    // exactly the capture check.
+    chrome = await startChrome(profile, args, mute ? ["--mute-audio"] : []);
     const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
     const page = targets.find((target) => target.type === "page");
     if (!page) throw new Error("the browser opened no page to drive");

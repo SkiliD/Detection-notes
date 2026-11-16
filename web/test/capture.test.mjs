@@ -67,6 +67,9 @@ async function page() {
     root: WEB,
     width: 1200,
     height: 900,
+    // A muted browser opens no output stream, and an AudioContext that cannot
+    // start never records: this is the one caller that needs its graph to run.
+    mute: false,
     args: [
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream", // no prompt to answer in a headless run

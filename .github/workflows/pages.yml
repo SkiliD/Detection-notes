@@ -121,23 +121,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Give the runner a sound card to start an audio graph on
-        # `AudioContext.resume()` settles only once an output device can start,
-        # and a runner has none — the capture would skip. A null sink is a real
-        # output device to Chrome.
+      - name: Give the runner an output device Chrome will open
+        # `AudioContext` leaves `suspended` only once an output stream can
+        # start, and a runner has none — the capture then fails with the page's
+        # own "audio engine" line, which is what it is for. PulseAudio's null
+        # sink is a real output device to Chrome, but three things must hold:
+        # the server needs `XDG_RUNTIME_DIR` (a runner has no session), the
+        # sink must be the DEFAULT one, and the later steps must inherit the
+        # directory so the browser finds that same server.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq pulseaudio
-          pulseaudio --start --exit-idle-time=-1 --load="module-null-sink sink_name=v2m"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/pulse"
+          install -d -m 700 "$XDG_RUNTIME_DIR"
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=v2m
+          pactl set-default-sink v2m
           pactl info
+          pactl list short sinks
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
 
       - name: The microphone path opens a take and exports it twice the same
         # Chrome's own fake microphone (`--use-fake-device-for-media-stream`,
         # a generated tone file) drives the page's REAL chain — permission,
-        # worklet, YIN, segmenter, MIDI export — twice, and the two exports must
-        # be the same bytes. `V2M_REQUIRE_AUDIO` refuses the skip a machine
-        # without an output device would otherwise take, so a broken null sink
-        # fails here instead of hiding the coverage.
+        # worklet, YIN, segmenter, MIDI export — twice, and the two takes must
+        # transcribe the same NOTES (a lost block may shift a tick; a wrong note
+        # is the failure). `V2M_REQUIRE_AUDIO` refuses the skip a machine without
+        # an output device would otherwise take, so a broken null sink fails
+        # here instead of hiding the coverage.
         env:
           V2M_REQUIRE_AUDIO: "1"
         run: node --test web/test/capture.test.mjs
