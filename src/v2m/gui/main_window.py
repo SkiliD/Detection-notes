@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import audio_io, driver_fx
+from ..core import audio_io, capture_failure, driver_fx
 from ..core.audio_io import LiveCapture
 from ..core.compare import invalidate as invalidate_breakdown
 from ..core.compare import match as compare_match
@@ -140,13 +140,23 @@ class LiveThread(QThread):
         device: int | None = None,
         device_name: str | None = None,
         exclusive: bool = False,
+        stream_factory: "audio_io.StreamFactory | None" = None,
     ):
         super().__init__()
         self._stop = False
         self.device = device
         self.device_name = device_name or "System default"
         self.exclusive = exclusive
+        # None = the real microphone; a test injects an opener that refuses,
+        # exactly as `LiveTake` allows (never a patch of `audio_io.sd`)
+        self.stream_factory = stream_factory
         self.take: LiveTake | None = None
+        # A capture that never OPENED is the microphone's own failure and earns
+        # the page's names; a later failure is the take's. `failure_key` is set
+        # only in the first case, and only there does the window rewrite the
+        # sentence.
+        self.started = False
+        self.failure_key = ""
 
     def _on_take_event(self, event: LiveEvent) -> None:
         """Forward one LiveTake event to its Qt signal (worker thread)."""
@@ -174,9 +184,11 @@ class LiveThread(QThread):
             on_event=self._on_take_event,
             device=self.device,
             exclusive=self.exclusive,
+            stream_factory=self.stream_factory,
         )  # default thresholds (pipeline)
         try:
             self.take.start()
+            self.started = True
             # what the capture really OPENED (a refused raw open falls back
             # silently): the page must name the mode it actually got
             self.captureOpened.emit(self.take.raw_capture)
@@ -189,6 +201,13 @@ class LiveThread(QThread):
             # a finalization failure was already published as a "failed"
             # event by LiveTake — don't report the same error twice
             if self.take is None or not self.take.error_emitted:
+                # a stream that never opened is the microphone's failure, and
+                # only it earns the page's three names (see `capture_failure`)
+                if not self.started:
+                    self.failure_key = capture_failure.capture_failure_key(error)
+                    # the page keeps the same pair: the sentence names the cause,
+                    # the console keeps what the driver actually said
+                    print(f"[live] capture failed: {error}")
                 # no event carried the signal (the failure happened outside
                 # the take): the diagnostic degrades to "no audio", never a
                 # guess about the take's content
@@ -372,6 +391,7 @@ class MainWindow(QMainWindow):
             metronome_bpm_changed=self.on_metronome_bpm_changed,
             expected_note=self._expected_midi,
             silence_message=lambda msg: self.statusBar().showMessage(msg, 2_500),
+            error_message=lambda msg: self.show_error(msg, timeout=10_000),
             gate_rms=lambda: audio_io.GATE_RMS,
             on_review_back=self.on_exit_live_roll,
             audition_note=self.on_audition_live_note,
@@ -1713,7 +1733,12 @@ class MainWindow(QMainWindow):
         card = self.page_home.calibration_card
         if card.isVisible():
             self._calibration_timer.stop()
-            card.set_error(tr("ui calibrate mic failed").format(error=msg))
+            thread = self._calibration_thread
+            card.set_error(
+                capture_failure.capture_failure_message(
+                    msg, thread.failure_key if thread is not None else ""
+                )
+            )
 
     def _calibration_feed_tick(self) -> None:
         """Feed the armed round its first stable pitch (a 400 ms hold)."""
@@ -2729,7 +2754,12 @@ class MainWindow(QMainWindow):
         if self._workflow.replacement_pending:
             self._cancel_phrase_replacement(error)
             return
-        self.page_live.on_failed(error)
+        thread = self.live_thread
+        self.page_live.on_failed(
+            capture_failure.capture_failure_message(
+                error, thread.failure_key if thread is not None else ""
+            )
+        )
         self.take_ctl.set_signal(signal_bytes)
         try:
             self.take_ctl.fail_take()

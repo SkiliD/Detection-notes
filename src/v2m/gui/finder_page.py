@@ -56,6 +56,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core import capture_failure
 from ..core.i18n import note_display, note_display_pair, tr
 from ..core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, on_piano
 from . import widgets
@@ -615,9 +616,17 @@ class FinderPage(QWidget):
     def _on_failed(self, msg: str, _signal: bytes = b"") -> None:
         """The capture failed: stop, announce. The live thread's `failed`
         signal also carries the take's signal (the failure trace reads
-        it) — the finder ignores it, it keeps no take."""
+        it) — the finder ignores it, it keeps no take.
+
+        The sentence is the page's own vocabulary (refused, missing, busy); the
+        thread's key is read BEFORE `_stop()` forgets the thread.
+        """
+        thread = self._thread
+        sentence = capture_failure.capture_failure_message(
+            msg, thread.failure_key if thread is not None else ""
+        )
         self._stop()
-        self._show_error(msg)
+        self._show_error(sentence)
 
     def set_note(self, midi_float, light: bool = True) -> None:
         """Show the note as a name and, when `light`, a lit key.

@@ -197,3 +197,119 @@ def test_script_flags_documented_with_semantics():
         f"script flags without semantics in the prose (outside examples) : {missing} — "
         "one sentence per flag, in BOTH READMEs, like --no-warmup."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Every path a README puts in backticks exists
+# --------------------------------------------------------------------------- #
+
+# What a README may name without it being on disk. Each entry is a REASON, not
+# a convenience: a clone has none of these, and a typo must not be able to hide
+# behind the list.
+RUNTIME_ONLY = {
+    # the artifacts of a run (gitignored, produced by the app or a script)
+    "prises_live/",
+    "prises_verite/",
+    "demo.wav",  # `scripts/make_demo.py` regenerates it
+    "chant.wav",  # the reference take, documented as gitignored
+    # the interpreter of a local virtualenv, named per platform
+    ".venv/Scripts/python.exe",
+    ".venv/bin/python",
+}
+
+PATH_SUFFIXES = (
+    ".md",
+    ".py",
+    ".json",
+    ".wav",
+    ".npz",
+    ".js",
+    ".mjs",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".cfg",
+    ".txt",
+    ".csv",
+    ".xml",
+    ".mid",
+    ".musicxml",
+    ".sh",
+    ".bat",
+    ".ps1",
+    ".html",
+    ".css",
+)
+
+
+def _archive_members() -> set[str]:
+    """The files the page's ZIP carries, read from its OWN writer.
+
+    `prise.wav` and `notes.json` exist only inside the archive the page builds
+    in the browser, so a README may name them; taking the names from
+    `web/bundle.js` rather than restating them here means a renamed member
+    makes the README stale instead of silently tolerant.
+    """
+    source = (REPO / "web" / "bundle.js").read_text(encoding="utf-8")
+    return set(re.findall(r'export const [A-Z_]+_NAME = "([^"]+)"', source))
+
+
+def _cited_paths(text: str) -> list[str]:
+    """The path-looking backticked spans of one README, in reading order."""
+    cited: list[str] = []
+    for span in re.findall(r"`([^`\n]+)`", text):
+        token = span.strip()
+        # `GET /health` is a route; a home path is not in the repository; a bare
+        # suffix (`.json`) is prose about a format; globs and templates name no
+        # one file.
+        if not token or any(ch.isspace() for ch in token):
+            continue
+        if token.startswith("~"):
+            continue
+        if token.startswith(".") and "/" not in token:
+            continue  # a bare suffix: prose about a format, not a file
+        if any(ch in token for ch in "*{}<>|$"):
+            continue
+        if "/" not in token and not token.endswith(PATH_SUFFIXES):
+            continue
+        cited.append(token)
+    return cited
+
+
+def test_every_path_a_readme_names_exists():
+    """A README must not send its reader to a file that is not there.
+
+    The design notes (`AGENTS.md`, `CONTEXT.md`, `docs/adr/`) are named in the
+    text AND explained as working-tree-only, so a reader knows where they
+    stand; a path that exists in neither place is a dead reference, and nothing
+    in the suite saw one until this test.
+    """
+    archive = _archive_members()
+    assert archive, "web/bundle.js no longer names its archive members"
+
+    cited: set[str] = set()
+    missing: list[str] = []
+    for name in ("README.md", "README.fr.md"):
+        text = (REPO / name).read_text(encoding="utf-8")
+        for token in _cited_paths(text):
+            cited.add(token)
+            if token in RUNTIME_ONLY or token in archive:
+                continue
+            if not (REPO / token.rstrip("/")).exists():
+                missing.append(f"{name}: `{token}`")
+
+    # A net that matched nothing would pass forever: these READMEs do cite the
+    # repository, so a low count means the detector stopped seeing it.
+    assert len(cited) >= 15, f"the path net only saw {len(cited)} names: {sorted(cited)}"
+    assert not missing, "a README names a path that does not exist:" + "".join(
+        f"\n  {one}" for one in sorted(missing)
+    )
+
+
+def test_the_path_net_refuses_a_name_that_is_not_there():
+    """The detector's own bite: it sees a missing path and ignores what it should."""
+    assert "scripts/nowhere.py" in _cited_paths("run `scripts/nowhere.py` now")
+    assert not (REPO / "scripts" / "nowhere.py").exists()
+    assert _cited_paths("`GET /health`, `~/.v2m_theme`, `.json`, `v2m analyze`") == []
+    # A directory the README names with its trailing slash is still a directory.
+    assert "scripts/" in _cited_paths("the `scripts/` folder")

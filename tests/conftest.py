@@ -1,6 +1,7 @@
 """Fixtures: synthetic audio signals, sandboxed preferences, suite budget."""
 
 import json
+import os
 import time
 
 import numpy as np
@@ -70,7 +71,26 @@ def _sandbox_language_file(tmp_path_factory):
 # core (×2.43) — the factor covers load and ~1.8x uniform slowdown,
 # not a 2x slower machine class (the budget is a tripwire, not a
 # comfort margin; see the calibration procedure).
-SUITE_BUDGET_S = 150.0
+
+def suite_budget(default: float = 150.0) -> float:
+    """The tripwire in seconds; `V2M_SUITE_BUDGET_S` raises it where needed.
+
+    The dated history above is measured on a DEVELOPMENT machine. A shared
+    GitHub runner is slower and never idle, and a green suite that fails for
+    having taken 260 s on one teaches nobody anything — so the number travels
+    through the environment for that case only, and an unreadable value falls
+    back to the measured default instead of disabling the tripwire.
+    """
+    raw = os.environ.get("V2M_SUITE_BUDGET_S")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+SUITE_BUDGET_S = suite_budget()
 
 #   2026-10-12  34.6 s  1058 tests  →  150 s (KEPT: the run is now the
 #                                     `-n 2` one pyproject's addopts

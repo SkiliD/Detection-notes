@@ -121,13 +121,32 @@ def _tracked() -> list[str]:
     return out.stdout.splitlines()
 
 
+# The web port's JSON has standing, and it is the FROZEN kind: `strings.json` is
+# the page's own language table (a source, like `constants.js`), and the three
+# under `web/test/` are fixtures the browser checks replay in CI, where the
+# Python toolchain that generates them does not run. They are not free to drift:
+# `tests/test_web_build.py` regenerates `cases.json` in-process and compares it,
+# and the YIN fixtures carry the digest of the take they were cut from.
+WEB_JSON = (
+    "web/strings.json",
+    "web/test/cases.json",
+    "web/test/yin.json",
+    "web/test/yin-rates.json",
+)
+
+
 def test_repo_tracks_no_generated_artifacts():
     """No generated artifact tracked: sources + configs + frozen reference."""
     tracked = _tracked()
     offenders = [f for f in tracked if f.endswith((".mid", ".musicxml", ".csv", ".pdf", ".wav"))]
-    # JSON: only the tests' frozen references have standing
+    # JSON: only the tests' frozen references and the web port's own table and
+    # fixtures have standing.
     offenders += [
-        f for f in tracked if f.endswith(".json") and not f.startswith("tests/reference/")
+        f
+        for f in tracked
+        if f.endswith(".json")
+        and not f.startswith("tests/reference/")
+        and f not in WEB_JSON
     ]
     assert not offenders, f"generated artifacts tracked : {offenders}"
 

@@ -16,11 +16,16 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
+# The deploy needs nothing else: reading the checkout, writing the Pages
+# deployment, and the OIDC token GitHub Pages exchanges for it.
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# One publication at a time, and a superseded push never lands: two pushes in a
+# row would otherwise race, and the older one could finish LAST and publish a
+# page the newer commit already replaced.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -63,6 +68,19 @@ jobs:
           path: wide-1600.png
           if-no-files-found: warn
 
+      - name: Every listening failure says so on screen and on the console
+        # Seven failures — permission, no device, a device another application
+        # holds, a page outside a secure context, an output that never starts,
+        # a worklet whose module refuses, and the secure-context case — each
+        # pressed through the real `startCapture` and read back from `#status`
+        # AND from the `capture failed [stage]: name` line, stage included: a
+        # mic refusal and a worklet refusal are both NotAllowedError, so only
+        # that bracket tells which half of the page broke. The mapping is pinned
+        # as source text by the Python suite; this proves the words reach the
+        # page. The graph is stubbed and the insecure case is served from the
+        # machine's own address, so a runner with no sound card still runs it.
+        run: node --test web/test/mic-failures.test.mjs
+
       - name: The page holds at every resolution class
         # The four CSS queries carry the whole layout and no unit test can see
         # their RESULT: eight classes are measured in a browser (320 px to
@@ -86,15 +104,58 @@ jobs:
         # nobody made.
         run: node web/test/axe-audit.mjs --axe "$RUNNER_TEMP/axe.min.js"
 
+  capture:
+    # The microphone path on Chrome's fake device: the one user path nothing
+    # else presses. It stands ALONE because its PulseAudio provisioning has
+    # never run on a runner — a null sink that never starts must show up as a
+    # red job, not hold the published page offline.
+    #
+    # So it gates nothing yet: `deploy` runs whatever this job says, unless the
+    # repository variable `MIC_CAPTURE_REQUIRED` is `true`. Set that variable
+    # once a run here is green — from then on a red capture DOES block the
+    # publication, which is the only way the coverage stays honest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # a stuck browser must not hold the page hostage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Give the runner a sound card to start an audio graph on
+        # `AudioContext.resume()` settles only once an output device can start,
+        # and a runner has none — the capture would skip. A null sink is a real
+        # output device to Chrome.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pulseaudio
+          pulseaudio --start --exit-idle-time=-1 --load="module-null-sink sink_name=v2m"
+          pactl info
+
+      - name: The microphone path opens a take and exports it twice the same
+        # Chrome's own fake microphone (`--use-fake-device-for-media-stream`,
+        # a generated tone file) drives the page's REAL chain — permission,
+        # worklet, YIN, segmenter, MIDI export — twice, and the two exports must
+        # be the same bytes. `V2M_REQUIRE_AUDIO` refuses the skip a machine
+        # without an output device would otherwise take, so a broken null sink
+        # fails here instead of hiding the coverage.
+        env:
+          V2M_REQUIRE_AUDIO: "1"
+        run: node --test web/test/capture.test.mjs
+
   deploy:
-    needs: verify
+    needs: [verify, capture]
+    # `!cancelled()` because a failed `capture` must not skip the deploy — the
+    # capture job is the experiment here, not the gate (see its comment).
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.capture.result == 'success' || vars.MIC_CAPTURE_REQUIRED != 'true') }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
+      # `enablement: true` may create the Pages site on a first push, so this one
+      # step both configures and enables it — a second, bare call would run the
+      # same thing twice.
       - uses: actions/configure-pages@v5
         with:
           enablement: true

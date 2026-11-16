@@ -410,7 +410,10 @@ def test_a_dead_mic_is_said_on_the_card(qapp, monkeypatch, isolated_cal):
         assert _pump_until(qapp, lambda: card.error_line.isVisible(), timeout=30), (
             "a microphone that never opened stayed invisible"
         )
-        assert "device unavailable" in card.error_line.text()
+        # The card names the cause the way the page does — the driver's own
+        # "device unavailable" is the sentence for an endpoint another
+        # application holds, not a transport string on screen.
+        assert card.error_line.text() == tr("ui mic busy")
         assert card.prompt.text() == tr("ui calibrate target").format(
             n=1, total=mic_cal.ROUNDS, note=_note_of(card._targets[-1])
         )

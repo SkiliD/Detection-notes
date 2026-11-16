@@ -118,6 +118,7 @@ class LivePage(QWidget):
         metronome_bpm_changed: Callable[[int], None],
         expected_note: Callable[[float], "int | None"],
         silence_message: Callable[[str], None],
+        error_message: Callable[[str], None],
         gate_rms: Callable[[], float],
         on_review_back: Callable[[], None],
         audition_note: Callable[[int], None],
@@ -132,6 +133,9 @@ class LivePage(QWidget):
         self._metronome_bpm_changed = metronome_bpm_changed
         self._expected_note = expected_note
         self._silence_message = silence_message
+        # a failure is not an advisory: the silence line passes in 2.5 s, the
+        # sentence that says what to DO must stay where the eye finds it
+        self._error_message = error_message
         self._gate_rms = gate_rms
         self._on_review_back = on_review_back
         self._audition_note = audition_note
@@ -837,4 +841,4 @@ class LivePage(QWidget):
         self._timer.stop()
         self._set_input_state("ui mic waiting")
         self.label_status.setText(tr("ui mic preparing"))
-        self._silence_message(msg)  # the window's error surface (same route)
+        self._error_message(msg)  # the window's persistent error surface

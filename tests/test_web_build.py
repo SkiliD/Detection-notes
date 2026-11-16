@@ -1133,6 +1133,150 @@ def test_a_playback_failure_does_not_blame_the_file():
         )
 
 
+def test_each_microphone_failure_names_the_reason_the_browser_gave():
+    # One sentence for every capture failure sent the reader hunting for a
+    # device when the permission had been refused, or for a permission when
+    # another application held the microphone. Each of the browser's three
+    # real reasons gets its own sentence; anything else came from the page's
+    # own audio graph and keeps a neutral one, since it is not the mic's fault.
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    mapping = app[app.index("function micErrorKey(") :]
+    mapping = mapping[: mapping.index("\n}\n")]
+    for name, sentence in (
+        ("NotAllowedError", "error_mic_blocked"),
+        ("NotFoundError", "error_mic_missing"),
+        ("NotReadableError", "error_mic_busy"),
+    ):
+        assert f'case "{name}"' in mapping, f"{name} is not mapped"
+        assert f'return "{sentence}";' in mapping, f"{name} does not reach {sentence}"
+    assert 'return "error_mic";' in mapping, "an unknown failure has no fallback sentence"
+    # The capture path ASKS for the mapping: a status set to the bare key would
+    # make the three sentences unreachable code.
+    assert "setStatus(micErrorKey(error));" in app
+
+    strings = json.loads((WEB / "strings.json").read_text(encoding="utf-8"))
+    for language in ("fr", "en"):
+        table = strings[language]
+        capture = ("error_mic", "error_mic_blocked", "error_mic_missing", "error_mic_busy")
+        for name in capture:
+            assert table.get(name), f"{language}: {name} is missing"
+        assert len({table[name] for name in capture}) == 4, (
+            f"{language}: two capture failures share one sentence"
+        )
+
+
+def test_a_failed_capture_names_its_stage_and_the_error_in_the_console():
+    # The sentence tells the singer WHAT happened; the console has to tell a bug
+    # report WHERE. One name means two things here — a refused getUserMedia and
+    # a worklet whose module never loaded both throw NotAllowedError — so the
+    # stage is the fact the sentence cannot carry.
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    report = app[app.index("function logCaptureFailure(") :]
+    report = report[: report.index("\n}\n")]
+    assert "console.error(" in report, "the capture failure never reaches the console"
+    assert "error?.name" in report, "the line does not carry the browser's own name"
+
+    body = app[app.index("async function startCapture(") :]
+    body = body[: body.index("\nasync function ")]
+    # Each label is set BEFORE the call it names, so the line reports the step
+    # that was running: a label set afterwards would name the next one.
+    engine = body.index('stage = "audio engine"')
+    worklet = body.index('stage = "worklet"')
+    microphone = body.index('stage = "microphone"')
+    assert engine < worklet < body.index("addModule"), "the worklet runs unlabelled"
+    assert worklet < microphone < body.index("await navigator.mediaDevices.getUserMedia"), (
+        "the microphone request runs unlabelled"
+    )
+    assert body.index("await navigator.mediaDevices.getUserMedia") < body.index(
+        'stage = "audio engine"', engine + 1
+    ), "wiring the open stream is the graph again, not the microphone"
+
+    catch = body[body.index("} catch (error) {") :]
+    assert "logCaptureFailure(stage, error);" in catch, "the catch reports no stage"
+    assert catch.index("logCaptureFailure") < catch.index("setStatus(micErrorKey"), (
+        "the console line must be written before the sentence is shown"
+    )
+    # The two guards that never reach that catch write their own line, naming
+    # the cause instead of a stage that never ran.
+    assert 'logCaptureFailure("microphone", {' in body
+
+
+def test_an_insecure_page_says_so_and_playback_is_not_capture():
+    # A browser hides navigator.mediaDevices outside a secure context, so a page
+    # served over plain http never prompts: sending the reader to check the
+    # permission would point at a setting that cannot help. The test is
+    # `isSecureContext` ALONE — a page of ES modules never loads from a local
+    # file, so a `file:` arm could not run, and dead code is what this suite is
+    # for — while the sentence still names the local file, which is where such a
+    # reader usually started.
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    reason = app[app.index("function insecurePageReason(") :]
+    reason = reason[: reason.index("\n}\n")]
+    assert "isSecureContext" in reason, "plain http is not named"
+    assert "location.protocol" not in reason, "a file:// arm cannot run from a module page"
+
+    body = app[app.index("async function startCapture(") :]
+    body = body[: body.index("\nasync function ")]
+    # The insecure check runs BEFORE the API guard: an insecure page usually has
+    # no mediaDevices either, and the neutral sentence must not win.
+    guard = body.index("navigator.mediaDevices?.getUserMedia")
+    assert body.index("insecurePageReason()") < guard, (
+        "the neutral sentence wins on an insecure page"
+    )
+    assert 'setStatus("error_insecure");' in body
+    assert 'name: "insecure context"' in body, "the console line does not name the context"
+
+    strings = json.loads((WEB / "strings.json").read_text(encoding="utf-8"))
+    for language in ("fr", "en"):
+        table = strings[language]
+        assert table.get("error_insecure"), f"{language}: error_insecure is missing"
+        assert table["error_insecure"] != table["error_mic"], (
+            f"{language}: an insecure page reads like a broken audio graph"
+        )
+        # The local file keeps its place in the words even though no branch can
+        # detect it: it is the reader's first guess, and the fix is the same.
+        assert ("fichier local" if language == "fr" else "local file") in table["error_insecure"]
+        # Playback and capture are different failures: one word must not serve
+        # both, or the reader cannot tell which half of the page broke.
+        assert table["error_play"] != table["error_mic"]
+        if language == "fr":
+            assert "lecture" in table["error_play"].lower()
+            assert "écoute" not in table["error_play"].lower()
+            assert "écoute" in table["error_mic"].lower()
+        else:
+            assert "playback" in table["error_play"].lower()
+            assert "listen" not in table["error_play"].lower()
+            assert "listening" in table["error_mic"].lower()
+
+
+def test_a_graph_that_never_starts_is_reported_instead_of_awaited_forever():
+    # `AudioContext.resume()` settles only once an output device can start: a
+    # headless browser or a machine whose audio service is off leaves the
+    # promise pending for good, and the page waited on it BEFORE asking for the
+    # microphone — so the reader sat on "microphone open" while nothing was
+    # ever recorded, no console line said why, and no take could be exported.
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    helper = app[app.index("async function startedContext(") :]
+    helper = helper[: helper.index("\n}\n")]
+    assert "Promise.race(" in helper, "the resume is awaited with no bound"
+    assert "setTimeout(" in helper, "nothing gives up on a context that never starts"
+    assert 'context.state === "running"' in helper, "the outcome is not the graph's own state"
+
+    body = app[app.index("async function startCapture(") :]
+    body = body[: body.index("\nasync function ")]
+    assert "await startedContext(context)" in body, "the capture still awaits resume bare"
+    crashed = body[body.index("await startedContext(context)") :]
+    assert 'name: "AudioContext did not start"' in crashed, (
+        "a dead output is not named in the console"
+    )
+    # The microphone's sentence, not a fresh one: the microphone was never the
+    # problem, and the neutral sentence already owns this page's own graph.
+    assert crashed.index("logCaptureFailure") < crashed.index('setStatus("error_mic")')
+    # And the branch returns BEFORE asking for the stream: a dead output is not
+    # a permission problem, and a prompt would ask the reader for nothing.
+    assert "getUserMedia" not in crashed[: crashed.index("await stopCapture(true)")]
+
+
 def test_the_pages_workflow_tests_before_it_publishes():
     workflow = (REPO / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
     assert "node --test web/test/segmenter.test.mjs" in workflow
@@ -1141,8 +1285,46 @@ def test_the_pages_workflow_tests_before_it_publishes():
     assert "path: web" in workflow  # the artifact IS the page folder
     assert "actions/deploy-pages@v4" in workflow
     assert "branches: [main]" in workflow
-    # The port's test must gate the deploy, not run beside it.
-    assert "needs: verify" in workflow
+    # The port's conformance must gate the deploy. The microphone capture does
+    # NOT: its PulseAudio provisioning is unproven, so it stands in its own job
+    # and `MIC_CAPTURE_REQUIRED` decides whether a red capture blocks — unset,
+    # publication proceeds; set after a green run, it becomes the gate.
+    assert "needs: [verify, capture]" in workflow
+    assert "needs.verify.result == 'success'" in workflow
+    assert "needs.capture.result == 'success'" in workflow
+    assert "vars.MIC_CAPTURE_REQUIRED != 'true'" in workflow
+    assert "!cancelled()" in workflow
+
+    jobs = workflow[workflow.index("\njobs:") :]
+    verify_job = jobs[jobs.index("\n  verify:") : jobs.index("\n  capture:")]
+    capture_job = jobs[jobs.index("\n  capture:") : jobs.index("\n  deploy:")]
+    assert "node --test web/test/capture.test.mjs" in capture_job
+    assert "node --test web/test/capture.test.mjs" not in verify_job, (
+        "the microphone path still holds the publication hostage"
+    )
+    assert "module-null-sink" in capture_job
+    assert 'V2M_REQUIRE_AUDIO: "1"' in capture_job
+    assert "timeout-minutes:" in capture_job, "a stuck capture job would hold the deploy"
+    # The refusal sentences need no audio device at all, so they stay in the
+    # job that gates publication.
+    assert "node --test web/test/mic-failures.test.mjs" in verify_job
+    # Publication is serialised and a superseded push cannot land: without the
+    # cancel, two pushes race and the OLDER one can finish last.
+    assert "concurrency:" in workflow
+    assert "group: pages" in workflow
+    assert "cancel-in-progress: true" in workflow
+    # The deploy needs to read the checkout, write the deployment and take the
+    # OIDC token — nothing else, and never `write-all`.
+    block = workflow[workflow.index("\npermissions:") :]
+    block = block[: block.index("\n\n")]
+    keys = [line for line in block.splitlines() if line.startswith("  ") and ":" in line]
+    granted = {line.split(":")[0].strip() for line in keys}
+    assert granted == {"contents", "pages", "id-token"}, granted
+    assert "write-all" not in workflow
+    # One configuration step, not two: `enablement: true` already does the work
+    # a bare call would repeat.
+    deploy = workflow[workflow.index("\n  deploy:") :]
+    assert deploy.count("actions/configure-pages@v5") == 1, "the deploy configures Pages twice"
     # The wide layout has no unit test: a 1600 px shot on every push, kept in
     # the run's artifacts, and the step REFUSES the wide facts itself.
     assert "node web/test/wide-shot.mjs wide-1600.png" in workflow
@@ -1155,6 +1337,10 @@ def test_the_pages_workflow_tests_before_it_publishes():
     # dependency-free, and a new axe rule cannot arrive on its own.
     assert "axe-core@4.10.2" in workflow
     assert "node web/test/axe-audit.mjs --axe" in workflow
+    # The microphone path is the one user path no other check presses: a fake
+    # device feeds it, and V2M_REQUIRE_AUDIO refuses the skip a runner without
+    # a sound card would otherwise take.
+
 
 
 def test_the_page_is_measured_in_a_browser_at_every_resolution_class():

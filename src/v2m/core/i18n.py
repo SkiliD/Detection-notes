@@ -322,6 +322,17 @@ STRINGS = {
         "ui mic received": "Son reçu",
         "ui mic silence": "Silence depuis {s} s",
         "ui mic low level": "Niveau faible depuis {s} s",
+        "ui mic blocked": (
+            "Le système bloque le micro : autorisez-le pour cette application "
+            "(Réglages → Confidentialité → Microphone), puis réessayez."
+        ),
+        "ui mic missing": (
+            "Aucun micro utilisable : branchez-en un ou choisissez-le dans les "
+            "réglages du son, puis réessayez."
+        ),
+        "ui mic busy": (
+            "Le micro est occupé par une autre application : fermez-la, puis réessayez."
+        ),
         "ui live progress": "{t} · {notes} notes · {meter}",
         "ui live silence": "Aucun son reçu depuis {s} s. Vérifiez le seuil du micro.",
         "ui live low mic": "Aucun son reçu depuis {s} s. Vérifiez le niveau du micro.",
@@ -445,7 +456,6 @@ STRINGS = {
         ),
         "ui calibrate heard": "micro : {note}",
         "ui calibrate silent": "micro : rien de tenu pour l'instant (l'application écoute…)",
-        "ui calibrate mic failed": "Micro indisponible : {error}",
         "ui calibrate found": "Écart mesuré : {cents:+.1f} cents — enregistrez-le comme référence pour les prochaines prises.",
         "ui calibrate none": "Aucun écart systématique détecté : vos notes ne nomment pas une habitude de l'appareil (le bruit ne se calibre pas).",
         "ui calibrate counts": "tours retenus : {used} · sautés : {skipped}",
@@ -816,6 +826,17 @@ STRINGS = {
         "ui mic received": "Sound received",
         "ui mic silence": "Silent for {s} s",
         "ui mic low level": "Low level for {s} s",
+        "ui mic blocked": (
+            "The system is blocking the microphone: allow it for this application "
+            "(Settings → Privacy → Microphone), then try again."
+        ),
+        "ui mic missing": (
+            "No usable microphone: plug one in or choose it in the sound settings, "
+            "then try again."
+        ),
+        "ui mic busy": (
+            "The microphone is busy in another application: close it, then try again."
+        ),
         "ui live progress": "{t} · {notes} notes · {meter}",
         "ui live silence": "No sound received for {s} s. Check the mic threshold.",
         "ui live low mic": "No sound received for {s} s. Check the microphone level.",
@@ -938,7 +959,6 @@ STRINGS = {
         ),
         "ui calibrate heard": "mic: {note}",
         "ui calibrate silent": "mic: nothing held yet (listening…)",
-        "ui calibrate mic failed": "Microphone unavailable: {error}",
         "ui calibrate found": "Measured offset: {cents:+.1f} cents — save it as reference for upcoming takes.",
         "ui calibrate none": "No systematic offset detected: your rounds do not name a device habit (noise is never calibrated).",
         "ui calibrate counts": "rounds used: {used} · skipped: {skipped}",

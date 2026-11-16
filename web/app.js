@@ -601,20 +601,120 @@ function drawRows() {
   $("guide-demo").disabled = capturing;
 }
 
+/**
+ * The sentence for a capture that failed, by the browser's own reason.
+ *
+ * Only the three names the browser really rejects with are mapped, and each is
+ * something a reader can act on: the permission (`NotAllowedError` — refused,
+ * or a page that is not a secure context), no device (`NotFoundError`), a device
+ * another application holds (`NotReadableError`). Anything else came from this
+ * page's own audio graph — a worklet that never loaded — so the fallback must
+ * stay neutral instead of sending the reader to the microphone's settings.
+ */
+function micErrorKey(error) {
+  switch (error?.name) {
+    case "NotAllowedError":
+      return "error_mic_blocked";
+    case "NotFoundError":
+      return "error_mic_missing";
+    case "NotReadableError":
+      return "error_mic_busy";
+    default:
+      return "error_mic";
+  }
+}
+
+/**
+ * The console line for a capture that failed.
+ *
+ * The sentence answers the singer; a bug report needs the machine's facts, and
+ * only the console can carry them without cluttering the page. The STAGE comes
+ * first because one name means two things here: a `NotAllowedError` thrown by
+ * getUserMedia is a refused permission, while the same name thrown by the
+ * worklet's module load is this page's own audio graph — and the sentence alone
+ * cannot say which of the two ran.
+ */
+function logCaptureFailure(stage, error) {
+  const name = error?.name || "unknown error";
+  const message = error?.message ? `: ${error.message}` : "";
+  console.error(`capture failed [${stage}]: ${name}${message}`);
+}
+
+/**
+ * Why this page cannot ask for a microphone at all, or null when it can.
+ *
+ * Outside a secure context the browser hides `navigator.mediaDevices`, so a page
+ * served over plain http from a LAN address never even prompts — telling the
+ * reader to check the permission sends them to a setting that cannot help. The
+ * fix is to serve the folder (`python -m http.server`) or to use the published
+ * https address. No `file:` arm: a page of ES modules never loads from a local
+ * file at all, so that branch could only be dead code — while the sentence
+ * still names the local file, because that is where a reader who ends up here
+ * most often started.
+ */
+function insecurePageReason() {
+  return isSecureContext ? null : "the page is not served over https or localhost";
+}
+
+/**
+ * Resumes the audio graph, but never waits on it forever.
+ *
+ * `resume()` settles only once an output device can actually start: a browser
+ * with no sound card — a headless CI run, a machine whose audio service is off
+ * — leaves the promise pending for good, and the page then sat on "microphone
+ * open" while nothing was ever recorded or exported. Two seconds is far beyond
+ * a healthy start (milliseconds) and short enough to report a dead output as
+ * the audio-engine failure it is.
+ */
+async function startedContext(context) {
+  if (context.state === "running") return true;
+  await Promise.race([
+    context.resume().catch(() => {}),
+    new Promise((done) => setTimeout(done, 2000)),
+  ]);
+  return context.state === "running";
+}
+
 async function startCapture() {
+  const insecure = insecurePageReason();
+  if (insecure) {
+    logCaptureFailure("microphone", { name: "insecure context", message: insecure });
+    setStatus("error_insecure");
+    return;
+  }
   if (!navigator.mediaDevices?.getUserMedia) {
+    // Never reaches the catch below: this browser has no capture API at all,
+    // which the three mapped names cannot describe because nothing was asked.
+    logCaptureFailure("microphone", {
+      name: "mediaDevices unavailable",
+      message: "this browser exposes no getUserMedia",
+    });
     setStatus("error_mic");
     return;
   }
   stopListening();
   $("record").disabled = true;
   setStatus("listening");
+  // Each label is set BEFORE the call it names, so the line reports the step
+  // that was running when the browser threw: a fixed label would blame the
+  // microphone for a worklet that never loaded.
+  let stage = "audio engine";
   try {
     context = new AudioContext({ latencyHint: "interactive" });
-    if (context.state === "suspended") await context.resume();
+    if (!(await startedContext(context))) {
+      logCaptureFailure("audio engine", {
+        name: "AudioContext did not start",
+        message: context.state,
+      });
+      await stopCapture(true);
+      setStatus("error_mic");
+      return;
+    }
+    stage = "worklet";
     const url = URL.createObjectURL(new Blob([TAP_SOURCE], { type: "text/javascript" }));
     await context.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
+    stage = "microphone";
     // Raw input on purpose: the browser's own filters rewrite the signal
     // BEFORE the analyser sees it, exactly like the Windows endpoint chain.
     media = await navigator.mediaDevices.getUserMedia({
@@ -626,6 +726,7 @@ async function startCapture() {
       },
     });
     resetTake(context.sampleRate);
+    stage = "audio engine"; // wiring the open stream is the graph again
     const source = context.createMediaStreamSource(media);
     node = new AudioWorkletNode(context, "block-tap", {
       numberOfInputs: 1,
@@ -636,9 +737,10 @@ async function startCapture() {
     source.connect(node);
     node.connect(context.destination); // keeps the graph pulling; the tap is silent
     $("stop").disabled = false;
-  } catch {
+  } catch (error) {
+    logCaptureFailure(stage, error);
     await stopCapture(true);
-    setStatus("error_mic");
+    setStatus(micErrorKey(error));
   }
 }
 

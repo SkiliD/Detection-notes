@@ -42,7 +42,7 @@ function chromeCandidates() {
 }
 
 /** The page folder, served as GitHub Pages serves it: no build, no rewrite. */
-export function servePage(root) {
+export function servePage(root, host = "127.0.0.1") {
   const server = createServer(async (request, response) => {
     const asked = decodeURIComponent(new URL(request.url, "http://x").pathname);
     const name = asked === "/" ? "index.html" : asked.slice(1);
@@ -59,7 +59,10 @@ export function servePage(root) {
       response.writeHead(404).end("not found");
     }
   });
-  return new Promise((ready) => server.listen(0, "127.0.0.1", () => ready(server)));
+  // `host` exists for the one check that needs an ORIGIN that is not a secure
+  // context: a page on 0.0.0.0 answers on the machine's own address, which is
+  // plain http to Chrome. Every other caller keeps loopback.
+  return new Promise((ready) => server.listen(0, host, () => ready(server)));
 }
 
 /** One DevTools connection: `send` answers the matching reply, events are noted. */
@@ -129,7 +132,7 @@ function devtoolsPort(child) {
   });
 }
 
-async function startChrome(profile) {
+async function startChrome(profile, args = []) {
   const failures = [];
   for (const binary of chromeCandidates()) {
     const child = spawn(
@@ -143,6 +146,9 @@ async function startChrome(profile) {
         "--mute-audio",
         `--user-data-dir=${profile}`,
         "--remote-debugging-port=0",
+        // Caller flags last: the capture check adds Chrome's fake microphone,
+        // and no other caller passes any.
+        ...args,
         "about:blank",
       ],
       { stdio: ["ignore", "ignore", "pipe"] },
@@ -171,14 +177,14 @@ async function startChrome(profile) {
  * caller can act on it — the module's handlers are still bound afterwards, so
  * callers that press that button retry until the page answers (see `pressDemo`).
  */
-export async function startBrowser({ root, width = 1600, height = 1000 }) {
+export async function startBrowser({ root, width = 1600, height = 1000, args = [] }) {
   const profile = await mkdtemp(join(tmpdir(), "v2m-web-"));
   const server = await servePage(root);
   const origin = `http://127.0.0.1:${server.address().port}/`;
   let chrome = null;
   let session = null;
   try {
-    chrome = await startChrome(profile);
+    chrome = await startChrome(profile, args);
     const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
     const page = targets.find((target) => target.type === "page");
     if (!page) throw new Error("the browser opened no page to drive");
@@ -218,6 +224,9 @@ export async function startBrowser({ root, width = 1600, height = 1000 }) {
       send: (method, params) => session.send(method, params),
       evaluate,
       note: (text) => session.notes.push(text),
+      // What the page wrote to its console, in order: a check that reads the
+      // sentence must be able to read the line beside it.
+      notes: () => [...session.notes],
       close: async () => {
         const said = session.notes.filter((note) => /^(thrown|error):?/.test(note));
         try {
