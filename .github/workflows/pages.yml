@@ -1,0 +1,102 @@
+name: Web page
+
+# Publishes `web/` to GitHub Pages. The page is a plain folder (no build
+# step), so the only thing standing between a push and the published site is
+# the port's conformance test: it replays the desktop's own segmentation
+# cases against the JavaScript copy, and a divergence must not reach users.
+#
+# One manual step, once per repository: Settings -> Pages -> Source ->
+# "GitHub Actions". Without it the deploy job fails with a clear message.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The web port decides the desktop's notes
+        run: node --test web/test/segmenter.test.mjs
+      - name: The web port's YIN reads the desktop's frames
+        # Skips where demo.wav is absent (it is gitignored and reproducible
+        # with scripts/make_demo.py); the fixture's digest refuses any other
+        # take under that name.
+        run: node --test web/test/yin.test.mjs
+      - name: The web port's YIN keeps the 44.1 and 48 kHz geometry
+        # A device's frame is not the analysis rate's, and 48 kHz's 1115-sample
+        # window is not a power of two: the page's own rule must still produce
+        # those frozen windows and frames. Same skip as above without the take.
+        run: node --test web/test/yin-rates.test.mjs
+
+      - name: The wide page is photographed at 1600 px
+        # The layout no unit test can see: the 1040 px measure, the notes
+        # table's flush-right numbers, the masthead. Chrome ships on the
+        # runner and the script serves web/ itself, so nothing is installed
+        # for this — and it also FAILS on the wide facts, so a break stops the
+        # deploy instead of waiting in an artifact nobody opens.
+        run: node web/test/wide-shot.mjs wide-1600.png
+      - name: Keep the 1600 px screenshot
+        # `always()`: a shot taken just before the check failed is the one worth
+        # looking at, so the picture outlives the step that refused it.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wide-screenshot
+          path: wide-1600.png
+          if-no-files-found: warn
+
+      - name: The page holds at every resolution class
+        # The four CSS queries carry the whole layout and no unit test can see
+        # their RESULT: eight classes are measured in a browser (320 px to
+        # 2560 px, plus a phone held sideways), and a sideways scroll, a lost
+        # measure, a masthead that eats a landscape phone or a control under the
+        # 24 px tap floor stops the deploy.
+        run: node web/test/resolutions.mjs
+
+      - name: Get axe-core (pinned, never vendored)
+        # Downloaded here rather than committed: the page stays dependency-free,
+        # and the version is pinned so a new rule cannot arrive on its own and
+        # turn an unrelated push red.
+        run: curl -sSfL -o "$RUNNER_TEMP/axe.min.js" https://cdn.jsdelivr.net/npm/axe-core@4.10.2/axe.min.js
+      - name: Both palettes pass the accessibility audit at every resolution
+        # Forty-eight audits per run: the two palettes, by the three states a
+        # reader can see (no take, a take, a row being heard), by the eight
+        # resolution classes the layout has a rule for. A control that collides
+        # with its neighbour at 600 px is unreadable to every reader, and a
+        # 1600 px audit alone reports it as fine. Any violation AND any rule axe
+        # could not decide fails the deploy — an undecided check is a check
+        # nobody made.
+        run: node web/test/axe-audit.mjs --axe "$RUNNER_TEMP/axe.min.js"
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4
