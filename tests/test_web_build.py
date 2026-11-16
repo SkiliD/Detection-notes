@@ -1140,6 +1140,7 @@ def test_the_pages_workflow_tests_before_it_publishes():
     assert "node --test web/test/yin-rates.test.mjs" in workflow
     assert "path: web" in workflow  # the artifact IS the page folder
     assert "actions/deploy-pages@v4" in workflow
+    assert "enablement: true" in workflow
     assert "branches: [main]" in workflow
     # The port's test must gate the deploy, not run beside it.
     assert "needs: verify" in workflow
