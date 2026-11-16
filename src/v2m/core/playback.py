@@ -6,11 +6,8 @@ Two distinct jobs, two distinct types:
   are the RENDER ENGINE: they turn notes (or a voice signal) into the
   float32 buffers the results page listens to. No thread, no device.
 - :class:`PlaybackSession` is the PLAYER: one clock, one OutputStream,
-  three modes (piano / voice / both). It used to share that job with
-  independent ``NotePlayer`` threads — the two sources drifted, the
-  window had to arbitrate which one owned the playhead, and every
-  rebuild had to know both ways of starting a sound. Playback now has
-  one owner; the GUI never starts a sound itself.
+  three modes (piano / voice / both). It owns playback and the shared
+  playhead; the GUI never starts a sound itself.
 
 ``NotePlayer`` keeps a thin ``signal``/``duration`` shape because the GUI
 stores it (the piano source is re-rendered on gain/transpose changes) and
@@ -278,9 +275,8 @@ class NotePlayer:
 class PlaybackSession:
     """One clock and one output stream for piano, voice, or their mix.
 
-    The GUI used to start two independent playing threads for the combined
-    mode: the sources drifted and the window had to choose which player
-    owned the playhead. This session owns the timeline; sources are
+    The session owns the timeline and combines prepared sources before
+    output. Sources are
     prepared by the render engine and the selected one is mixed before
     output. `position()` is the only clock every consumer reads.
     """

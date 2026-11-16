@@ -48,7 +48,7 @@ def _observation(midis: list[float], attacks: Attacks | None = None) -> VoiceObs
 
 
 def test_a_hand_built_curve_is_enough_to_interpret():
-    """The rules run on the evidence alone (this was impossible before)."""
+    """A hand-built observation is sufficient to run the interpretation rules."""
     held = interpret(_observation([60] * 100))
     assert [(n.midi, round(n.start, 2)) for n in held] == [(60, 0.0)]
 

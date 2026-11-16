@@ -30,25 +30,30 @@ import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks
 
-FRAME_MS = 20.0        # offline frame hop (matches the pitch tracker)
-MIN_RMS = 0.006        # absolute floor: silence never produces an attack
-MIN_GAP_S = 0.060      # two attacks closer than this are the same event
-MIN_SCORE = 1.0        # peak height required, in units of the reference ratio
-MIN_STRENGTH = 0.20    # relative floor: a breath-noise ripple is not an attack
+FRAME_MS = 20.0  # offline frame hop (matches the pitch tracker)
+MIN_RMS = 0.006  # absolute floor: silence never produces an attack
+MIN_GAP_S = 0.060  # two attacks closer than this are the same event
+MIN_SCORE = 1.0  # peak height required, in units of the reference ratio
+MIN_STRENGTH = 0.20  # relative floor: a breath-noise ripple is not an attack
+VOICE_CONTEXT_INNER_S = 0.040
+VOICE_CONTEXT_OUTER_S = 0.160
+VOICE_CONTEXT_SHARE = 0.5
+VOICE_WINDOW_S = 0.02322
+VOICE_HOP_S = 0.005
 # Samples per ACCENT-envelope frame: the envelope the per-note accent is
 # read on. Finer than the detector's 20 ms one, and deliberately separate
-# from it (AGENTS.md measured that fusing the two moves strengths without
+# from it; fusing the two moves strengths without
 # changing one decision). The observation carries these values.
 ACCENT_HOP = 256
-BASELINE_MS = 400.0    # slow baseline: a phrase, not a single note
+BASELINE_MS = 400.0  # slow baseline: a phrase, not a single note
 CHARACTER_HZ = 4000.0  # consonant bursts are broadband: look above the harmonics
-FLUX_REF = 25.0        # rms-relative character-band flux of a consonant burst
-RISE_REF = 0.35        # rms-relative level rise of an attack
-STREAM_LEVEL = 1.5     # live: level this much above its own slow baseline
-STREAM_FLOOR = 0.006   # live: RMS floor
-STREAM_ALPHA = 0.15    # live: baseline tracking speed when rising (~7 blocks)
+FLUX_REF = 25.0  # rms-relative character-band flux of a consonant burst
+RISE_REF = 0.35  # rms-relative level rise of an attack
+STREAM_LEVEL = 1.5  # live: level this much above its own slow baseline
+STREAM_FLOOR = 0.006  # live: RMS floor
+STREAM_ALPHA = 0.15  # live: baseline tracking speed when rising (~7 blocks)
 STREAM_ALPHA_DOWN = 0.35  # live: baseline follows a level DROP faster (~3 blocks)
-MAX_RECENT = 256       # live: recent attacks kept for the display/tests
+MAX_RECENT = 256  # live: recent attacks kept for the display/tests
 # Live re-articulation trigger, second voice: the consonant burst of a
 # re-attacked note leaves the LEVEL nearly flat (measured 1.28x, under
 # STREAM_LEVEL — a level-only tracker reads ta-ta-ta-ta on one pitch as two
@@ -92,6 +97,7 @@ SUBWINDOW_DIP = 0.20
 # blocks.
 DEEP_DIP_RATIO = 0.25
 DEEP_DIP_WINDOW_S = 0.25
+
 
 @dataclass
 class Attacks:
@@ -137,6 +143,40 @@ def _sharpness(x: np.ndarray, rms: np.ndarray, frame_ms: float) -> np.ndarray:
     return np.maximum(0.0, x - baseline) / np.maximum(rms, 1e-12)
 
 
+def _voiced_attack_context(y: np.ndarray, sr: int, times: np.ndarray) -> np.ndarray:
+    """Use vocal neighbours, not the consonant's potentially unvoiced centre.
+
+    Either flank suffices so phrase-opening attacks remain reference anchors;
+    requiring both would let the weak ripples inside a noisy hold anchor themselves.
+    This evidence selects an attack reference, never masks the pitch curve.
+    """
+    from .pitch import MIN_PITCH_QUALITY, yin_pitch
+
+    width = max(4, int(VOICE_WINDOW_S * sr))
+    hop = max(1, int(VOICE_HOP_S * sr))
+    padded = np.pad(y, (width // 2, width // 2))
+    frame_times = np.arange(0, len(y), hop) / sr
+    voiced = np.zeros(len(frame_times), dtype=bool)
+    for index, start in enumerate(range(0, len(y), hop)):
+        frame = padded[start : start + width]
+        if float(np.sqrt(np.mean(frame**2))) < MIN_RMS:
+            continue
+        quality: dict[str, float] = {}
+        hz = yin_pitch(frame, sr, quality_out=quality)
+        voiced[index] = np.isfinite(hz) and quality.get("quality", 1.0) < MIN_PITCH_QUALITY
+    context = np.zeros(len(times), dtype=bool)
+    for index, t in enumerate(times):
+        for lo, hi in (
+            (t - VOICE_CONTEXT_OUTER_S, t - VOICE_CONTEXT_INNER_S),
+            (t + VOICE_CONTEXT_INNER_S, t + VOICE_CONTEXT_OUTER_S),
+        ):
+            flank = voiced[(frame_times >= lo) & (frame_times <= hi)]
+            if len(flank) and float(flank.mean()) >= VOICE_CONTEXT_SHARE:
+                context[index] = True
+                break
+    return context
+
+
 def detect_attacks(y: np.ndarray, sr: int, frame_ms: float = FRAME_MS) -> Attacks:
     """Attacks from a spectral flux combined with the amplitude rise.
 
@@ -173,14 +213,14 @@ def detect_attacks(y: np.ndarray, sr: int, frame_ms: float = FRAME_MS) -> Attack
     times = librosa.frames_to_time(peaks, sr=sr, hop_length=hop)
     strengths = score[peaks].astype(float)
     if len(strengths):
-        strengths = strengths / float(strengths.max())
-        # a noisy take ripples: each ripple above MIN_SCORE would legitimize a
-        # spurious note start. The strongest attack of a take IS an attack
-        # (a consonant or a glottal onset); against it, breath noise scored
-        # <= 0.06 and real onsets >= 0.86 (measured on a breathy voice), so
-        # a relative floor removes the ripples without touching consonants.
-        keep = strengths >= MIN_STRENGTH
+        voiced = _voiced_attack_context(y, sr, times)
+        global_reference = float(strengths.max())
+        vocal_reference = float(strengths[voiced].max()) if voiced.any() else global_reference
+        reference = np.where(voiced, vocal_reference, global_reference)
+        keep = strengths >= MIN_STRENGTH * reference
         times, strengths = times[keep], strengths[keep]
+        # Normalized forces describe retained evidence; they do not select it.
+        strengths = strengths / float(strengths.max())
     # Second evidence, the offline twin of the live seam witness: a
     # GLOTTAL RE-EMISSION has no consonant and no burst — the envelope
     # dips to near-silence (~30 ms) and recovers on the SAME pitch. Its
@@ -201,8 +241,7 @@ def detect_attacks(y: np.ndarray, sr: int, frame_ms: float = FRAME_MS) -> Attack
         from scipy.ndimage import maximum_filter1d
 
         local_peak = maximum_filter1d(rms, size=max(3, int(0.5 / (frame_ms / 1000.0))))
-        deep = np.flatnonzero(
-            (rms < DEEP_DIP_RATIO * local_peak) & (local_peak >= MIN_RMS))
+        deep = np.flatnonzero((rms < DEEP_DIP_RATIO * local_peak) & (local_peak >= MIN_RMS))
         dip_events = []
         if len(deep):
             splits = np.where(np.diff(deep) > 2)[0]
@@ -219,8 +258,7 @@ def detect_attacks(y: np.ndarray, sr: int, frame_ms: float = FRAME_MS) -> Attack
                     added.append(t_c)
             if added:
                 times = np.concatenate([times, np.asarray(added)])
-                strengths = np.concatenate(
-                    [strengths, np.full(len(added), 1.0)])
+                strengths = np.concatenate([strengths, np.full(len(added), 1.0)])
                 order = np.argsort(times)
                 times, strengths = times[order], strengths[order]
     return Attacks(np.asarray(times, dtype=float), strengths)
@@ -239,7 +277,7 @@ def accent_envelope(y: np.ndarray, hop: int = ACCENT_HOP) -> np.ndarray:
     if n_frames < 1:
         return np.zeros(0, dtype=float)
     frames = np.asarray(y[: n_frames * hop], dtype=np.float64).reshape(n_frames, hop)
-    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    rms = np.sqrt(np.mean(frames**2, axis=1))
     return np.convolve(rms, np.ones(3) / 3, mode="same")  # ~3-frame smoothing
 
 
@@ -315,26 +353,26 @@ class AttackTracker:
     level_ratio: float = STREAM_LEVEL
     floor_rms: float = STREAM_FLOOR
     min_gap_s: float = MIN_GAP_S
-    strength: float = 0.0      # accent of the LAST attack: level vs recent peak
-    peak_ratio: float = 0.0    # biggest floor rise so far (diagnostic)
+    strength: float = 0.0  # accent of the LAST attack: level vs recent peak
+    peak_ratio: float = 0.0  # biggest floor rise so far (diagnostic)
     max_silent_ratio: float = 0.0  # biggest silent-floor rise seen (diagnostic)
     alpha: float = STREAM_ALPHA
     alpha_down: float = STREAM_ALPHA_DOWN
     recent: deque = field(default_factory=lambda: deque(maxlen=MAX_RECENT))
     baseline_rms: float = 0.0
-    floor_rms_seen: float = 0.0   # lowest baseline in the recent past
+    floor_rms_seen: float = 0.0  # lowest baseline in the recent past
     hf_ratio: float = FLATNESS_TRIGGER  # flatness the burst must clear
     _last_t: float = -1e9
     _primed: bool = False
-    _hf_floor: float = 0.0        # recent LOW of the spectral flatness
-    _peak_rms: float = 0.0        # recent HIGH of the level (dip reference)
-    _last_deep_t: float = -1e9    # last DEEP level dip (loud attacks need one)
+    _hf_floor: float = 0.0  # recent LOW of the spectral flatness
+    _peak_rms: float = 0.0  # recent HIGH of the level (dip reference)
+    _last_deep_t: float = -1e9  # last DEEP level dip (loud attacks need one)
 
     @staticmethod
     def level(block: np.ndarray) -> float:
         """RMS of one captured block (0 for an empty block)."""
         x = np.asarray(block, dtype=np.float64)
-        return float(np.sqrt(np.mean(x ** 2))) if x.size else 0.0
+        return float(np.sqrt(np.mean(x**2))) if x.size else 0.0
 
     @staticmethod
     def flatness(block: np.ndarray) -> float:

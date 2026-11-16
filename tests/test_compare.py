@@ -1,15 +1,14 @@
 """The live/final comparison policy: ONE net, two readings.
 
-`core.compare` carries the rule four consumers each read in their own
-corner (the GUI marking, score_accuracy's live diagnosis, the AGENTS.md
-measures, the JSON block): a `Move` carries its reason, the match window
+`core.compare` carries the rule shared by the GUI marking,
+score_accuracy's live diagnosis, replay measurements and the JSON block:
+a `Move` carries its reason, the match window
 is the grid sixteenth OR the live's dating lead, and the contour rate is
 the health indicator published as is.
 
-The test bites on the two historical defects: a purely "one sixteenth"
-window that would outline notes read identically (the live's dating lead
-exceeds the sixteenth at slow tempos), and an "off1" reason that would
-swallow a real pitch move.
+The tests pin two distinctions: the match window includes the live
+segmenter's dating lead at slow tempos, and an "off1" reason applies only
+to a nearby rounding, not a real pitch move.
 """
 
 from __future__ import annotations
@@ -87,6 +86,24 @@ def test_a_beyond_window_onset_is_moved_even_on_the_same_pitch():
     assert moves[0].onset_shift_s > 0.2
 
 
+def test_semitone_rounding_requires_an_onset_inside_the_window():
+    for midi in [59, 61]:
+        for shift in [-10.0, -0.126, 0.126, 10.0]:
+            moves = match(
+                [FakeNote(0.0, 0.5, 60)],
+                [FakeNote(shift, shift + 0.5, midi)],
+                FakeGrid(),
+            )
+            assert moves[0].reason == "moved"
+        for shift in [-0.125, 0.125]:
+            moves = match(
+                [FakeNote(0.0, 0.5, 60)],
+                [FakeNote(shift, shift + 0.5, midi)],
+                FakeGrid(),
+            )
+            assert moves[0].reason == "off1"
+
+
 def test_two_semitones_is_moved_not_off1():
     live = [FakeNote(0.0, 0.5, 60)]
     final = [FakeNote(0.0, 0.5, 62)]
@@ -129,6 +146,7 @@ def test_empty_sides_never_raise():
 # ONE module (the interface is the test surface).
 # ---------------------------------------------------------------------
 
+
 def test_the_wire_block_round_trips_through_read_block():
     """build -> read: the persisted shape and the parsed value agree."""
     live = [FakeNote(0.0, 0.5, 64)]
@@ -159,6 +177,19 @@ def test_read_block_degrades_per_field_not_per_block():
     assert parsed is not None and parsed.drain_min is None
 
 
+def test_empty_readings_keep_wire_rate_but_have_no_comparable_rate():
+    for live, final in [(3, 0), (0, 3), (0, 0)]:
+        block = classify([], live, final)
+        assert block["rate"] == 0.0
+        parsed = read_block(block)
+        assert parsed is not None
+        assert parsed.comparable_rate is None
+    parsed = read_block({"live": 3, "final": 3, "rate": 0.0})
+    assert parsed is not None and parsed.comparable_rate == 0.0
+    old = read_block({"rate": 0.4})
+    assert old is not None and old.comparable_rate == 0.4
+
+
 def test_invalidate_drops_only_the_block():
     """A stale decomposition dies; the edit path's own facts stay theirs."""
     result = SimpleNamespace(live_vs_final={"live": 1}, manual_pitch_corrections=False)
@@ -168,15 +199,20 @@ def test_invalidate_drops_only_the_block():
 
 
 def test_write_sidecar_archives_the_wire_shape(tmp_path):
-    block = {"live": 5, "final": 4, "contours": 2, "off1": 1,
-             "moved": 1, "absorbed": 0, "rate": 0.4}
+    block = {
+        "live": 5,
+        "final": 4,
+        "contours": 2,
+        "off1": 1,
+        "moved": 1,
+        "absorbed": 0,
+        "rate": 0.4,
+    }
     stem = tmp_path / "live_20261004_120000"
     path = write_sidecar(stem, block)
     assert path is not None and path.endswith(takes.SIDECAR_SUFFIX)
     on_disk = json.loads(
-        (tmp_path / "live_20261004_120000.live_vs_final.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "live_20261004_120000.live_vs_final.json").read_text(encoding="utf-8")
     )
     assert on_disk == block
 

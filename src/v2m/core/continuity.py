@@ -47,14 +47,17 @@ def suspect_spans(observation, notes: list) -> list[dict]:
             continue
         inside = (times >= n.start) & (times <= n.end)
         seg = midi_curve[inside]
-        seg = seg[~np.isnan(seg)]
-        if len(seg) < 2 * min_frames:
+        seg_times = times[inside]
+        voiced = seg[~np.isnan(seg)]
+        if len(voiced) < 2 * min_frames:
             continue
         label = float(n.midi)
         best_len = 0
         best_start = 0
         run = 0
         run_start = 0
+        # Keep the original frame positions: a missing pitch breaks a run,
+        # but never shifts the clock of a later plateau.
         for k, v in enumerate(seg):
             if abs(v - label) > PLATEAU_ST:
                 if run == 0:
@@ -71,14 +74,13 @@ def suspect_spans(observation, notes: list) -> list[dict]:
         # pitch, and the SIGNED interval to the label — a +2 st plateau is a
         # note sung too high and glued in, a -2 st one a low approach; the
         # sign is what the singer can act on
-        seg_times = times[inside]
         plateau_midi = float(np.median(plateau))
         suspects.append(
             {
                 "start_s": round(float(n.start), 3),
                 "duration_s": round(float(n.duration), 3),
                 "midi": int(n.midi),
-                "inner_range_st": round(float(seg.max() - seg.min()), 2),
+                "inner_range_st": round(float(voiced.max() - voiced.min()), 2),
                 "secondary_plateau_frames": int(best_len),
                 "secondary_plateau_s": round(best_len * frame_dt, 2),
                 "secondary_plateau_start_s": round(float(seg_times[best_start]), 3),

@@ -194,15 +194,20 @@ def test_pyin_two_octaves():
     assert voiced.sum() > 30
     first_half = np.median(track.hz[voiced][: len(voiced) // 2])
     last_half = np.median(track.hz[voiced][-len(voiced) // 2 :])
-    assert abs(hz_to_midi(first_half) - 57.0) < 0.7   # A3 = 220 Hz
-    assert abs(hz_to_midi(last_half) - 81.0) < 0.7    # A5 = 880 Hz
+    assert abs(hz_to_midi(first_half) - 57.0) < 0.7  # A3 = 220 Hz
+    assert abs(hz_to_midi(last_half) - 81.0) < 0.7  # A5 = 880 Hz
 
 
 # ---------------------------------------------------------------------
 # the swallow rescue: the block-wise second reading (finalization)
 # ---------------------------------------------------------------------
-def _burst_signal(sr: int = SR, note_hz: float = 220.0, burst_s: float = 0.12,
-                  at_s: float = 0.5, noise: float = 0.10) -> np.ndarray:
+def _burst_signal(
+    sr: int = SR,
+    note_hz: float = 220.0,
+    burst_s: float = 0.12,
+    at_s: float = 0.5,
+    noise: float = 0.10,
+) -> np.ndarray:
     """Silence with one short voiced burst: the swallowed-note shape.
 
     The burst carries noise (a voice's breathiness), not a pure sine: a
@@ -214,9 +219,8 @@ def _burst_signal(sr: int = SR, note_hz: float = 220.0, burst_s: float = 0.12,
     i0 = int(at_s * sr)
     t = np.arange(n) / sr
     rng = np.random.default_rng(3)
-    y[i0:i0 + n] = (
-        0.3 * np.sin(2 * np.pi * note_hz * t)
-        + noise * rng.standard_normal(n)
+    y[i0 : i0 + n] = (
+        0.3 * np.sin(2 * np.pi * note_hz * t) + noise * rng.standard_normal(n)
     ).astype(np.float32)
     return y
 
@@ -225,14 +229,20 @@ def test_rescue_grafts_a_swallowed_voiced_burst_into_the_curve():
     """A 120 ms voiced burst pYIN leaves NaN becomes a voiced span.
 
     The long 2048 window reads no period there; the short-window sweep
-    (the live geometry) does, and the curve inherits it — voiced frames
-    AT the burst's pitch, the swallow the finalization used to miss.
+    (the live geometry) does, and the curve inherits voiced frames at
+    the burst's measured pitch.
     """
     y = _burst_signal()
     import librosa
+
     f0, _vf, vprob = librosa.pyin(
-        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=SR, frame_length=2048,
-        hop_length=441, fill_na=np.nan,
+        y,
+        fmin=pitch.FMIN,
+        fmax=pitch.FMAX,
+        sr=SR,
+        frame_length=2048,
+        hop_length=441,
+        fill_na=np.nan,
     )
     rescued_s = pitch._rescue_swallowed_spans(y, SR, 441, f0, vprob)
     assert rescued_s > 0.0
@@ -240,6 +250,22 @@ def test_rescue_grafts_a_swallowed_voiced_burst_into_the_curve():
     assert voiced.sum() >= 4
     hz = f0[voiced]
     assert np.all(np.abs(hz - 220.0) / 220.0 < 0.05)
+
+
+def test_rescue_keeps_two_audible_islands_separated_by_silence():
+    y = _burst_signal(note_hz=330.0, burst_s=0.2, at_s=0.1, noise=0.0)
+    y += _burst_signal(note_hz=330.0, burst_s=0.2, at_s=0.7, noise=0.0)
+    hop = 441
+    f0 = np.full(len(y) // hop, np.nan)
+    vprob = np.zeros(len(f0))
+    rescued = pitch._rescue_swallowed_spans(y, SR, hop, f0, vprob)
+    assert rescued > 0
+    times = np.arange(len(f0)) * hop / SR
+    silence = (times >= 0.34) & (times < 0.66)
+    assert np.isnan(f0[silence]).all()
+    assert (vprob[silence] == 0).all()
+    assert np.isfinite(f0[(times >= 0.14) & (times < 0.26)]).all()
+    assert np.isfinite(f0[(times >= 0.74) & (times < 0.86)]).all()
 
 
 def test_rescue_refuses_a_true_silence_and_a_breath_noise():
@@ -253,11 +279,17 @@ def test_rescue_refuses_a_true_silence_and_a_breath_noise():
     # a quiet NON-periodic burst (noise) at gate-clearing level
     i0 = int(0.5 * SR)
     rng = np.random.default_rng(7)
-    y[i0:i0 + int(0.12 * SR)] = (0.15 * rng.standard_normal(int(0.12 * SR))).astype(np.float32)
+    y[i0 : i0 + int(0.12 * SR)] = (0.15 * rng.standard_normal(int(0.12 * SR))).astype(np.float32)
     import librosa
+
     f0, _vf, vprob = librosa.pyin(
-        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=SR, frame_length=2048,
-        hop_length=441, fill_na=np.nan,
+        y,
+        fmin=pitch.FMIN,
+        fmax=pitch.FMAX,
+        sr=SR,
+        frame_length=2048,
+        hop_length=441,
+        fill_na=np.nan,
     )
     rescued_s = pitch._rescue_swallowed_spans(y, SR, 441, f0, vprob)
     assert rescued_s == 0.0
@@ -277,18 +309,24 @@ def test_rescue_refuses_a_legato_ramp_between_two_pitches():
     seg0 = sine_note(220.0, 0.8, sr=sr)  # A3
     seg1 = sine_note(293.66, 0.8, sr=sr)  # D4
     y[: len(seg0)] = seg0
-    y[len(y) - len(seg1):] = seg1
+    y[len(y) - len(seg1) :] = seg1
     # a 120 ms ramp sliding 220 -> 293.66 between them
     n_ramp = int(0.12 * sr)
     i0 = len(seg0)
     t = np.arange(n_ramp) / sr
     f_start, f_end = 220.0, 293.66
     phase = 2 * np.pi * np.cumsum(f_start + (f_end - f_start) * (t / t[-1]) / sr)
-    y[i0:i0 + n_ramp] = (0.3 * np.sin(phase)).astype(np.float32)
+    y[i0 : i0 + n_ramp] = (0.3 * np.sin(phase)).astype(np.float32)
     import librosa
+
     f0, _vf, vprob = librosa.pyin(
-        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=sr, frame_length=2048,
-        hop_length=441, fill_na=np.nan,
+        y,
+        fmin=pitch.FMIN,
+        fmax=pitch.FMAX,
+        sr=sr,
+        frame_length=2048,
+        hop_length=441,
+        fill_na=np.nan,
     )
     rescued_s = pitch._rescue_swallowed_spans(y, sr, 441, f0, vprob)
     assert rescued_s == 0.0
@@ -304,10 +342,16 @@ def test_rescue_reads_only_fully_absent_spans():
     # the real take's own evidence: a rescue call must not touch any frame
     # pYIN voiced, and on a fully-voiced span list there is nothing to read
     import librosa
+
     y = sine_note(220.0, 1.0, sr=SR)
     f0, _vf, vprob = librosa.pyin(
-        y, fmin=pitch.FMIN, fmax=pitch.FMAX, sr=SR, frame_length=2048,
-        hop_length=441, fill_na=np.nan,
+        y,
+        fmin=pitch.FMIN,
+        fmax=pitch.FMAX,
+        sr=SR,
+        frame_length=2048,
+        hop_length=441,
+        fill_na=np.nan,
     )
     snapshot = f0.copy()
     rescued_s = pitch._rescue_swallowed_spans(y, SR, 441, f0, vprob)

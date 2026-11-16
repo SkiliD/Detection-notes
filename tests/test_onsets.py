@@ -9,7 +9,7 @@ all on a legato line (the amplitude does not move from note to note).
 import numpy as np
 import pytest
 from conftest import SR
-from voicetruth import SungNote, sequence, synthesize
+from voicetruth import SungNote, add_consonant, sequence, synthesize
 
 from v2m.core.onsets import AttackTracker, detect_attacks
 
@@ -66,15 +66,35 @@ def test_no_attack_falls_inside_a_sung_note():
     y = synthesize(truth, glide_s=0.09, consonant_s=CONSONANT, vibrato_st=0.3)
     attacks = detect_attacks(y, SR)
     inside = [
-        t
-        for t in attacks.times
-        if any(n.start_s + 0.10 < t < n.start_s + n.dur_s for n in truth)
+        t for t in attacks.times if any(n.start_s + 0.10 < t < n.start_s + n.dur_s for n in truth)
     ]
     assert inside == []
 
 
 def test_silence_has_no_attack():
     assert len(detect_attacks(np.zeros(SR, dtype=np.float32), SR)) == 0
+
+
+@pytest.mark.parametrize("seed", [0, 4, 9])
+def test_distant_noise_preserves_soft_consonants_on_a_continuous_voice(seed):
+    """A non-vocal event cannot suppress articulations inside a voiced phrase."""
+    from v2m.core.notes import interpret
+    from v2m.core.observation import VoiceObservation
+
+    voice = synthesize([SungNote(60, 0.1, 1.6)], consonant_s=0)
+    targets = (0.6, 1.0, 1.4)
+    for t in targets:
+        add_consonant(voice, t, amp=0.05, seed=seed)
+    size = int(0.04 * SR)
+    noise = np.random.default_rng(seed).normal(0, 0.8, size) * np.hanning(size)
+    signal = np.concatenate([voice, np.zeros(SR), noise, np.zeros(SR)])
+
+    attacks = detect_attacks(signal, SR)
+    for target in targets:
+        assert attacks.near(target, 0.08) is not None
+    notes = interpret(VoiceObservation.from_signal(signal, SR))
+    assert [note.midi for note in notes] == [60] * 4
+    assert [note.start for note in notes[1:]] == pytest.approx(targets, abs=0.12)
 
 
 def test_strengths_are_normalized_and_ordered():
@@ -102,10 +122,9 @@ def test_streaming_tracker_fires_on_each_articulated_note():
 
 
 def test_streaming_tracker_stays_quiet_inside_a_held_vibrato_note():
-    """The test the spectral stream failed: a vibrato is not an attack.
+    """Vibrato cycles are not attacks; only the note's onset is reported.
 
-    The note's own attack is legitimate; what follows must stay quiet
-    (the detector used to find 11 of them in the hold).
+    The note's own attack is legitimate; what follows must stay quiet.
     """
     hits = _stream_attacks(_held(vibrato_st=0.4, consonant_s=CONSONANT))
     assert all(abs(h - 0.2) <= 0.14 for h in hits), hits

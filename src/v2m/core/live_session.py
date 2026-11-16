@@ -66,6 +66,8 @@ class LiveTake:
         sr: int = audio_io.SR,
         on_event: Callable[[LiveEvent], None] | None = None,
         stream_factory: "audio_io.StreamFactory | None" = None,
+        device: int | None = None,
+        exclusive: bool = False,
     ) -> None:
         self.min_conf = min_conf
         self.sr = sr
@@ -73,6 +75,8 @@ class LiveTake:
         # None = the real microphone; a replay injects its own stream opener
         # (the injection, not a global patch, is what keeps a GUI replay safe)
         self.stream_factory = stream_factory
+        self.device = device
+        self.exclusive = exclusive
         self.capture: LiveCapture | None = None
         self.stream: LivePitchStream | None = None
         self._signal: np.ndarray | None = None
@@ -131,7 +135,11 @@ class LiveTake:
             raise RuntimeError(tr("err take stopped"))
         self._snapped = 0  # a NEW take starts with its own snap history
         self.capture = LiveCapture(
-            on_block=self._on_block, sr=self.sr, stream_factory=self.stream_factory
+            on_block=self._on_block,
+            sr=self.sr,
+            stream_factory=self.stream_factory,
+            device=self.device,
+            exclusive=self.exclusive,
         )
         self.capture.start()
         self._state = "recording"
@@ -190,7 +198,9 @@ class LiveTake:
             grid = BeatGrid(bpm).with_meter(detect_meter(notes, bpm))
             label_notes(notes, grid)
             self._grid = grid
-        # the key-aware snap, applied to the CONFIRMED notes as they close:
+        # Only the newly closed note is snapped: published labels and measured
+        # deviations remain stable when the take's detected key changes.
+        # The key-aware snap, applied to the CONFIRMED note as it closes:
         # the live twin of pipeline's snap_to_key. The offline pass absorbs
         # the global tuning offset BEFORE rounding, the live segmenter rounds
         # its running median raw — the same plateau read by two roundings is
@@ -199,18 +209,33 @@ class LiveTake:
         # the evidence (the take's own notes so far) can read one, closes
         # that gap where the singer watches it — the counter and the final
         # JSON then tell the same story. LiveNote carries its residual
-        # deviation as `dev`, the snap's dev_attr twin of Note.deviation.
+        # deviation as `dev`, the snap's dev_attr twin of Note.deviation,
+        # and the snap only MOVES labels: the mistune it read stays on the
+        # note, so the live intonation line reports what was sung.
         if notes:
             key = detect_key(notes)
-            self._snapped += snap_to_key(notes, key.best, dev_attr="dev")
-        self._emit(
-            LiveEvent("note_closed", time_s=now_s, note=notes[-1], grid=self._grid)
-        )
+            self._snapped += snap_to_key(notes[-1:], key.best, dev_attr="dev")
+        self._emit(LiveEvent("note_closed", time_s=now_s, note=notes[-1], grid=self._grid))
 
     @property
     def snapped_notes(self) -> int:
-        """How many live notes the key-aware pull has retuned so far."""
+        """How many live notes the key-aware pull has RELABELLED so far.
+
+        A relabel is a label moved by one semitone (`LiveNote.snap_st`); a
+        note already on a degree of the key is untouched, and its measured
+        mistune is never counted here.
+        """
         return self._snapped
+
+    @property
+    def raw_capture(self) -> bool:
+        """Did this take open the endpoint in raw (exclusive) mode?
+
+        False also covers "not asked for" and "asked and refused": adapters
+        report what was OPENED, so a refused raw attempt never claims a take
+        the driver did not process.
+        """
+        return bool(self.capture is not None and self.capture.exclusive_opened)
 
     @property
     def dropped_blocks(self) -> int:

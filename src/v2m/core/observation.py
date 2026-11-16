@@ -14,7 +14,7 @@ reading of it:
   `accent_hop` samples) — the level evidence `compute_onset_strengths`
   quantizes per note. It is deliberately NOT merged with the offline
   detector's 20 ms envelope: accents and attack picking are two different
-  measures (AGENTS.md);
+  measures, kept separate from attack picking;
 - the take's measured **tuning offset**, filled by `notes.interpret` (the
   only side effect, documented and idempotent).
 
@@ -39,7 +39,7 @@ from .onsets import ACCENT_HOP, Attacks, accent_envelope, detect_attacks
 from .pitch import PitchTrack, track_pitch_offline
 
 DEFAULT_MIN_CONF = 0.6
-DEFAULT_GAP_S = 0.050        # gaps < 50 ms are interpolated
+DEFAULT_GAP_S = 0.050  # gaps < 50 ms are interpolated
 # f0 stabilization: a frame whose |df0/dt| exceeds this (semitones/second)
 # is a TRANSITION (portamento ramp, note hand-over), not a plateau. The
 # threshold sits ABOVE the vibrato peaks and BELOW the true ramps, both
@@ -51,11 +51,10 @@ DEFAULT_GAP_S = 0.050        # gaps < 50 ms are interpolated
 TRANSITION_ST_S = 40.0
 # The .npz layout version: a loader that meets a file written by a DIFFERENT
 # layout refuses it (stale cache) instead of misreading its arrays.
-# Bumped 2 -> 3 for the swallow rescue: the pitch curve a pre-3 cache holds
-# was read WITHOUT the block-wise second pass, so reusing it would hide the
-# rescue's notes behind a stale reading (the cache saves time, never changes
-# a reading — an engine reading change IS a version bump).
-FORMAT_VERSION = 3
+# Version 4 requires independent audible islands in the swallow rescue:
+# earlier cached curves may bridge silence, so they cannot serve a fresh
+# reading (the cache saves time, never changes the engine's decisions).
+FORMAT_VERSION = 5
 
 
 @dataclass
@@ -71,9 +70,9 @@ class VoiceObservation:
     attacks: Attacks | None
     duration_s: float
     sample_rate: int = 0
-    frame_dt: float = 0.01        # one pitch frame, in seconds
+    frame_dt: float = 0.01  # one pitch frame, in seconds
     accent_envelope: np.ndarray | None = None  # smoothed RMS per accent hop
-    accent_hop: int = ACCENT_HOP   # samples per accent-envelope frame
+    accent_hop: int = ACCENT_HOP  # samples per accent-envelope frame
     tuning_offset_st: float = 0.0  # measured by interpret (never by hand)
     # Provenance of the take this evidence came from, filled by `save` when
     # the sibling audio is available: what makes a CACHED observation valid
@@ -130,9 +129,7 @@ class VoiceObservation:
             "pitch_hz": np.asarray(self.pitch.hz),
             "pitch_confidence": np.asarray(self.pitch.confidence),
             "pitch_transition": (
-                np.asarray(transition)
-                if transition is not None
-                else np.zeros(0, dtype=bool)
+                np.asarray(transition) if transition is not None else np.zeros(0, dtype=bool)
             ),
             "attacks_times": (
                 np.asarray(self.attacks.times) if self.attacks is not None else np.zeros(0)
@@ -141,9 +138,7 @@ class VoiceObservation:
                 np.asarray(self.attacks.strengths) if self.attacks is not None else np.zeros(0)
             ),
             "accent_envelope": (
-                np.zeros(0)
-                if self.accent_envelope is None
-                else np.asarray(self.accent_envelope)
+                np.zeros(0) if self.accent_envelope is None else np.asarray(self.accent_envelope)
             ),
         }
         scalars = {
@@ -232,10 +227,7 @@ class VoiceObservation:
             if not audio_path.exists():
                 return False
             stat = audio_path.stat()
-            return (
-                stat.st_size == self.source_size
-                and stat.st_mtime == self.source_mtime
-            )
+            return stat.st_size == self.source_size and stat.st_mtime == self.source_mtime
         return True
 
 
@@ -291,7 +283,7 @@ def clean_pitch(track, min_conf: float = DEFAULT_MIN_CONF) -> None:
     # detector reads a continuous ramp again. A DEEP hole (a real breath)
     # is far longer than this and stays a gap.
     smoothed = _interpolate_short_gaps(smoothed, max_frames=max(1, int(DEFAULT_GAP_S / dt)))
-    # f0 stabilization (AGENTS.md): where the pitch DERIVATIVE exceeds the
+    # f0 stabilization: where the pitch DERIVATIVE exceeds the
     # transition threshold the curve is MOVING (portamento ramp, note
     # hand-over). Those frames stay in the curve — the hysteresis and the
     # hand-over heuristics were calibrated with them, and masking them out

@@ -9,8 +9,8 @@ Three rules pinned here:
 2. **one sentence per present cause, never an absent one**: each
    sentence is gated by its count — the module invents nothing;
 3. **the tone is not a judgment**: the ±1 family is named a "rounding"
-   (offline absorbs the tuning offset BEFORE rounding, the live rounds
-   its raw median — AGENTS.md), not an error.
+   (offline absorbs the tuning offset BEFORE rounding, while live rounds
+   its raw median), not an error.
 """
 
 from __future__ import annotations
@@ -20,8 +20,13 @@ from v2m.core.explain import explain
 
 def _block(**overrides) -> dict:
     base = {
-        "live": 37, "final": 31, "contours": 18, "off1": 11,
-        "moved": 6, "absorbed": 1, "rate": 0.486,
+        "live": 37,
+        "final": 31,
+        "contours": 18,
+        "off1": 11,
+        "moved": 6,
+        "absorbed": 1,
+        "rate": 0.486,
     }
     base.update(overrides)
     return base
@@ -30,6 +35,18 @@ def _block(**overrides) -> dict:
 def test_an_empty_or_missing_block_explains_nothing():
     assert explain({}) == []
     assert explain({"live": 0, "final": 0}) == []
+
+
+def test_empty_final_is_explicitly_not_comparable():
+    lines = explain(_block(final=0, contours=0, off1=0, moved=0, absorbed=0, rate=0.0))
+    assert any("non comparable" in line for line in lines)
+    assert all("%" not in line for line in lines)
+
+
+def test_empty_live_is_not_an_agreement_verdict():
+    lines = explain(_block(live=0, final=3, rate=0.0))
+    assert any("non comparable" in line for line in lines)
+    assert all("%" not in line for line in lines)
 
 
 def test_one_sentence_per_present_cause_only():

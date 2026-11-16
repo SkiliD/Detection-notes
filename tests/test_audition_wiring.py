@@ -314,16 +314,29 @@ def test_finder_and_phrase_auditions_start_the_observer(qapp, monkeypatch):
         win.on_audition_original()
         assert win._play_timer.isActive()
 
-        win._replacement_decision = (None, 0.1, 0.4)
+        from v2m.core.notes import Note
+
         win.result = AnalysisResult(
             source="live",
             duration_s=1.5,
-            notes=[],
+            notes=[Note(0.1, 0.4, 60, 0.9)],
             tempo=None,
             key=None,
             pitch=None,
         )
         win._live_signal = np.ones(int(1.5 * SR), dtype=np.float32)
+        from v2m.core.edits import snapshot_state
+
+        replacement = win._workflow.begin_replacement(
+            snapshot_state(win.result, win._live_signal, action="replacement"),
+            0,
+            0,
+            False,
+        )
+        assert replacement is not None
+        assert win._workflow.begin_splice_analysis(replacement.token) is not None
+        assert win._workflow.set_splice_window(replacement.token, (0.1, 0.4))
+        assert win._workflow.complete_replacement_analysis(replacement.token) is not None
         win.on_audition_replacement()
         assert win._play_timer.isActive()
     finally:

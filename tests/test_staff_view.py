@@ -6,10 +6,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from v2m.core.liveseg import LiveNote
 from v2m.core.grid import BeatGrid, Meter
+from v2m.core.liveseg import LiveNote
 from v2m.core.notes import Note
-from v2m.gui.staff import HEADER_H, S, StaffView
+from v2m.gui.staff import S, StaffView
 
 
 @pytest.fixture(scope="module")
@@ -69,37 +69,97 @@ def test_natural_accidental_draws_its_own_glyph(qapp):
     view = StaffView()
     view.resize(420, 160)
     # F5 (step 38, top line) natural in G major: explicit accidental
-    notes = [_note(77, 0.0)]          # F5, alter 0 -> natural engraved
+    notes = [_note(77, 0.0)]  # F5, alter 0 -> natural engraved
     view.set_score(notes, grid=BeatGrid(120.0), key="G major")
     lay = view.layout()
     assert lay.notes[0].accidental and lay.notes[0].alter == 0
 
-    img = view.grab().toImage()
     # accidental x = notes_x + 1st-note x - 1.25S ; second vertical at +0.19S
-    from v2m.gui.staff import S as S_PX
     from v2m.gui.staff import TOP_LINE_STEP
+    from v2m.gui.staff import S as S_PX
 
-    y = HEADER_H + (TOP_LINE_STEP - lay.notes[0].step) * (S_PX / 2.0)
+    # the systems are vertically centred: ask the view where it draws the
+    # first one instead of assuming the header's own height
+    y = view._score_geometry()[3] + (TOP_LINE_STEP - lay.notes[0].step) * (S_PX / 2.0)
     x2 = view._notes_x(lay) - 1.25 * S_PX + 0.19 * S_PX
-    ink2 = _ink(view, x0=x2 - 2, y0=y - 0.9 * S_PX, x1=x2 + 2, y1=y + 0.9 * S_PX)
+    scale = view.devicePixelRatioF()
+    ink2 = _ink(
+        view,
+        x0=(x2 - 2) * scale,
+        y0=(y - 0.9 * S_PX) * scale,
+        x1=(x2 + 2) * scale,
+        y1=(y + 0.9 * S_PX) * scale,
+    )
     # the flat's stem (the old glyph) leaves this column EMPTY
     assert ink2 > 0, "the natural has no 2nd vertical (flat glyph?)"
 
 
 def test_score_needs_no_meter_or_key(qapp):
-    """A take whose meter stayed undetected still renders (4/4 assumed)."""
+    """A take with undetected meter or key renders without inventing a key."""
+    from v2m.core.i18n import tr
+
     view = StaffView()
     view.resize(420, 160)
     view.set_score([_note(60, 0.0), _note(64, 0.5)], grid=BeatGrid(120.0), key=None)
     lay = view.layout()
     assert lay.beats_per_measure == 4.0 and lay.meter_label == "4/4"
     assert lay.fifths == 0
+    assert lay.key_tonic is None and lay.key_mode is None
+
+    class HeaderPainter:
+        def setFont(self, _font):
+            pass
+
+        def setPen(self, _pen):
+            pass
+
+        def drawText(self, _point, text):
+            self.text = text
+
+    painter = HeaderPainter()
+    view._paint_header(painter, lay)
+    assert "None" not in painter.text
+    assert "major" not in painter.text
+    assert tr("key bpm unit") in painter.text
+    assert "4/4" in painter.text
     assert not view.grab().isNull()
+
+
+def test_score_shows_a_detected_key_in_the_header(qapp):
+    """A detected key remains visible when its label is given to the staff."""
+    from v2m.core.i18n import get_language, set_language
+
+    previous = get_language()
+    try:
+        set_language("en")
+        view = StaffView()
+        view.resize(420, 160)
+        view.set_score([_note(60, 0.0)], grid=BeatGrid(120.0), key="G major")
+        layout = view.layout()
+        assert layout.key_tonic == "G"
+        assert layout.key_mode == "major"
+
+        class HeaderPainter:
+            def setFont(self, _font):
+                pass
+
+            def setPen(self, _pen):
+                pass
+
+            def drawText(self, _point, text):
+                self.text = text
+
+        painter = HeaderPainter()
+        view._paint_header(painter, layout)
+        assert painter.text.endswith("G major")
+        assert not view.grab().isNull()
+    finally:
+        set_language(previous)
 
 
 def test_every_system_draws_its_notes(qapp):
     """Every system draws its notes INSIDE the widget."""
-    notes = [_note(60 + (i % 7), i * 0.5) for i in range(16)]   # 4 measures
+    notes = [_note(60 + (i % 7), i * 0.5) for i in range(16)]  # 4 measures
     view = StaffView()
     view.resize(560, 260)
     view.set_score(notes, grid=BeatGrid(120.0, Meter(4, 4)), key="C major")
@@ -108,24 +168,25 @@ def test_every_system_draws_its_notes(qapp):
 
     px_beat = S * 3.6
     per_system = max(1, int((560 - view._notes_x(lay) - 14) // (4 * px_beat)))
-    assert per_system == 3                      # two systems for four measures
+    assert per_system == 3  # two systems for four measures
     system_h = 4 * S + 4.2 * S
+    first_top = view._score_geometry()[3]
     for system in range(2):
-        top = HEADER_H + system * system_h
+        top = first_top + system * system_h
         ink = _ink(view, x0=view._notes_x(lay) + 5, y0=top - 14, y1=top + 4 * S + 8)
         assert ink > 40, f"system {system + 1} empty (no note drawn)"
 
 
 def test_live_view_scrolls_to_the_newest_notes(qapp):
-    notes = [_note(60 + (i % 5), i * 0.5) for i in range(40)]   # 40 beats
+    notes = [_note(60 + (i % 5), i * 0.5) for i in range(40)]  # 40 beats
     view = StaffView(live=True)
     view.resize(420, 160)
     view.set_live(notes, grid=BeatGrid(120.0))
 
     start, end = view.visible_window()
     lay = view.layout()
-    assert end >= lay.total_beats - 1e-6        # the cursor is in view
-    assert start > 0.0                          # the take has scrolled
+    assert end >= lay.total_beats - 1e-6  # the cursor is in view
+    assert start > 0.0  # the take has scrolled
     last = lay.notes[-1].onset
     assert start <= last <= end
 
@@ -179,7 +240,7 @@ def test_live_view_shows_the_note_being_sung(qapp):
     lay = view.layout()
     assert len(lay.notes) == 2
     assert lay.notes[-1].preview is True
-    assert lay.notes[-1].step == 32             # G4
+    assert lay.notes[-1].step == 32  # G4
     assert not view.grab().isNull()
 
 
@@ -212,8 +273,9 @@ def test_score_engraves_the_breaths_between_phrases(qapp):
     lay = view.layout()
     assert len(lay.rests) == 1
     assert lay.rests[0].shape == "pause"
-    assert lay.notes[1].onset == 5.0     # 1 quarter + 4 beats of rest
-    assert _ink(view, y0=HEADER_H + int(5.4 * S), y1=HEADER_H + int(7.0 * S)) > 0
+    assert lay.notes[1].onset == 5.0  # 1 quarter + 4 beats of rest
+    origin = view._score_geometry()[3]
+    assert _ink(view, y0=origin + int(5.4 * S), y1=origin + int(7.0 * S)) > 0
     assert not view.grab().isNull()
 
 

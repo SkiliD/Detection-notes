@@ -56,27 +56,31 @@ def weekly_text(data: dict) -> str:
         return out.getvalue()
     out.write("\n" + tr(WEEKLY_HEALTH) + "\n")
     for w in data["health"]:
+        live = w["live_notes"] if w["live_notes"] is not None else "-"
+        final = w["final_notes"] if w["final_notes"] is not None else "-"
         out.write(
             tr("coh week row").format(
-                week=w["week"], takes=w["takes"],
-                rate=f"{w['contour_rate']*100:.0f}%",
-                live=w["live_notes"], final=w["final_notes"],
-            ) + "\n"
+                week=w["week"],
+                takes=w["takes"],
+                rate=f"{w['contour_rate'] * 100:.0f}%",
+                live=live,
+                final=final,
+            )
+            + "\n"
         )
     if data["windows"]:
         out.write("\n" + tr(WEEKLY_WINDOWS) + "\n")
         for w in data["windows"]:
-            rate = (
-                f"{w['suspect_rate']:.1f}" if w["suspect_rate"] is not None else "-"
-            )
-            contours = (
-                f"{w['contour_rate']*100:.0f}%" if w["contour_rate"] is not None else "-"
-            )
+            rate = f"{w['suspect_rate']:.1f}" if w["suspect_rate"] is not None else "-"
+            contours = f"{w['contour_rate'] * 100:.0f}%" if w["contour_rate"] is not None else "-"
             out.write(
                 tr(WEEKLY_WINDOW_ROW).format(
                     window=tr(f"time {w['window']}"),
-                    takes=w["takes"], rate=rate, contours=contours,
-                ) + "\n"
+                    takes=w["takes"],
+                    rate=rate,
+                    contours=contours,
+                )
+                + "\n"
             )
     if data["days"]:
         out.write("\n" + tr(WEEKLY_DAYS) + "\n")
@@ -85,12 +89,21 @@ def weekly_text(data: dict) -> str:
             rate = f"{d['rate_per_100']:.2f}" if d["rate_per_100"] is not None else "-"
             out.write(
                 tr(WEEKLY_DAY_ROW).format(
-                    date=d["date"], sessions=d["sessions"], takes=d["takes"],
-                    checked=checked, suspects=d["suspects"], rate=rate,
-                ) + "\n"
+                    date=d["date"],
+                    sessions=d["sessions"],
+                    takes=d["takes"],
+                    checked=checked,
+                    suspects=d["suspects"],
+                    rate=rate,
+                )
+                + "\n"
             )
     return out.getvalue()
 
 
 # The three windows' labels (the keys `time morning/afternoon/evening`).
-WINDOW_LABEL_KEYS = {"morning": "time morning", "afternoon": "time afternoon", "evening": "time evening"}
+WINDOW_LABEL_KEYS = {
+    "morning": "time morning",
+    "afternoon": "time afternoon",
+    "evening": "time evening",
+}

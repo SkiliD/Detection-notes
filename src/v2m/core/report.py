@@ -34,33 +34,24 @@ from .pdf_export import PdfToolMissing, export_pdf, find_notation_tool, install_
 ARTIFACT_EXTENSIONS = (".mid", ".musicxml", ".json", ".csv", ".coherence.csv")
 
 
-def export_result(
-    res,
-    stem: str | Path,
-    quantize_s: float | None = None,
-    transpose: int = 0,
-    with_pitch_curve: bool = False,
-    meter=None,
-    live_notes=None,
-) -> dict:
-    """Write the artifacts under the `stem` prefix and return the JSON dict.
+class IncompleteAnalysis(ValueError):
+    """The analysis has no tempo or no key.
 
-    `meter`: detected Meter for the score (default: res.meter).
-    `with_pitch_curve`: adds the pitch curve to the JSON (CLI usage).
-    `live_notes`: the take's confirmed live notes (a live export) — the
-    report then also carries `live_vs_final`, the breakdown of the gap
-    between what the singer watched and what the final pass wrote
-    (`core.compare`). A file analysis has no live reading and carries none.
-
-    The PDF is a separate step (`engrave_pdf`): it needs an external tool
-    and must never cost the data artifacts, nor the report returned here.
+    The frozen JSON schema has a place for neither null, so there is nothing to
+    write and nothing to answer: the caller decides how loud that is (the CLI
+    prints it, the companion answers 422). A subclass of `ValueError` keeps the
+    existing `except ValueError` callers working.
     """
-    if res.tempo is None or res.key is None:
-        # a French user reads this through `err analyze failed`/`err ui export
-        # failed`: the message itself must follow the UI language too
-        raise ValueError(tr("err export incomplete"))
-    stem = Path(stem)
-    stem.parent.mkdir(parents=True, exist_ok=True)  # a nested stem (live take) needs its folder
+
+
+def _grid_and_positions(res, meter):
+    """The metric decisions the JSON payload and the artifacts both read.
+
+    An explicit `meter` is an intentional export override; otherwise the
+    pipeline's immutable grid remains the single metric decision. Positions
+    are only reused when the meter was not overridden — a moved bar number
+    describes a grid the take does not have.
+    """
     grid = getattr(res, "grid", None)
     if grid is None or meter is not None:
         # An explicit meter is an intentional export override; otherwise the
@@ -74,24 +65,21 @@ def export_result(
     if positions is None:
         positions = grid.positions(res.notes)
     pos_by_idx = {i: p for i, p in enumerate(positions)} if positions else {}
+    return grid, meter, pos_by_idx
 
-    mid = build_midi(
-        res.notes,
-        grid=grid,
-        key=res.key,
-        quantize_s=quantize_s,
-        transpose=transpose,
-    )
-    mid.save(str(stem) + ".mid")
-    save_musicxml(
-        res.notes,
-        grid,
-        res.key,
-        str(stem) + ".musicxml",
-        chord_progression=getattr(res, "chord_progression", None),
-        rests=getattr(res, "rests", None),
-    )
 
+def _report_payload(
+    res,
+    grid,
+    meter,
+    pos_by_idx,
+    *,
+    quantize_s,
+    transpose,
+    with_pitch_curve,
+    live_notes,
+):
+    """The JSON report's payload: ONE schema, built without touching the disk."""
     rep = {
         "source": res.source,
         "duration_s": round(res.duration_s, 3),
@@ -106,9 +94,7 @@ def export_result(
             ],
         },
         "n_notes": len(res.notes),
-        "tuning_offset_cents": round(
-            100.0 * getattr(res, "tuning_offset_st", 0.0), 1
-        ),
+        "tuning_offset_cents": round(100.0 * getattr(res, "tuning_offset_st", 0.0), 1),
         # the singer's intonation: per-note deviation (signed cents, on each
         # note below) and the systematic tendencies read from them. A habit is
         # only announced when the evidence supports it (see intonation.py).
@@ -118,9 +104,7 @@ def export_result(
         # plateau away from the label is a re-sung phrase glued into one
         # continuity, made visible here instead of silently written
         "coherence": (
-            coherence_report(
-                getattr(res, "observation", None), res.notes
-            )
+            coherence_report(getattr(res, "observation", None), res.notes)
             if getattr(res, "observation", None) is not None
             else {"checked": 0, "suspects": []}
         ),
@@ -160,9 +144,13 @@ def export_result(
             else {}
         ),
         "chord": (
-            {"label": res.chord.best.label, "score": res.chord.best.score,
-             "alternatives": [c.label for c in res.chord.alternatives]}
-            if res.chord else None
+            {
+                "label": res.chord.best.label,
+                "score": res.chord.best.score,
+                "alternatives": [c.label for c in res.chord.alternatives],
+            }
+            if res.chord
+            else None
         ),
         "chord_segments": [
             {"start_s": round(t0, 3), "end_s": round(t1, 3), "label": c.label}
@@ -181,10 +169,16 @@ def export_result(
                 "name": midi_to_name(n.midi),
                 "name_fr": midi_to_name_fr(n.midi),
                 "confidence": round(n.confidence, 3),
+                # thin voicing under this plateau: a PUBLISHED doubt, never
+                # a filter (ADR 0005) — the note is still the note
+                "voice_doubt": bool(getattr(n, "voice_doubt", False)),
                 "strength": round(getattr(n, "strength", 0.0), 2),
                 # signed residual mistune in cents, after the global tuning
                 # offset was absorbed: how far THIS note sat from its semitone
                 "deviation_cents": round(100.0 * getattr(n, "deviation", 0.0), 1),
+                # semitones the key-aware snap moved this label (0 = none):
+                # the audit trail that separates a relabelled note from a miss
+                "snap_st": round(float(getattr(n, "snap_st", 0.0)), 2),
                 "figure": n.figure,
                 "position": list(pos_by_idx[i]) if i in pos_by_idx else None,
             }
@@ -199,33 +193,163 @@ def export_result(
             for v in res.pitch.hz[::2]
         ]
         rep["pitch_times_s"] = [round(float(t), 4) for t in res.pitch.times[::2]]
+    return rep
+
+
+def report_dict(
+    res,
+    *,
+    meter=None,
+    quantize_s=None,
+    transpose=0,
+    with_pitch_curve=False,
+    live_notes=None,
+) -> dict:
+    """The JSON report WITHOUT writing an artifact (the companion route's answer).
+
+    Same schema as the `.json` artifact, from the same builder, so a caller that
+    only wants the reading never has to write files and read them back. Raises
+    `ValueError` for an incomplete analysis exactly as the export does: a report
+    with no tempo or key would carry nulls the frozen schema does not have.
+    """
+    if res.tempo is None or res.key is None:
+        raise IncompleteAnalysis(tr("err export incomplete"))
+    grid, meter, pos_by_idx = _grid_and_positions(res, meter)
+    return _report_payload(
+        res,
+        grid,
+        meter,
+        pos_by_idx,
+        quantize_s=quantize_s,
+        transpose=transpose,
+        with_pitch_curve=with_pitch_curve,
+        live_notes=live_notes,
+    )
+
+
+def export_result(
+    res,
+    stem: str | Path,
+    quantize_s: float | None = None,
+    transpose: int = 0,
+    with_pitch_curve: bool = False,
+    meter=None,
+    live_notes=None,
+) -> dict:
+    """Write the artifacts under the `stem` prefix and return the JSON dict.
+
+    `meter`: detected Meter for the score (default: res.meter).
+    `with_pitch_curve`: adds the pitch curve to the JSON (CLI usage).
+    `live_notes`: the take's confirmed live notes (a live export) — the
+    report then also carries `live_vs_final`, the breakdown of the gap
+    between what the singer watched and what the final pass wrote
+    (`core.compare`). A file analysis has no live reading and carries none.
+
+    The PDF is a separate step (`engrave_pdf`): it needs an external tool
+    and must never cost the data artifacts, nor the report returned here.
+    """
+    if res.tempo is None or res.key is None:
+        # a French user reads this through `err analyze failed`/`err ui export
+        # failed`: the message itself must follow the UI language too
+        raise IncompleteAnalysis(tr("err export incomplete"))
+    stem = Path(stem)
+    stem.parent.mkdir(parents=True, exist_ok=True)  # a nested stem (live take) needs its folder
+    grid, meter, pos_by_idx = _grid_and_positions(res, meter)
+
+    mid = build_midi(
+        res.notes,
+        grid=grid,
+        key=res.key,
+        quantize_s=quantize_s,
+        transpose=transpose,
+    )
+    mid.save(str(stem) + ".mid")
+    save_musicxml(
+        res.notes,
+        grid,
+        res.key,
+        str(stem) + ".musicxml",
+        chord_progression=getattr(res, "chord_progression", None),
+        rests=getattr(res, "rests", None),
+    )
+
+    rep = _report_payload(
+        res,
+        grid,
+        meter,
+        pos_by_idx,
+        quantize_s=quantize_s,
+        transpose=transpose,
+        with_pitch_curve=with_pitch_curve,
+        live_notes=live_notes,
+    )
     with open(str(stem) + ".json", "w", encoding="utf-8") as f:
         json.dump(rep, f, indent=2, ensure_ascii=False)
     with open(str(stem) + ".csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["index", "measure", "beat", "start_s", "end_s", "duration_s",
-                    "midi", "name", "name_fr", "confidence", "figure"])
+        w.writerow(
+            [
+                "index",
+                "measure",
+                "beat",
+                "start_s",
+                "end_s",
+                "duration_s",
+                "midi",
+                "name",
+                "name_fr",
+                "confidence",
+                "figure",
+            ]
+        )
         for i, n in enumerate(res.notes):
             pos = pos_by_idx.get(i)
-            w.writerow([i, pos[0] if pos else "", pos[1] if pos else "",
-                        round(n.start, 4), round(n.end, 4), round(n.duration, 4),
-                        n.midi, midi_to_name(n.midi), midi_to_name_fr(n.midi),
-                        round(n.confidence, 3), n.figure or ""])
+            w.writerow(
+                [
+                    i,
+                    pos[0] if pos else "",
+                    pos[1] if pos else "",
+                    round(n.start, 4),
+                    round(n.end, 4),
+                    round(n.duration, 4),
+                    n.midi,
+                    midi_to_name(n.midi),
+                    midi_to_name_fr(n.midi),
+                    round(n.confidence, 3),
+                    n.figure or "",
+                ]
+            )
     # the swallowed-phrase audit as its own CSV (a spreadsheet reads it
     # directly, session over session): one line per suspect note, empty file
     # with the header when the take is clean
     coherence = rep["coherence"]
     with open(str(stem) + ".coherence.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["start_s", "duration_s", "midi", "inner_range_st",
-                    "secondary_plateau_s", "secondary_plateau_start_s",
-                    "secondary_plateau_midi", "secondary_plateau_offset_st"])
+        w.writerow(
+            [
+                "start_s",
+                "duration_s",
+                "midi",
+                "inner_range_st",
+                "secondary_plateau_s",
+                "secondary_plateau_start_s",
+                "secondary_plateau_midi",
+                "secondary_plateau_offset_st",
+            ]
+        )
         for s in coherence["suspects"]:
-            w.writerow([
-                s["start_s"], s["duration_s"], s["midi"], s["inner_range_st"],
-                s["secondary_plateau_s"], s.get("secondary_plateau_start_s", ""),
-                s["secondary_plateau_midi"], s.get("secondary_plateau_offset_st", ""),
-            ])
+            w.writerow(
+                [
+                    s["start_s"],
+                    s["duration_s"],
+                    s["midi"],
+                    s["inner_range_st"],
+                    s["secondary_plateau_s"],
+                    s.get("secondary_plateau_start_s", ""),
+                    s["secondary_plateau_midi"],
+                    s.get("secondary_plateau_offset_st", ""),
+                ]
+            )
     return rep
 
 

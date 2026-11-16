@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from voicetruth import SungNote, detect_notes, glissando, synthesize
 
 
@@ -32,7 +31,9 @@ def test_a_slide_with_an_arrival_is_one_note(frm: int, to: int, dur: float):
     one note at the arrival's pitch, no fragments on the way."""
     notes = _slide_with_arrival(frm, to, dur)
     detected = detect_notes(synthesize(notes, consonant_s=0.05, glide_s=0.03))
-    assert len(detected) == 1, f"slides must read as one note: {[(d.midi, round(d.end - d.start, 2)) for d in detected]}"
+    assert len(detected) == 1, (
+        f"slides must read as one note: {[(d.midi, round(d.end - d.start, 2)) for d in detected]}"
+    )
     assert detected[0].midi == to
 
 
@@ -68,9 +69,7 @@ def test_a_slide_reads_deterministically_across_seeds(seed: int):
     """The same slide at several seeds reads the same shape: the corpus
     must not depend on a burst's luck."""
     notes = _slide_with_arrival(55, 64, 0.8)
-    detected = detect_notes(
-        synthesize(notes, consonant_s=0.05, glide_s=0.03, seed=seed)
-    )
+    detected = detect_notes(synthesize(notes, consonant_s=0.05, glide_s=0.03, seed=seed))
     assert len(detected) == 1 and detected[0].midi == 64
 
 
@@ -97,14 +96,11 @@ def _staircase(midis: list[float]) -> np.ndarray:
 
 def _observation(midis: np.ndarray):
     """An observation from a hand-built curve: no audio, no pYIN."""
-    from v2m.core.notes import interpret
     from v2m.core.observation import VoiceObservation
     from v2m.core.pitch import PitchTrack
 
     hz = 440.0 * 2.0 ** ((midis - 69.0) / 12.0)
-    track = PitchTrack(
-        times=np.arange(len(hz)) * DT, hz=hz, confidence=np.ones(len(hz))
-    )
+    track = PitchTrack(times=np.arange(len(hz)) * DT, hz=hz, confidence=np.ones(len(hz)))
     return VoiceObservation(
         pitch=track,
         attacks=None,
@@ -117,8 +113,8 @@ def _observation(midis: np.ndarray):
 @pytest.mark.parametrize(
     "midis, expected",
     [
-        ([47.9, 51.5, 56.1, 59.2], [59]),   # the take's shape, ascending
-        ([59.2, 56.1, 51.5, 47.9], [48]),   # descending
+        ([47.9, 51.5, 56.1, 59.2], [59]),  # the take's shape, ascending
+        ([59.2, 56.1, 51.5, 47.9], [48]),  # descending
     ],
 )
 def test_a_staircase_slide_is_one_note_at_the_arrival(midis, expected):
@@ -130,6 +126,20 @@ def test_a_staircase_slide_is_one_note_at_the_arrival(midis, expected):
     assert [n.midi for n in detected] == expected, (
         f"the staircase engraved as steps: {[(n.midi, round(n.duration, 2)) for n in detected]}"
     )
+
+
+def test_an_articulated_third_arp_keeps_all_notes_across_seeds():
+    """An acoustic onset at each third prevents a melody becoming one slide."""
+    from v2m.core.notes import interpret
+    from v2m.core.observation import VoiceObservation
+
+    truth = [SungNote(60, 0.2, 0.2), SungNote(64, 0.4, 0.2), SungNote(67, 0.6, 0.2)]
+    for seed in range(3):
+        signal = synthesize(truth, consonant_s=0.05, glide_s=0.03, seed=seed)
+        observation = VoiceObservation.from_signal(signal, 22_050)
+        assert observation.attacks is not None
+        assert len(observation.attacks.times) == 3
+        assert [note.midi for note in interpret(observation)] == [60, 64, 67]
 
 
 def test_a_two_plateau_leap_keeps_its_notes():

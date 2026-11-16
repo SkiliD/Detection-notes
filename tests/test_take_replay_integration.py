@@ -1,11 +1,9 @@
 """Replay wired into the GUI chain: ONE sidecar, ONE stem, one worker.
 
-Three pins, each for a bug actually met during the workstream:
+Three integration contracts are pinned here:
 
 1. **the sidecar is written ONCE**: `core.take_export.write_take` archives
-   it under the take's OWN stem the window handed over — a second writer
-   briefly rewrote it under ANOTHER stem (`live_take_name()` re-mints a
-   timestamp on every call);
+   it under the take's own stem supplied by the window;
 2. **the stem outlives the first export**: re-clicking "Export" reuses
    the memorized stem instead of opening a new folder;
 3. **the worker starts on the EXported take** (its stem, its folder),
@@ -193,9 +191,8 @@ def test_a_replay_never_starts_while_a_capture_is_running(qapp, monkeypatch, tmp
     _redirect(monkeypatch, mw, tmp_path)
     win = mw.MainWindow()
     try:
-        # the singer STARTED the next take BEFORE this one exported: its
-        # render timer ticks and its capture thread runs — the export must
-        # therefore QUEUE the cross-check, not start it
+        # A concurrent capture is active: export queues the cross-check
+        # rather than starting replay alongside the microphone.
         win.page_live.start_timer()
 
         class RunningThread:
@@ -366,7 +363,12 @@ def test_low_mic_is_named_before_the_take_starts(qapp):
         # past 3 s of nothing above the gate: the singer is TOLD
         win._on_live_block(3.2, 0.0)
         msg = win.statusBar().currentMessage()
-        assert "3" in msg and "seuil" in msg.lower() or "gate" in msg.lower(), msg
+        assert "3" in msg and (
+            "niveau" in msg.lower()
+            or "seuil" in msg.lower()
+            or "gate" in msg.lower()
+            or "threshold" in msg.lower()
+        ), msg
         # a clear block disarms the pre-take watch for the WHOLE take:
         # silence at t=5 is now the DURING-take watch's business
         win._on_live_block(4.0, gate * 3.0)

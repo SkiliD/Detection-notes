@@ -6,6 +6,7 @@ Usage: QT_QPA_PLATFORM=offscreen python scripts/gui_smoke_test.py [audio.wav]
 Important: use QApplication (not QCoreApplication) - Qt widgets crash
 natively under a bare QCoreApplication.
 """
+
 from __future__ import annotations
 
 import os
@@ -13,20 +14,20 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any, cast
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from v2m.core.pipeline import analyze_file
-from v2m.gui.main_window import MainWindow
-
 # Deterministic language: sandbox LANG_FILE (as tests/conftest.py does for the
 # suite) and force fr BEFORE the window is built — the assertions are written
 # against fr. Without this, a persisted "en" (GUI toggle, or a CLI --lang en
 # run) breaks every fr-expecting assertion before the toggle section runs.
 import v2m.core.i18n as i18n
+from v2m.core.pipeline import analyze_file
+from v2m.gui.main_window import MainWindow
 
 i18n.LANG_FILE = Path(tempfile.gettempdir()) / ".v2m_lang_smoke_test"
 i18n.set_language("fr")
@@ -92,9 +93,48 @@ def main() -> int:
     assert not win.page_results.piano_keys.grab().isNull()
     print("piano keyboard ok", flush=True)
 
-    # note finder: 88 keys built, labels translated, no capture started here
+    # results page by TASK: named groups, named listen actions, and ONE
+    # reading surface at a time (the page must read as tasks, never as a
+    # grid of symbols where every view is stacked at once)
+    assert win.page_results.group_listen.title() == _tr("ui group listen")
+    assert win.page_results.group_adjust.title() == _tr("ui group adjust")
+    assert win.page_results.group_export.title() == _tr("ui group export")
+    assert win.page_results.btn_voice.text() == f"▶ {_tr('ui play voice')}"
+    assert win.page_results.btn_export.text() == _tr("ui export")
+    assert win.page_results.group_export.isAncestorOf(win.page_results.btn_export)
+    assert win.page_results.options_host.isHidden()  # advanced settings collapsed
+    assert win.page_results.view_stack.currentWidget() is win.page_results.piano
+    win.page_results.btn_view_staff.click()
+    assert win.page_results.view_stack.currentWidget() is win.page_results.staff
+    assert win.page_results.btn_view_staff.isChecked()
+    win.page_results.btn_view_wave.click()
+    assert win.page_results.view_stack.currentWidget() is win.page_results.waveform
+    win.page_results.btn_view_notes.click()
+    assert win.page_results.view_stack.currentWidget() is win.page_results.piano
+    assert not win.page_results.group_listen.isHidden()  # listening is offered at once
+    assert win.page_results.group_adjust.isHidden()
+    assert win.page_results.group_export.isHidden()
+    assert win.page_results.btn_guide.text() in (
+        _tr("ui guide listen passage"),
+        _tr("ui guide listen take"),
+        _tr("ui export"),
+    )
+    win.page_results.tools_toggle.click()
+    assert not win.page_results.group_listen.isHidden()
+    assert not win.page_results.group_adjust.isHidden()
+    win.page_results.tools_toggle.click()
+    win.page_results.btn_guide_skip.click()
+    assert win.page_results.btn_guide.text() == _tr("ui export")
+    print("results page tasks and guidance ok", flush=True)
+
+    # note finder: a named voice span by default, the whole piano on request,
+    # labels translated, no capture started here
     assert not win.page_finder.thread
-    assert len(win.page_finder.keys._whites) == 52
+    assert len(win.page_finder.keys._whites) == 22  # C3..C6
+    win.page_finder.combo_range.setCurrentIndex(2)
+    assert len(win.page_finder.keys._whites) == 52  # A0..C8
+    win.page_finder.combo_range.setCurrentIndex(0)
+    assert (win.page_finder.keys.min_midi, win.page_finder.keys.max_midi) == (48, 84)
     win.page_finder.keys.set_pressed({57})
     assert win.page_finder.keys._active == {57}
     assert win.page_home.btn_finder.text() == _tr("ui finder button")
@@ -120,8 +160,21 @@ def main() -> int:
     win.on_toggle_language()
     assert get_language() == "en"
     assert win.page_home.btn_file.text() != fr_text, "button label must change language"
-    assert win.page_home.btn_file.text() == "📁  Analyze an audio file"
-    # the roll's axis titles follow too (they used to stay French)
+    assert win.page_home.btn_file.text() == _tr("ui open file")
+    assert win.page_finder.label_heard.text() == ""
+    win.page_finder._thread = cast(
+        Any, type("RunningThread", (), {"isRunning": lambda self: True})()
+    )
+    win.page_finder._last_rms = 0.0
+    win.page_finder._note_heard = False
+    win.page_finder._refresh_state()
+    win.page_finder._refresh_input_state()
+    assert win.page_finder.label_heard.text() == _tr("ui finder waiting")
+    win.page_finder._thread = None
+    win.page_finder._refresh_state()
+    win.page_finder._refresh_input_state()
+    assert win.page_finder.label_heard.text() == ""
+    # The roll's axis titles follow the selected language too.
     assert win.page_results.piano.getPlotItem().getAxis("bottom").labelText == _tr("ui axis time")
     assert win.page_results.piano.getPlotItem().getAxis("left").labelText == _tr("ui axis note")
     win.on_toggle_language()

@@ -9,12 +9,9 @@ live export, one sub-folder per take.
 This module also owns the artifact CONTRACT: which files a take owns
 (`ARTIFACTS`), how each path is spelled (`stem_path`, `sidecar_path`,
 `evidence_path`), and how the live/final audit sidecar is read
-(`read_sidecar`). Every consumer that once spelled a suffix itself — the
-GUI's announcer, the replay script, the drift watch, the coherence
-reader, the reinterpret tool — now asks here. The measured bug this
-concentrates: the sidecar was once written TWICE under two different
-stems because two writers each minted their own name; a contract no one
-owned is how that happens.
+(`read_sidecar`). Every consumer that needs a take artifact path — the GUI announcer, replay
+script, drift watch, coherence reader and reinterpret tool — asks here. A
+single path contract keeps the sidecar and its take stem consistent.
 
 This module is a LEAF on purpose (stdlib only). The readers of a take's
 name — the GUI, the CLI live session, `report` and the offline tools —
@@ -78,6 +75,12 @@ SIDECAR_SUFFIX = ".live_vs_final.json"
 # The evidence cache (the decoded-once pYIN+curve payload, `VoiceObservation`).
 EVIDENCE_SUFFIX = ".observation.npz"
 
+# A live take's preserved readings are kept outside the root artifact bundle:
+# the root remains the current export consumed by existing audit tools.
+READINGS_DIRNAME = "readings"
+AUTOMATIC_READING_DIRNAME = "automatic"
+CORRECTED_READINGS_DIRNAME = "corrected"
+
 
 def live_take_name() -> str:
     """Unique stem for one live take: live_YYYYmmdd_HHMMSS."""
@@ -115,6 +118,23 @@ def take_dir_stem(take_dir: Path) -> str | None:
     """
     name = Path(take_dir).name
     return name if parse_take_name(name) else None
+
+
+def automatic_reading_dir(take_dir: str | Path) -> Path:
+    """The immutable first interpretation's archive directory for one take."""
+    return Path(take_dir) / READINGS_DIRNAME / AUTOMATIC_READING_DIRNAME
+
+
+def corrected_readings_dir(take_dir: str | Path) -> Path:
+    """The parent directory holding a take's numbered corrected readings."""
+    return Path(take_dir) / READINGS_DIRNAME / CORRECTED_READINGS_DIRNAME
+
+
+def corrected_reading_dir(take_dir: str | Path, version: int) -> Path:
+    """One corrected-reading archive (`v001`, `v002`, …); versions start at 1."""
+    if version < 1:
+        raise ValueError("corrected reading versions start at 1")
+    return corrected_readings_dir(take_dir) / f"v{version:03d}"
 
 
 def sidecar_path(take_dir: str | Path, stem: str | None = None) -> Path:

@@ -1,8 +1,7 @@
 """The metric frame of a take: seconds <-> beats, position, snapping.
 
-Why a module of its own: `60.0 / bpm` was rewritten in seven modules, each
-with its own rounding, and "4/4 by default" was decided in three places. Every
-consumer DOWNSTREAM of the tempo reads the grid; the detectors
+Every consumer downstream of tempo reads the same grid for seconds-to-beats
+conversion, measure position and default meter. The detectors
 (`detect_tempo`, `detect_meter`) stay upstream and take the scalar tempo,
 because the grid is built from their result.
 
@@ -13,8 +12,7 @@ because the grid is built from their result.
   whose convention is stated once, on `step_seconds`;
 - the last rounding of a duration — a note the detector left without a figure
   is still written as some value — is `written`, whose catalogue (`CATALOGUE`)
-  lives here too: same metric business, and it used to sit in the engraving
-  grammar, which read like drawing but decided time;
+  lives here too, alongside the other metric decisions;
 - the grid is **immutable**: the pipeline builds it from the tempo, labels the
   figures, then derives the measure-aware one with `with_meter` once the meter
   is detected. Figures only need the beat, which is why that intermediate grid

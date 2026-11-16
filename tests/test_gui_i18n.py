@@ -1,8 +1,7 @@
 """The window follows the current language — including outside the widgets.
 
-Regression: `QFileDialog.getOpenFileName` received a title and a filter
-hardcoded in French; `tr()` never saw them, so the selection dialog
-stayed French even in English.
+File dialogs and result labels use the active language for titles,
+filters, keys and figures.
 """
 
 from __future__ import annotations
@@ -26,10 +25,40 @@ def qapp():
 
 @pytest.fixture(autouse=True)
 def _restore_language(monkeypatch, tmp_path):
-    """Sandbox the language state: never touch the real ~/.v2m_lang."""
+    """Sandbox the language and theme preferences for each GUI test."""
+    from v2m.gui import main_window, widgets
+
     monkeypatch.setattr(i18n, "LANG_FILE", tmp_path / "lang")
+    original_theme_file = main_window.THEME_FILE
+    monkeypatch.setattr(main_window, "THEME_FILE", tmp_path / "theme")
+    widgets.set_theme("dark")
     yield
     set_language("fr")
+    widgets.set_theme("dark")
+    main_window.THEME_FILE = original_theme_file
+
+
+def test_saved_theme_is_applied_and_selection_persists(qapp, monkeypatch, tmp_path):
+    from v2m.gui import main_window as mw
+    from v2m.gui import widgets
+
+    theme_file = tmp_path / "theme"
+    theme_file.write_text("light", encoding="utf-8")
+    monkeypatch.setattr(mw, "THEME_FILE", theme_file)
+    window = mw.MainWindow()
+    try:
+        assert window._theme == "light"
+        assert widgets.current_theme() == "light"
+        assert window.page_home.theme_selector.currentData() == "light"
+
+        window._on_theme_changed("dark")
+
+        assert theme_file.read_text(encoding="utf-8") == "dark"
+        assert widgets.current_theme() == "dark"
+        assert window.page_home.theme_selector.currentData() == "dark"
+        assert qapp.styleSheet() == widgets.theme_stylesheet()
+    finally:
+        window.close()
 
 
 def test_file_dialog_speaks_the_current_language(qapp, monkeypatch):
@@ -153,10 +182,8 @@ def test_both_languages_define_the_same_keys():
 def test_results_panel_translates_key_label_and_figures(qapp):
     """The panel shows translated labels, not the canonical storage.
 
-    Regression: `set_results` placed `res.key.best.label` ('C major') and
-    the figures ('noire') raw — English leaked into a French UI and
-    French into an English UI, while the staff already translates via
-    `tr_key_label`.
+    Key labels and figures use translated display text while the report
+    keeps canonical values internally.
     """
     from types import SimpleNamespace
 
@@ -194,10 +221,12 @@ def test_results_panel_translates_key_label_and_figures(qapp):
 
 
 def test_results_panel_shows_the_tuning_offset_with_advice(qapp):
-    """The global tuning offset displays with an intonation advice (user
-    request): in tune <= 10 c, to watch <= 25 c, else a "détendez"
-    advice; the adjective follows the sign (sharp/flat). Without an
-    offset, the line stays at '—'."""
+    """The global tuning offset uses measured tuning language at each band.
+
+    In tune <= 10 c, to watch <= 25 c, else show direction and measured
+    cents without inferring a singer's physical state. Without an offset,
+    the line stays at '—'.
+    """
     from types import SimpleNamespace
 
     from v2m.gui.widgets import ResultsPanel
@@ -216,9 +245,11 @@ def test_results_panel_shows_the_tuning_offset_with_advice(qapp):
         # in tune: no injunction, just the encouragement
         panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": 5.0}))
         assert "juste" in panel._values["key tuning offset"].text()
-        # clearly flat: the "détendez" advice
+        # A strong deviation gives a direction and the measured cents only.
         panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": 31.0}))
-        assert "détendez" in panel._values["key tuning offset"].text()
+        txt = panel._values["key tuning offset"].text()
+        assert "nettement aigu (+31 c)" in txt
+        assert "détendez" not in txt
         # a take without an offset measure reads 0.0 (the absorbed offset
         # default) — the line stays informative, never empty
         panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": None}))
@@ -267,12 +298,51 @@ def test_results_panel_shows_the_per_take_intonation_report(qapp):
         assert "médiums" in txt and "+14 c" in txt, txt
         assert "aigus" in txt and "+29 c" in txt, txt
         assert "graves" not in txt, txt  # the low band's mean is 2.5 c: silent
+        assert "position : fin +26 c" in txt, txt
+        assert "début" not in txt, txt  # the first half averages 4 c: silent
 
         set_language("en")
         panel.set_results(res)
         txt = panel._values["key intonation"].text()
         assert "50% in tune" in txt, txt
         assert "above" in txt and "mid +14 c" in txt, txt
+        assert "end +26 c" in txt, txt
+    finally:
+        set_language("fr")
+        panel.deleteLater()
+
+
+def test_results_panel_names_the_halves_of_a_drifting_take(qapp):
+    """A take that starts flat and ends sharp: the take-wide mean is zero, so
+    the tendency reads steady and ONLY the position line locates the drift.
+
+    Both halves are announced — that is the whole point of the line.
+    """
+    from types import SimpleNamespace
+
+    from v2m.core.i18n import set_language
+    from v2m.gui.widgets import ResultsPanel
+
+    notes = [
+        SimpleNamespace(midi=60 + index, deviation=deviation, figure="noire")
+        for index, deviation in enumerate([-0.30] * 4 + [0.30] * 4)
+    ]
+    res = SimpleNamespace(
+        source="take.wav", duration_s=1.0, tempo=None, meter=None,
+        key=None, chord=None, notes=notes,
+    )
+    panel = ResultsPanel()
+    try:
+        set_language("fr")
+        panel.set_results(res)
+        txt = panel._values["key intonation"].text()
+        assert "stable" in txt, txt
+        assert "position : début -30 c · fin +30 c" in txt, txt
+
+        set_language("en")
+        panel.set_results(res)
+        txt = panel._values["key intonation"].text()
+        assert "start -30 c · end +30 c" in txt, txt
     finally:
         set_language("fr")
         panel.deleteLater()

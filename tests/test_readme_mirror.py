@@ -7,8 +7,7 @@ referenced scripts, cross-links at the top. The silent drift — a flag
 documented in one language only, a section added on one side — is what
 this pin refuses; it is the same philosophy as the fr/en key parity of
 i18n (tests/test_gui_i18n.py), and it gives teeth to the "README
-obligatoire" session rule (AGENTS.md): the rule without a test was only
-an intention.
+obligatoire" rule: without this test, the mirrored sections could drift.
 
 The mirror is deliberately structural, not literal: the prose is
 translated and the quoted test count may move freely. The example FILE

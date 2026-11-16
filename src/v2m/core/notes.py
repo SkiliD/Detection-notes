@@ -9,16 +9,24 @@ import numpy as np
 from .music import hz_to_midi, on_piano
 from .observation import DEFAULT_GAP_S, VoiceObservation
 from .onsets import Attacks
+from .pitch import PitchTrack
 
-DEFAULT_MIN_NOTE_S = 0.060   # 60 ms
-DEFAULT_SEMITONES = 0.5      # note break when |dmidi| > 0.5
-NEAR_MERGE_ST = 0.4          # merge segments whose medians are close
-ATTACK_TOL_S = 0.120         # an attack this close confirms a note start
-MIN_UNCONFIRMED_S = 0.120    # a note nobody attacked must last this long
-SWEEP_MIN_ST = 0.5           # travel (semitones) required to call a glide
-SWEEP_THROUGH_ST = 0.4       # how far the middle may deviate from a straight path
-SWEEP_TAIL_FRAMES = 3        # hand-over window (~60 ms)
-SWEEP_TAIL_ST = 0.30         # a glide is still moving through that window
+DEFAULT_MIN_NOTE_S = 0.060  # 60 ms
+DEFAULT_SEMITONES = 0.5  # note break when |dmidi| > 0.5
+# A note whose plateau frames MOSTLY sit under this confidence rests on
+# uncertain voicing evidence. pYIN's probability is a measurement, never a
+# mask (ADR 0005): the note is still published, exported and editable — the
+# reading only says the evidence was thin, instead of letting it look as
+# sure as a well-voiced one. 0.6 is `observation.DEFAULT_MIN_CONF`, long the
+# app's own "sure enough" line (it gates nothing).
+VOICE_DOUBT_CONFIDENCE = 0.60
+NEAR_MERGE_ST = 0.4  # merge segments whose medians are close
+ATTACK_TOL_S = 0.120  # an attack this close confirms a note start
+MIN_UNCONFIRMED_S = 0.120  # a note nobody attacked must last this long
+SWEEP_MIN_ST = 0.5  # travel (semitones) required to call a glide
+SWEEP_THROUGH_ST = 0.4  # how far the middle may deviate from a straight path
+SWEEP_TAIL_FRAMES = 3  # hand-over window (~60 ms)
+SWEEP_TAIL_ST = 0.30  # a glide is still moving through that window
 # A long CONTINUOUS slide (one segment, no plateau): its head and tail
 # thirds disagree by at least this much and it never settles. Measured
 # on the truth glide corpus (0.77-1.5 s slides): 0.8-1.6 st of travel;
@@ -42,7 +50,7 @@ SLIDE_PLATEAU_MAX_S = 0.30
 # Measured: a slide-to-arrival chain hands over with a 0.02 s gap, a slide
 # followed by a different note after a breath sits 0.12 s away.
 SLIDE_BREAK_S = 0.06
-SAME_ONSET_S = 0.100         # two onsets this close are one articulation
+SAME_ONSET_S = 0.100  # two onsets this close are one articulation
 # A singer's systematic offset absorbed by _measure_tuning_offset: beyond
 # this the take is TRANSPOSED (or misread), not out of tune — absorbing it
 # would re-key the melody.
@@ -57,23 +65,34 @@ AMBIGUOUS_DEV_ST = 0.30
 # (chant.wav), a consonant lands 90-130 ms before the plateau the pitch
 # tracker reports. Narrower (80 ms) left 4 notes "orphaned" from their own
 # attack; wider would reach past the shortest note the segmenter can emit,
-# so a nearer attack can only be the same articulation (see AGENTS.md).
+# so a nearer attack can only be the same articulation.
 
 
 @dataclass
 class Note:
     """A segmented note, ready for MIDI export."""
 
-    start: float   # seconds
-    end: float     # seconds
-    midi: int      # MIDI number (rounded)
+    start: float  # seconds
+    end: float  # seconds
+    midi: int  # MIDI number (rounded)
     confidence: float  # 0..1, mean confidence
     figure: str | None = None  # note figure (see figures.py), None if off-grid
     strength: float = 0.0  # onset accent 0..1 (local RMS vs its neighbours)
     # signed residual pitch deviation (st, AFTER the global tuning offset:
-    # +0.4 = 40 cents sharp of its semitone). Feeds the key-aware snap
-    # (keys.snap_to_key); NOT exported as the report's confidence is.
+    # +0.4 = 40 cents sharp of its semitone). NEVER rewritten by the
+    # key-aware snap: the label a note carries and the mistune it measured
+    # are two facts, and the intonation report reads this one
+    # (keys.snap_to_key).
     deviation: float = 0.0
+    # semitones the key-aware snap moved this note's LABEL toward its lean
+    # (0.0 = the reading's own label). Kept apart from `deviation` so a
+    # relabelled note stays distinguishable from a plain miss.
+    snap_st: float = 0.0
+    # the reading's own doubt: this note's plateau frames mostly sat under
+    # VOICE_DOUBT_CONFIDENCE, so its voicing evidence was thin. PUBLISHED
+    # (JSON `voice_doubt`, the notes table, the audit count) and never a
+    # reason to drop, move or re-label a note.
+    voice_doubt: bool = False
 
     @property
     def duration(self) -> float:
@@ -86,8 +105,8 @@ class _Segment:
 
     start: float
     end: float
-    frames: np.ndarray   # frame indices into the pitch track
-    midis: np.ndarray    # pitch (float MIDI) of those frames
+    frames: np.ndarray  # frame indices into the pitch track
+    midis: np.ndarray  # pitch (float MIDI) of those frames
     confidence: float
     transition: np.ndarray | None = None  # derivative mask (see clean_pitch)
     forced_pitch: float | None = None  # set when the run's arrival fixes it
@@ -134,8 +153,8 @@ class _Segment:
         - the frames marked `transition` (clean_pitch's derivative mask:
           portamento ramps, note hand-overs) are excluded, so the pitch is
           read on the plateau the singer HELD, never on the ramp that leads
-          into it — a take that drifts 0.6 st across a note used to have its
-          height pulled mid-way by the ramp frames.
+          into it — on a pitch drift, ramp frames would pull the measured
+          height away from the stable plateau.
         - the remaining frames are trimmed around their median (`semitones`)
           to drop the legato glide's stragglers, which are closer to this
           note than to the previous one but are not its pitch.
@@ -154,14 +173,11 @@ def _merge_segments(segments: list[_Segment]) -> _Segment:
     frames = np.concatenate([s.frames for s in segments])
     midis = np.concatenate([s.midis for s in segments])
     transitions = [
-        s.transition for s in segments
+        s.transition
+        for s in segments
         if s.transition is not None and len(s.transition) == len(s.midis)
     ]
-    trans = (
-        np.concatenate(transitions)
-        if len(transitions) == len(segments)
-        else None
-    )
+    trans = np.concatenate(transitions) if len(transitions) == len(segments) else None
     return _Segment(
         start=min(s.start for s in segments),
         end=max(s.end for s in segments),
@@ -191,7 +207,9 @@ def _settle_on_tail(seg: _Segment, tail_frames: int) -> _Segment:
     return seg
 
 
-def _hysteresis_segments(midi, times, conf, idx, semitones: float, transition=None) -> list[_Segment]:
+def _hysteresis_segments(
+    midi, times, conf, idx, semitones: float, transition=None
+) -> list[_Segment]:
     """Split the voiced frames into plateaus (hysteresis + confirmation).
 
     The reference is the segment's own running median, so a slow slide is
@@ -260,7 +278,7 @@ def _hysteresis_segments(midi, times, conf, idx, semitones: float, transition=No
     return segments
 
 
-GLIDE_STAIR_ST = 1.4     # max median delta between two rungs of one glide
+GLIDE_STAIR_ST = 1.4  # max median delta between two rungs of one glide
 
 
 def _is_glide_stair(seg: _Segment, prev, nxt) -> bool:
@@ -454,9 +472,8 @@ def _is_transition(seg: _Segment, prev, nxt, attacks: Attacks | None) -> bool:
         return True
     if _arrives_on_next(seg, nxt) and not _articulated_inside(seg, attacks):
         return True
-    # the LONG SLIDE (one continuous slide segment, no plateau): a
-    # glissando engraved as an arpeggio is the defect this gate refuses.
-    # An attack INSIDE still means a new note was articulated on the way.
+    # A LONG SLIDE is one continuous segment with no plateau. Keep it as a
+    # glide unless an attack inside it marks a new articulated note.
     if _is_long_slide(seg, nxt) and not _articulated_inside(seg, attacks):
         return True
     if seg.duration >= MIN_UNCONFIRMED_S:
@@ -475,7 +492,7 @@ def _is_transition(seg: _Segment, prev, nxt, attacks: Attacks | None) -> bool:
     # vibrato's turn).
     if not _articulated_at_start(seg, attacks):
         return True
-    tail = seg.midis[-min(4, len(seg.midis)):]
+    tail = seg.midis[-min(4, len(seg.midis)) :]
     if float(tail[-1]) < float(np.max(tail)) - 0.05:
         return False  # the tail is coming back DOWN: it settled (vibrato)
     # A SETTLED tail (spread <= 0.5, last frame near the max) is a real short
@@ -569,11 +586,7 @@ def _attach_run(
     # its arrival, the approach merges INTO the arrival note and the pitch
     # is the arrival's plateau, never the ramp's median.
     run_span = abs(run[-1].midis[-1] - run[0].midis[0])
-    if (
-        len(run) >= 3
-        and run_span >= SLIDE_RUN_SPAN_ST
-        and seg.start - run[-1].end >= SLIDE_BREAK_S
-    ):
+    if len(run) >= 3 and run_span >= SLIDE_RUN_SPAN_ST and seg.start - run[-1].end >= SLIDE_BREAK_S:
         slide = _merge_segments(run)
         return [_settle_on_tail(slide, SWEEP_TAIL_FRAMES), seg]
     merged = _merge_segments([*run, seg])
@@ -606,9 +619,8 @@ def _split_between_at_attack(
         lo = left.end
         hi = right.start
         for t in attacks.times:
-            # the boundary itself belongs to the ARRIVAL (the AGENTS.md
-            # hand-over convention): the hysteresis cut the left note at the
-            # consonant that caused the break, so an attack at exactly `lo`
+            # The boundary belongs to the ARRIVAL: hysteresis cut the left
+            # note at the consonant that caused the break, so an attack at `lo`
             # is that consonant — measured on the 0.25 s descending 67->60
             # glide, where the strict `lo < t` fell back to the midpoint and
             # left the arrival starting 150 ms late. An attack at `hi` stays
@@ -661,7 +673,7 @@ def _next_stair_step(segments: list[_Segment], i: int) -> int | None:
     return j
 
 
-def _flag_staircase(segments: list[_Segment], flags: list[bool]) -> None:
+def _flag_staircase(segments: list[_Segment], flags: list[bool], attacks: Attacks | None) -> None:
     """Flag every member of a contiguous staircase of >= 3 slide plateaus.
 
     The cleaning re-locks between a long slide's ramp bridges, so the
@@ -691,7 +703,11 @@ def _flag_staircase(segments: list[_Segment], flags: list[bool]) -> None:
                 break  # the staircase turned around: a melody contour
             direction = step
             chain.append(j)
-        if len(chain) >= 3:
+        articulated_steps = sum(
+            attacks is not None and attacks.near(segments[k].start, ATTACK_TOL_S) is not None
+            for k in chain[1:]
+        )
+        if len(chain) >= 3 and articulated_steps < 2:
             for k in chain:
                 flags[k] = True
             i = chain[-1] + 1
@@ -699,9 +715,7 @@ def _flag_staircase(segments: list[_Segment], flags: list[bool]) -> None:
             i += 1
 
 
-def _absorb_transitions(
-    segments: list[_Segment], times, attacks: Attacks | None
-) -> list[_Segment]:
+def _absorb_transitions(segments: list[_Segment], times, attacks: Attacks | None) -> list[_Segment]:
     """Collapse every run of transitions onto the notes it links.
 
     Measured on a synthetic voice: a 90 ms legato glide turned 6 sung notes
@@ -718,18 +732,16 @@ def _absorb_transitions(
         flags.append(_is_transition(seg, prev, nxt, attacks))
     # the STAIRCASE pass: a contiguous chain of >= 3 held mini-plateaus
     # stepping a third or more each is one slide, not a fast melody
-    _flag_staircase(segments, flags)
+    _flag_staircase(segments, flags, attacks)
 
     notes: list[_Segment] = []
     pending: list[_Segment] = []
-    for seg, is_transition in zip(segments, flags):
+    for seg, is_transition in zip(segments, flags, strict=True):
         if is_transition:
             pending.append(seg)
             continue
         if pending:
-            notes.extend(
-                _attach_run(notes[-1] if notes else None, pending, seg, times, attacks)
-            )
+            notes.extend(_attach_run(notes[-1] if notes else None, pending, seg, times, attacks))
             pending = []
         else:
             notes.append(seg)
@@ -759,6 +771,7 @@ def _split_rearticulated(
     attacks: Attacks | None,
     midi_curve: np.ndarray | None = None,
     times: np.ndarray | None = None,
+    tuning_offset_st: float = 0.0,
 ) -> list[Note]:
     """Cut a held note the singer re-attacked at the SAME pitch.
 
@@ -821,7 +834,7 @@ def _split_rearticulated(
         # golden fingerprint). A glide STILL refuses: it never returns to
         # either reference (the after-frames travel on), and its
         # around-median sits mid-travel, away from the label.
-        glide_cut = False
+        accepted_cuts = []
         if midi_curve is not None and times is not None:
             in_note = (times >= n.start) & (times <= n.end)
             note_midis = midi_curve[in_note]
@@ -837,18 +850,17 @@ def _split_rearticulated(
                 before = note_midis[(note_times >= n.start) & (note_times <= t)]
                 before = before[~np.isnan(before)]
                 if before.size and abs(float(np.median(before)) - n.midi) > SWEEP_MIN_ST:
-                    glide_cut = True
-                    break
+                    continue
                 around = note_midis[(note_times >= t - 0.08) & (note_times <= t + 0.08)]
                 around = around[~np.isnan(around)]
                 if not around.size:
+                    accepted_cuts.append(t)
                     continue
                 around_ref = float(np.median(around))
-                after = note_midis[
-                    (note_times > t + 0.08) & (note_times <= min(n.end, t + 0.30))
-                ]
+                after = note_midis[(note_times > t + 0.08) & (note_times <= min(n.end, t + 0.30))]
                 after = after[~np.isnan(after)]
                 if not after.size:
+                    accepted_cuts.append(t)
                     continue
                 returned = (
                     float(np.min(np.abs(after - n.midi))) <= NEAR_MERGE_ST
@@ -860,18 +872,33 @@ def _split_rearticulated(
                 # 60->67 ramp; the descending hand-over 65 vs 67).
                 anchored = abs(around_ref - n.midi) <= SWEEP_MIN_ST
                 if not returned or not anchored:
-                    glide_cut = True
-                    break
-        if glide_cut:
+                    continue
+                accepted_cuts.append(t)
+            cuts = accepted_cuts
+        if not cuts:
             out.append(n)
             continue
-        prev = n.start
-        for t in cuts:
+        boundaries = [n.start, *cuts, n.end]
+        for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
+            deviation = n.deviation
+            if midi_curve is not None and times is not None:
+                in_part = (times >= start) & (times < end)
+                if end == n.end:
+                    in_part |= times == end
+                pitches = midi_curve[in_part]
+                pitches = pitches[~np.isnan(pitches)]
+                if pitches.size:
+                    measured = float(np.median(pitches)) - tuning_offset_st - n.midi
+                    deviation = max(-0.5, min(0.5, measured))
             out.append(
-                Note(start=prev, end=t, midi=n.midi, confidence=n.confidence)
+                Note(
+                    start=start,
+                    end=end,
+                    midi=n.midi,
+                    confidence=n.confidence,
+                    deviation=deviation,
+                )
             )
-            prev = t
-        out.append(Note(start=prev, end=n.end, midi=n.midi, confidence=n.confidence))
     return out
 
 
@@ -889,7 +916,11 @@ def _merge_same_onset(notes: list[Note]) -> list[Note]:
     """
     kept: list[Note] = []
     for n in notes:
-        if kept and n.start - kept[-1].start <= SAME_ONSET_S and min(n.duration, kept[-1].duration) < MIN_UNCONFIRMED_S:
+        if (
+            kept
+            and n.start - kept[-1].start <= SAME_ONSET_S
+            and min(n.duration, kept[-1].duration) < MIN_UNCONFIRMED_S
+        ):
             if n.duration > kept[-1].duration:
                 n.start = min(n.start, kept[-1].start)
                 n.confidence = max(n.confidence, kept[-1].confidence)
@@ -929,13 +960,11 @@ def interpret(
     parameter is inert by ADR 0005).
 
     `min_note_s` / `gap_s` / `semitones` keep their defaults HERE because
-    notes.py is the ONE writer of the segmentation policy (a 0.6 written in
-    the pipeline once detached the offline defaults from the tested ones).
+    notes.py is the ONE writer of the segmentation policy.
 
     Writing `observation.tuning_offset_st` is this pass's one side effect:
-    the take's systematic offset is measured on the candidate plateaus,
-    before rounding, and the caller reads it back from the same object (it
-    used to travel through a `tuning_out` dict side channel).
+    the take's systematic offset is measured on candidate plateaus before
+    rounding, and the caller reads it from that same observation.
     """
     track = observation.pitch
     attacks = observation.attacks
@@ -949,9 +978,9 @@ def interpret(
     # interpolate short gaps
     idx = np.flatnonzero(voiced)
     gaps = []
-    for a, b in zip(idx[:-1], idx[1:]):
+    for a, b in zip(idx[:-1], idx[1:], strict=True):
         if b - a > 1:
-            gap = (times[b] - times[a])
+            gap = times[b] - times[a]
             if gap <= gap_s:
                 gaps.append((a, b))
     for a, b in gaps:
@@ -962,7 +991,11 @@ def interpret(
             voiced[j] = True
 
     segments = _hysteresis_segments(
-        midi, times, track.confidence, idx, semitones,
+        midi,
+        times,
+        track.confidence,
+        idx,
+        semitones,
         transition=getattr(track, "transition", None),
     )
     segments = _absorb_transitions(segments, times, attacks)
@@ -992,7 +1025,10 @@ def interpret(
         midi = int(round(adjusted))
         notes.append(
             Note(
-                start=s.start, end=s.end, midi=midi, confidence=s.confidence,
+                start=s.start,
+                end=s.end,
+                midi=midi,
+                confidence=s.confidence,
                 deviation=max(-0.5, min(0.5, adjusted - midi)),
             )
         )
@@ -1002,11 +1038,7 @@ def interpret(
     # merge consecutive same-pitch notes separated by a short gap
     merged: list[Note] = []
     for n in notes:
-        if (
-            merged
-            and n.midi == merged[-1].midi
-            and n.start - merged[-1].end <= gap_s
-        ):
+        if merged and n.midi == merged[-1].midi and n.start - merged[-1].end <= gap_s:
             merged[-1].end = n.end
             merged[-1].confidence = max(merged[-1].confidence, n.confidence)
         else:
@@ -1014,7 +1046,13 @@ def interpret(
 
     # a same-pitch re-articulation is two notes (the merge above must not
     # undo the cut, so this pass runs after it)
-    merged = _split_rearticulated(merged, attacks, hz_to_midi(track.hz), times)
+    merged = _split_rearticulated(
+        merged,
+        attacks,
+        hz_to_midi(track.hz),
+        times,
+        tuning_offset_st=observation.tuning_offset_st,
+    )
 
     # temporal snap: center note starts/ends on the frame — the frame clock
     # is a field of the observation (one owner; a hand-built observation that
@@ -1023,7 +1061,33 @@ def interpret(
     for n in merged:
         n.start = max(0.0, n.start - frame_dt / 2)
         n.end = n.end + frame_dt / 2
+    # LAST, and read-only: the doubt is a property of the evidence under a
+    # note that already exists, so it can neither create nor remove one
+    _mark_voice_doubt(merged, track)
     return merged
+
+
+def _mark_voice_doubt(notes: list[Note], track: PitchTrack) -> None:
+    """Flag the notes whose plateau rests on uncertain frames.
+
+    The median, not the mean: half the note's frames must sit in the
+    uncertain band before the reading calls the evidence thin, so a single
+    consonant frame (pYIN's voicing collapses there) never brands a
+    perfectly voiced note.
+    """
+    times = track.times
+    if times.size == 0:
+        return
+    confidence = track.confidence
+    for n in notes:
+        lo = int(np.searchsorted(times, n.start, side="left"))
+        hi = int(np.searchsorted(times, n.end, side="right"))
+        if hi <= lo:
+            continue
+        band = confidence[lo:hi]
+        band = band[np.isfinite(band)]
+        if band.size and float(np.median(band)) < VOICE_DOUBT_CONFIDENCE:
+            n.voice_doubt = True
 
 
 def _measure_tuning_offset(pitches: list[float]) -> float:

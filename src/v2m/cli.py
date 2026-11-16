@@ -1,18 +1,17 @@
-"""CLI: v2m analyze | v2m live | v2m gui."""
+"""CLI: v2m analyze | v2m live | v2m gui | v2m serve."""
 
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
-
 import time
+from pathlib import Path
 
 from . import __version__
 from .core.audio_io import AUDIO_EXTS
+from .core.companion import DEFAULT_PORT as COMPANION_PORT
 from .core.i18n import (
     get_language,
-    note_display,
     note_display_pair,
     set_language,
     tr,
@@ -21,10 +20,10 @@ from .core.i18n import (
     tr_key_label,
 )
 from .core.live_session import LiveEvent, LiveTake
-from .core.pdf_export import PdfExportError
 from .core.notes import DEFAULT_MIN_NOTE_S
+from .core.pdf_export import PdfExportError
 from .core.pipeline import FILE_CONF, LIVE_CONF, AnalyzeOptions, analyze_file
-from .core.take_export import ExportOptions, ExportReceipt, PDF_FAILED, PDF_MISSING_TOOL, write_take
+from .core.take_export import PDF_FAILED, PDF_MISSING_TOOL, ExportOptions, ExportReceipt, write_take
 from .core.takes import live_export_dir, live_take_name
 
 
@@ -250,6 +249,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_gui = sub.add_parser("gui", help="Launch the graphical interface")
 
+    p_serve = sub.add_parser(
+        "serve",
+        help="Serve /health, /analyze, /render and /compare to the web page on 127.0.0.1 (opt-in)",
+    )
+    p_serve.add_argument(
+        "--port", type=int, default=COMPANION_PORT,
+        help=f"Loopback port (default: {COMPANION_PORT})",
+    )
+    p_serve.add_argument(
+        "--allow-origin", action="append", default=[], metavar="ORIGIN",
+        help=(
+            "Also let this page origin call it (repeatable; a loopback page and "
+            "non-browser clients are always allowed)"
+        ),
+    )
+
     p_wk = sub.add_parser(
         "weekly", help="Weekly recap: real-time health, best practice time of day, days"
     )
@@ -278,21 +293,46 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_live(args)
     if args.command == "gui":
         return _cmd_gui(args)
+    if args.command == "serve":
+        return _cmd_serve(args)
     if args.command == "weekly":
         return _cmd_weekly(args)
     parser.print_help()
     return 1
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """The companion: loopback only, until Ctrl+C.
+
+    It prints the URL it actually bound (port 0 is a legal request), so the
+    user pastes a real address into the page's settings instead of a guess.
+    """
+    from .core.companion import make_server
+
+    server = make_server(args.port, tuple(args.allow_origin))
+    host, port = server.server_address[:2]
+    # flushed: the URL is the one instruction the user needs, and a redirect to
+    # a log file must not swallow it until the process ends
+    print(tr("cli companion listening").format(url=f"http://{host}:{port}"), flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    print(tr("cli companion stopped"), flush=True)
+    return 0
+
+
 def _cmd_weekly(args: argparse.Namespace) -> int:
     """The weekly recap: text always, PDF on request (same split as analyze)."""
     from .core import weekly as wk
+    from .core.retention import prune_observations, prune_takes
     from .core.weekly_pdf import (
         WeeklyPdfExportError,
         WeeklyPdfToolMissing,
         engrave_weekly_pdf,
     )
-    from .core.retention import prune_observations, prune_takes
 
     root = Path(args.root) if args.root else None
     data = wk.build_weekly(root)

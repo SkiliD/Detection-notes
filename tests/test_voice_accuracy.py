@@ -8,12 +8,11 @@ detects against that truth. These tests pin the non-regression thresholds:
   detection and the transition rules, a 90 ms glissando turned 6 sung
   notes into 10, and a held note with vibrato counted 19 "attacks";
 - the attack evidence never degrades geometry alone;
-- no note is invented INSIDE a sung note, the defect that made the score
-  illogical;
+- no note is invented INSIDE a sung note;
 - the real-time path, with no look-ahead, finds the articulated phrases
   exactly.
 
-Known real-time limits (documented in AGENTS.md, not tested here):
+Known real-time limits outside this corpus:
 semiquavers (120 ms) are merged, and a very long portamento (250 ms)
 shifts the arrival note's attack.
 """
@@ -33,6 +32,7 @@ from voicetruth import (
     sequence,
     synthesize,
 )
+
 from v2m.core.liveseg import LiveNoteSegmenter, LivePitchStream
 from v2m.core.music import midi_to_hz
 from v2m.core.notes import Note
@@ -47,7 +47,10 @@ GATE = 0.008
 CASES: dict[str, tuple[list[SungNote], dict]] = {
     "consonnes": (sequence(MIDIS, dur_s=0.6, start_s=0.2), dict(glide_s=0.09, consonant_s=0.05)),
     "legato": (sequence(MIDIS, dur_s=0.6, start_s=0.2), dict(glide_s=0.09, consonant_s=0.0)),
-    "détaché": (sequence(MIDIS, dur_s=0.6, gap_s=0.15, start_s=0.2), dict(glide_s=0.09, consonant_s=0.05)),
+    "détaché": (
+        sequence(MIDIS, dur_s=0.6, gap_s=0.15, start_s=0.2),
+        dict(glide_s=0.09, consonant_s=0.05),
+    ),
     "silences longs": (
         sequence([60, 64, 67], dur_s=0.5, gap_s=0.5, start_s=0.2),
         dict(glide_s=0.09, consonant_s=0.05),
@@ -65,7 +68,10 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         dict(glide_s=0.09, consonant_s=0.05, vibrato_st=0.3, noise=0.03),
     ),
     "croches": (sequence(GAMME, dur_s=0.2, start_s=0.2), dict(glide_s=0.03, consonant_s=0.04)),
-    "doubles": (sequence([60, 62, 64, 65], dur_s=0.12, start_s=0.2), dict(glide_s=0.02, consonant_s=0.03)),
+    "doubles": (
+        sequence([60, 62, 64, 65], dur_s=0.12, start_s=0.2),
+        dict(glide_s=0.02, consonant_s=0.03),
+    ),
     "note courte": (
         [SungNote(60, 0.2, 0.6), SungNote(67, 0.8, 0.15), SungNote(72, 0.95, 0.6)],
         dict(glide_s=0.03, consonant_s=0.05),
@@ -134,8 +140,12 @@ CASES: dict[str, tuple[list[SungNote], dict]] = {
         dict(glide_s=0.09, consonant_s=0.05, vibrato_st=0.6),
     ),
     "trille": (
-        [SungNote(64, 0.2, 0.35), SungNote(65, 0.55, 0.35),
-         SungNote(64, 0.9, 0.35), SungNote(65, 1.25, 0.35)],
+        [
+            SungNote(64, 0.2, 0.35),
+            SungNote(65, 0.55, 0.35),
+            SungNote(64, 0.9, 0.35),
+            SungNote(65, 1.25, 0.35),
+        ],
         dict(glide_s=0.02, consonant_s=0.03),
     ),
     "répétition": ([SungNote(64, 0.2, 0.7), SungNote(64, 1.2, 0.7)], dict(consonant_s=0.05)),
@@ -227,9 +237,7 @@ def _seeded_signal(name: str, seed: int) -> np.ndarray:
 @lru_cache(maxsize=None)
 def _seeded_offline(name: str, seed: int) -> Accuracy:
     truth, _ = CASES[name]
-    return measure(
-        detect_notes(_seeded_signal(name, seed), SR, with_attacks=True), truth
-    )
+    return measure(detect_notes(_seeded_signal(name, seed), SR, with_attacks=True), truth)
 
 
 @lru_cache(maxsize=None)
@@ -256,11 +264,21 @@ def test_the_harness_catches_a_lost_note():
 
 
 def test_the_harness_catches_a_note_in_the_middle_of_another():
-    """The original defect: a micro-note wedged inside a sung note."""
+    """A micro-note inside a sung note is counted as an intruder."""
     truth, _ = CASES["tenue vibrato"]
     detected = [
-        Note(start=truth[0].start_s, end=truth[0].start_s + truth[0].dur_s, midi=truth[0].midi, confidence=1.0),
-        Note(start=truth[0].start_s + 0.5, end=truth[0].start_s + 0.58, midi=truth[0].midi + 1, confidence=1.0),
+        Note(
+            start=truth[0].start_s,
+            end=truth[0].start_s + truth[0].dur_s,
+            midi=truth[0].midi,
+            confidence=1.0,
+        ),
+        Note(
+            start=truth[0].start_s + 0.5,
+            end=truth[0].start_s + 0.58,
+            midi=truth[0].midi + 1,
+            confidence=1.0,
+        ),
     ]
     acc = measure(detected, truth)
     assert acc.matched == 1 and acc.extra == 1 and acc.intruders == 1
@@ -274,14 +292,13 @@ def test_the_harness_catches_a_note_in_the_middle_of_another():
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_offline_transcription_is_exact(name: str):
-    acc = _offline(name, True)
-    assert acc.exact, acc.line()
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_attack_evidence_never_makes_it_worse(name: str):
+    """The reading WITH attack evidence is exact, and the evidence never
+    makes the geometry alone worse: matched may only grow, extras may only
+    shrink, and no intruder appears inside a sung note.
+    """
     with_attacks = _offline(name, True)
     geometry = _offline(name, False)
+    assert with_attacks.exact, with_attacks.line()
     assert with_attacks.matched >= geometry.matched
     assert with_attacks.extra <= geometry.extra
     assert with_attacks.intruders == 0
@@ -299,26 +316,32 @@ def test_geometry_alone_is_still_strict(name: str):
     assert acc.exact, acc.line()
 
 
-def test_onsets_and_pitches_are_close():
-    for name in ("consonnes", "gamme liée", "croches", "voix grave"):
-        acc = _offline(name, True)
-        # the detected note starts on the consonant, not the stabilization
-        assert acc.worst_start_ms <= 80.0, (name, acc.line())
-        assert acc.worst_pitch_st == 0.0, (name, acc.line())
-
-
-def test_high_octave_reaches_the_pitch_ceiling():
-    """Notes ABOVE the old reading ceiling (C6) stay accurate.
-
-    The old FMAX (1050 Hz) sat EXACTLY on the sung C6: pYIN had no room
-    above and folded the soprano an octave down (measured: a sung 84 read
-    72, a 79-88 line read 67-76). A C7 of headroom reads those notes
-    without changing anything below (chant.wav/demo.wav unchanged).
+def test_offline_probes_pin_onsets_pitch_and_fine_vibrato():
+    """Three measured offline readings, probed case by case (messages name
+    the case): note starts date on the consonant with zero pitch error,
+    notes above the old C6 ceiling stay readable (FMAX headroom), and a
+    deep vibrato or a fast trill never fragments.
     """
     from v2m.core.pitch import FMAX
 
+    # (1) onsets and pitches: the detected note starts on the consonant,
+    # not the stabilization
+    for name in ("consonnes", "gamme liée", "croches", "voix grave"):
+        acc = _offline(name, True)
+        assert acc.worst_start_ms <= 80.0, (name, acc.line())
+        assert acc.worst_pitch_st == 0.0, (name, acc.line())
+
+    # (2) the pitch ceiling: notes ABOVE the old reading ceiling (C6) stay
+    # accurate — the old FMAX (1050 Hz) sat EXACTLY on the sung C6, so
+    # pYIN folded the soprano an octave down (a sung 84 read 72)
     assert FMAX > 440.0 * 2 ** ((84 - 69) / 12)  # above the sung C6
     for name in ("saut octave haut", "soprano gamme"):
+        acc = _offline(name, True)
+        assert acc.exact, (name, acc.line())
+
+    # (3) deep vibrato (±0.6 st) and a fast 350 ms trill stay exact:
+    # vibrato does not fragment, the trill does not merge
+    for name in ("vibrato profond", "trille"):
         acc = _offline(name, True)
         assert acc.exact, (name, acc.line())
 
@@ -352,15 +375,6 @@ def test_arrival_pitch_reads_the_plateau_not_the_ramp():
     assert acc.exact and acc.worst_pitch_st == 0.0, acc.line()
 
 
-def test_deep_vibrato_and_trill_stay_exact():
-    """Deep vibrato (±0.6 st) and a fast trill stay exact: vibrato does not
-    fragment (the 9-frame median follows the oscillation) and a 350 ms
-    trill does not merge."""
-    for name in ("vibrato profond", "trille"):
-        acc = _offline(name, True)
-        assert acc.exact, (name, acc.line())
-
-
 def test_wide_vibrato_stays_exact_across_seeds():
     """±0.7 st — the display stabilizer's upper boundary — stays EXACT on
     both paths, both shapes, 5 seeds: segmentation is indifferent to the
@@ -371,7 +385,9 @@ def test_wide_vibrato_stays_exact_across_seeds():
             assert _seeded_offline(name, seed).exact, (name, seed)
             acc = _seeded_live(name, seed)
             assert acc.exact and acc.worst_start_ms <= 120.0, (
-                name, seed, acc.line(),
+                name,
+                seed,
+                acc.line(),
             )
 
 
@@ -422,13 +438,18 @@ def test_dotted_pulse_take_publishes_6_8_offline():
     range; the strengths alternate (strong dotted beat, weak offbeat) to
     arm the alternation evidence.
     """
-    quarter = 60.0 / 135.0            # the expected quarter at 135 BPM
-    dotted = 1.5 * quarter            # the sung dotted beat
+    quarter = 60.0 / 135.0  # the expected quarter at 135 BPM
+    dotted = 1.5 * quarter  # the sung dotted beat
     notes = []
-    for i in range(9):                # 9 dotted beats = 4.5 bars of 6/8
-        notes.append(SungNote(60 + (i % 3), start_s=i * dotted,
-                              dur_s=dotted * 0.85,
-                              amp=(1.0 if i % 2 == 0 else 0.45)))
+    for i in range(9):  # 9 dotted beats = 4.5 bars of 6/8
+        notes.append(
+            SungNote(
+                60 + (i % 3),
+                start_s=i * dotted,
+                dur_s=dotted * 0.85,
+                amp=(1.0 if i % 2 == 0 else 0.45),
+            )
+        )
     # level-attack articulation: the consonant bursts are not scaled per
     # note, their constant loudness would blur the strength
     y = synthesize(notes, consonant_s=0)
@@ -461,8 +482,9 @@ def test_breaths_between_phrases_become_rests():
 def test_long_breath_is_labeled_a_quarter_rest():
     """A real breath (0.6 s at 80 BPM = 0.8 beats) must be labeled a quarter
     rest — the figure an editor engraves between two phrases."""
-    y = synthesize(sequence([60, 62, 64], dur_s=0.6, gap_s=0.6, start_s=0.2),
-                   glide_s=0.09, consonant_s=0.05)
+    y = synthesize(
+        sequence([60, 62, 64], dur_s=0.6, gap_s=0.6, start_s=0.2), glide_s=0.09, consonant_s=0.05
+    )
     rests = analyze_signal(y, SR).rests or []
     figures = [r.figure for r in rests if r.figure]
     assert "soupir" in figures, [(r.start, r.end, r.figure) for r in rests]
@@ -543,8 +565,10 @@ def test_careless_timing_is_still_transcribed():
     """IRREGULAR durations and breaths (human song): 5/5 notes. Neither
     path assumes a regular tempo."""
     truth = [
-        SungNote(60, 0.20, 0.35), SungNote(62, 0.70, 0.70),
-        SungNote(64, 1.55, 0.28), SungNote(65, 1.95, 0.55),
+        SungNote(60, 0.20, 0.35),
+        SungNote(62, 0.70, 0.70),
+        SungNote(64, 1.55, 0.28),
+        SungNote(65, 1.95, 0.55),
         SungNote(67, 2.65, 0.90),
     ]
     y = synthesize(truth, glide_s=0.09, consonant_s=0.05)
@@ -574,7 +598,7 @@ def test_a_tremolo_never_becomes_several_notes(depth: float):
         stream.feed(y[i : i + BLOCK], (i + BLOCK) / SR)
     stream.seg.flush(len(y) / SR)
     acc = measure(stream.seg.notes, truth, tol_s=LIVE_TOL_S)
-    assert acc.exact, f"tremolo ±{int(depth*100)}%: {acc.line()}"
+    assert acc.exact, f"tremolo ±{int(depth * 100)}%: {acc.line()}"
 
 
 def test_live_attacks_carry_their_accent_evidence():
@@ -587,8 +611,10 @@ def test_live_attacks_carry_their_accent_evidence():
     the take's contrast); (3) the strength did not cross the same-note
     split path.
     """
-    truth = [SungNote(m, 0.2 + i * 0.7, 0.55, amp=1.0 if i % 2 == 0 else 0.4)
-             for i, m in enumerate([60, 62, 60, 62, 60, 62])]
+    truth = [
+        SungNote(m, 0.2 + i * 0.7, 0.55, amp=1.0 if i % 2 == 0 else 0.4)
+        for i, m in enumerate([60, 62, 60, 62, 60, 62])
+    ]
     y = synthesize(truth, glide_s=0, consonant_s=0)
     stream = LivePitchStream(SR, gate_rms=GATE)
     for i in range(0, len(y) - BLOCK, BLOCK):
@@ -600,8 +626,8 @@ def test_live_attacks_carry_their_accent_evidence():
     # the take's contrast reads: strong >= 0.3, weak <= 0.6, and at least
     # three attacks actually seen (the legato ones have none)
     assert any(s >= 0.3 for s in strengths), strengths
-    strong = [s for n, s in zip(stream.seg.notes, strengths) if n.midi == 60]
-    weak = [s for n, s in zip(stream.seg.notes, strengths) if n.midi == 62]
+    strong = [s for n, s in zip(stream.seg.notes, strengths, strict=True) if n.midi == 60]
+    weak = [s for n, s in zip(stream.seg.notes, strengths, strict=True) if n.midi == 62]
     assert sum(strong) / len(strong) > sum(weak) / len(weak), (strong, weak)
 
 
@@ -670,8 +696,10 @@ def test_real_take_segmentation_does_not_drift():
         pytest.skip("no golden fingerprint for chant.wav — run the script --golden once")
     assert golden is not None
     res = analyze_signal(
-        audio_io.load_file(str(audio)), audio_io.SR,
-        source=str(audio), opts=AnalyzeOptions(),
+        audio_io.load_file(str(audio)),
+        audio_io.SR,
+        source=str(audio),
+        opts=AnalyzeOptions(),
     )
     diffs = compare_fingerprints(golden, segmentation_fingerprint(res))
     assert not diffs, "segmentation drift on chant.wav:\n" + "\n".join(diffs)

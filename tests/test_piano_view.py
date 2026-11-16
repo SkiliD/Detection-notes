@@ -32,9 +32,9 @@ def qapp():
 
 def _notes():
     return [
-        Note(start=0.0, end=0.5, midi=60, confidence=0.9),   # C4 (white)
-        Note(start=0.5, end=1.0, midi=64, confidence=0.9),   # E4 (white)
-        Note(start=1.0, end=1.5, midi=61, confidence=0.9),   # C#4 (black)
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),  # C4 (white)
+        Note(start=0.5, end=1.0, midi=64, confidence=0.9),  # E4 (white)
+        Note(start=1.0, end=1.5, midi=61, confidence=0.9),  # C#4 (black)
     ]
 
 
@@ -82,12 +82,31 @@ def test_playhead_without_notes_is_safe(qapp):
 def test_the_keyboard_range_is_a_parameter(qapp):
     """The note finder displays the 88 keys of a classical piano."""
     full = PianoView(min_midi=PIANO_MIN_MIDI, max_midi=PIANO_MAX_MIDI)
-    assert len(full._whites) == 52         # 88 keys, 36 of them black
+    assert len(full._whites) == 52  # 88 keys, 36 of them black
     assert full._white_midi(0) == 21 and full._white_midi(51) == 108
     assert not full._has_black_after(108)  # nothing after C8
     # the analysis view covers 48..84: 22 whites, C6 included (the 84 key
     # was invisible — a note at the top edge could never light)
     assert len(PianoView()._whites) == 22
+
+
+def test_set_range_reshapes_the_keyboard_and_keeps_what_is_sounding(qapp):
+    """The finder chooses its span in place: keys keep their light, and a
+    staged key outside the new span is dropped rather than slid to an edge."""
+    pv = PianoView(min_midi=48, max_midi=84)
+    pv.set_pressed({60})
+    pv.set_keyboard_cursor(72)
+    pv.set_range(PIANO_MIN_MIDI, PIANO_MAX_MIDI)
+    assert (pv.min_midi, pv.max_midi) == (21, 108)
+    assert len(pv._whites) == 52 and pv._white_midi(0) == 21
+    assert pv._active == {60}
+    assert pv.keyboard_cursor == 72
+    pv.set_range(36, 72)
+    assert pv.keyboard_cursor == 72  # still inside
+    pv.set_keyboard_cursor(24)  # below the new span
+    pv.set_range(48, 84)
+    assert pv.keyboard_cursor is None
+    assert len(pv._whites) == 22
 
 
 def test_every_black_key_of_the_piano_is_drawn(qapp):
@@ -114,24 +133,71 @@ def test_pressed_keys_are_lit_directly(qapp):
     assert pv._active == set()
 
 
-def test_the_pitch_axis_names_notes_in_the_current_language(qapp):
-    """The roll's axis reads like a keyboard, not like MIDI numbers —
-    and it follows the language: Do/Ré in French, C/D in English."""
+def test_the_pitch_axis_names_every_labelled_row_in_both_notations(qapp):
+    """The ordinate carries both names of a note, current language first.
+
+    This test MOVES the one that pinned the single spelling (`Do4` / `C4`
+    per language): the axis now prints the same pair the audition readout
+    and the note finder print, so a reader who learned one notation never
+    has to translate the ordinate in their head.
+    """
     from v2m.core.i18n import get_language, set_language
 
     axis = PitchAxis(orientation="left")
     previous = get_language()
     try:
         set_language("fr")
-        assert axis.tickStrings([21, 60, 61, 108], 1.0, 1.0) == [
-            "La0", "Do4", "Do#4", "Do8",
-        ]
+        assert axis.tickStrings([60, 69], 1.0, 12.0) == ["Do4 / C4", "La4 / A4"]
         set_language("en")
-        assert axis.tickStrings([21, 60, 61, 108], 1.0, 1.0) == [
-            "A0", "C4", "C#4", "C8",
-        ]
+        assert axis.tickStrings([60, 69], 1.0, 12.0) == ["C4 / Do4", "A4 / La4"]
     finally:
         set_language(previous)
+
+
+def test_the_pitch_axis_anchors_its_labelled_rows_on_the_octaves(qapp):
+    """Row every step the axis paints, chosen from the pixels it has.
+
+    pyqtgraph's automatic grid marks arbitrary semitone multiples (a
+    60..72 take was labelled Ré4 / Mi4 / Fa#4 / Sol#4 / Do5) — correct
+    names nobody counts from. Every step here divides or is divided by the
+    octave, so the C rows are always in the labelled set, and the labels
+    stay `MIN_LABEL_PX` apart; the finer level is a grid line, never a
+    second column of text.
+    """
+    from math import ceil
+
+    from v2m.core.i18n import note_display_pair
+
+    axis = PitchAxis(orientation="left")
+    cases = (
+        # (range, axis pixels, expected labelled step)
+        ((60.0, 72.0, 250.0), 2.0),  # a take: a named row every whole tone
+        ((55.0, 79.0, 300.0), 3.0),
+        ((21.0, 108.0, 300.0), 12.0),  # the whole piano: one name per octave
+        ((57.0, 63.0, 40.0), 6.0),  # a cramped axis names Do4 alone
+        ((61.0, 64.0, 250.0), 1.0),  # no C row in view: every row named
+    )
+    for (low, high, size), step in cases:
+        levels = axis.tickSpacing(low, high, size)
+        assert levels[0] == (step, 0.0), (low, high, size)
+        assert axis.OCTAVE % step == 0 or step % axis.OCTAVE == 0, step
+        labelled = axis.tickValues(low, high, size)[0][1]
+        assert labelled, (low, high, size)
+        assert all(low <= v <= high for v in labelled)
+        assert axis.tickStrings(labelled, 1.0, step) == [
+            note_display_pair(int(v)) for v in labelled
+        ]
+        # one name per C row the range contains and the step lands on
+        first_c = ceil(low / axis.OCTAVE) * axis.OCTAVE
+        expected_cs = [c for c in range(int(first_c), int(high) + 1, 12) if c % step == 0]
+        assert [v for v in labelled if v % 12 == 0] == expected_cs
+        # the labels fit: a single one cannot collide with anything
+        per_px = size / (high - low)
+        assert per_px * step >= axis.MIN_LABEL_PX or len(labelled) == 1
+        for spacing, values in axis.tickValues(low, high, size)[1:]:
+            assert per_px * spacing >= axis.MIN_TICK_PX, (spacing, per_px)
+            assert axis.tickStrings(values, 1.0, spacing) == [""] * len(values)
+    assert axis.tickSpacing(60.0, 60.0, 250.0) == []
 
 
 # ----------------------------------------------------------------- piano roll
@@ -325,26 +391,30 @@ def test_seek_moves_the_playhead_without_yanking_the_view(qapp):
 # ------------------------------------------------------- graph selection
 
 
-def _ev(roll, ev_type, t: float, midi: float, held: Qt.MouseButton) -> QMouseEvent:
+def _ev(
+    roll,
+    ev_type,
+    t: float,
+    midi: float,
+    held: Qt.MouseButton,
+    modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+) -> QMouseEvent:
     """A real QMouseEvent aimed at a (time, pitch) data point.
 
     The position is expressed in VIEWPORT coordinates — what `_hit`
     maps back through `mapToScene`, exactly like an event delivered by
     QGraphicsView's viewport routing. `held` is the button mask (the
-    button that caused a press/release is always the left one).
+    button that caused a press/release is always the left one), and
+    `modifiers` carries Shift/Ctrl the way a real press would.
     """
     vb = roll.getPlotItem().vb
     scene = vb.mapViewToScene(QPointF(t, midi))
     vp_point = roll.viewport().mapFrom(roll, roll.mapFromScene(scene))
     point = QPointF(vp_point)
     cause = (
-        Qt.MouseButton.NoButton
-        if ev_type == QEvent.Type.MouseMove
-        else Qt.MouseButton.LeftButton
+        Qt.MouseButton.NoButton if ev_type == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
     )
-    return QMouseEvent(
-        ev_type, point, scene, point, cause, held, Qt.KeyboardModifier.NoModifier
-    )
+    return QMouseEvent(ev_type, point, scene, point, cause, held, modifiers)
 
 
 def _selectable_roll() -> PianoRoll:
@@ -359,8 +429,12 @@ def test_pressing_a_bar_selects_and_emits_that_note(qapp):
     got: list = []
     roll.note_selection.connect(got.append)
 
-    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton))
-    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.25, 60, Qt.MouseButton.NoButton))
+    roll.mousePressEvent(
+        _ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton)
+    )
+    roll.mouseReleaseEvent(
+        _ev(roll, QEvent.Type.MouseButtonRelease, 0.25, 60, Qt.MouseButton.NoButton)
+    )
 
     assert got == [[0]]  # one press = one note, one emission
     assert roll._selection == [0]
@@ -368,26 +442,116 @@ def test_pressing_a_bar_selects_and_emits_that_note(qapp):
     assert roll._bar_items[1].opts["brush"] == roll._color_for_conf(0.9)  # untouched
 
 
-def test_dragging_across_bars_extends_the_range_and_an_empty_click_clears(qapp):
+def _click(roll, t: float, midi: float, modifiers=Qt.KeyboardModifier.NoModifier) -> None:
+    """One full left click at a data point, with the given modifiers."""
+    roll.mousePressEvent(
+        _ev(
+            roll,
+            QEvent.Type.MouseButtonPress,
+            t,
+            midi,
+            Qt.MouseButton.LeftButton,
+            modifiers,
+        )
+    )
+    roll.mouseReleaseEvent(
+        _ev(roll, QEvent.Type.MouseButtonRelease, t, midi, Qt.MouseButton.NoButton)
+    )
+
+
+def test_shift_click_extends_a_contiguous_range_from_the_anchor(qapp):
+    """The list gesture every editor shares: click one, Shift-click a range."""
     roll = _selectable_roll()
     got: list = []
     roll.note_selection.connect(got.append)
 
-    # press on note 0, drag onto note 1…
-    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton))
-    roll.mouseMoveEvent(_ev(roll, QEvent.Type.MouseMove, 0.75, 64, Qt.MouseButton.LeftButton))
-    # …over a gap (t=0.5, off-pitch): the range built so far is kept
-    roll.mouseMoveEvent(_ev(roll, QEvent.Type.MouseMove, 0.5, 62, Qt.MouseButton.LeftButton))
-    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.5, 62, Qt.MouseButton.NoButton))
-    assert got == [[0], [0, 1]]
+    _click(roll, 0.25, 60)
+    _click(roll, 1.25, 61, Qt.KeyboardModifier.ShiftModifier)  # anchor 0 -> note 2
+    assert got == [[0], [0, 1, 2]]
+    assert roll._selection == [0, 1, 2]
+
+    _click(roll, 0.75, 64, Qt.KeyboardModifier.ShiftModifier)  # back to note 1
     assert roll._selection == [0, 1]
 
+    # a new plain click moves the anchor: the next Shift-click starts here
+    _click(roll, 1.25, 61)
+    _click(roll, 0.25, 60, Qt.KeyboardModifier.ShiftModifier)
+    assert roll._selection == [0, 1, 2]
+
+
+def test_ctrl_click_toggles_one_note_without_clearing_the_rest(qapp):
+    """Ctrl/Cmd-click adds and removes signs of attention, one bar at a time."""
+    roll = _selectable_roll()
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    _click(roll, 0.25, 60)
+    _click(roll, 1.25, 61, Qt.KeyboardModifier.ControlModifier)
+    assert got == [[0], [0, 2]]  # separated notes, not the range between them
+    _click(roll, 0.75, 64, Qt.KeyboardModifier.ControlModifier)
+    assert roll._selection == [0, 1, 2]
+    _click(roll, 0.25, 60, Qt.KeyboardModifier.ControlModifier)
+    assert roll._selection == [1, 2]
+    assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
+
+    # Cmd-click is the macOS spelling of the same gesture
+    _click(roll, 0.25, 60, Qt.KeyboardModifier.MetaModifier)
+    assert roll._selection == [0, 1, 2]
+
+
+def test_dragging_across_bars_does_not_select_and_an_empty_click_clears(qapp):
+    """A drag on this roll is not a selection gesture; an empty click clears."""
+    roll = _selectable_roll()
+    got: list = []
+    roll.note_selection.connect(got.append)
+
+    roll.mousePressEvent(
+        _ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton)
+    )
+    roll.mouseMoveEvent(_ev(roll, QEvent.Type.MouseMove, 1.25, 61, Qt.MouseButton.LeftButton))
+    roll.mouseReleaseEvent(
+        _ev(roll, QEvent.Type.MouseButtonRelease, 1.25, 61, Qt.MouseButton.NoButton)
+    )
+    assert got == [[0]]  # the drag added nothing
+    assert roll._selection == [0]
+
     # a click on empty space (no pan) clears the selection
-    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.75, 70, Qt.MouseButton.LeftButton))
-    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.75, 70, Qt.MouseButton.NoButton))
-    assert got == [[0], [0, 1], []]
+    _click(roll, 1.25, 70)
+    assert got == [[0], []]
     assert roll._selection == []
     assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
+
+
+def test_a_modifier_click_selects_without_starting_a_note_move(qapp):
+    """Shift/Ctrl select on the editable roll; a move needs a PLAIN drag."""
+    roll = _selectable_roll()
+    roll.set_editable(True)
+    moves: list = []
+    roll.note_dragged.connect(lambda *args: moves.append(args))
+
+    _click(roll, 0.25, 60)
+    roll.mousePressEvent(
+        _ev(
+            roll,
+            QEvent.Type.MouseButtonPress,
+            0.75,
+            64,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.ShiftModifier,
+        )
+    )
+    assert roll._note_drag is None
+    roll.mouseMoveEvent(_ev(roll, QEvent.Type.MouseMove, 0.85, 66, Qt.MouseButton.LeftButton))
+    roll.mouseReleaseEvent(
+        _ev(roll, QEvent.Type.MouseButtonRelease, 0.85, 66, Qt.MouseButton.NoButton)
+    )
+    assert moves == []
+    assert roll._selection == [0, 1]
+
+    roll.mousePressEvent(  # a plain press still arms the bar move
+        _ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton)
+    )
+    assert roll._note_drag is not None
 
 
 def test_a_non_selectable_roll_ignores_the_whole_gesture(qapp):
@@ -399,8 +563,12 @@ def test_a_non_selectable_roll_ignores_the_whole_gesture(qapp):
     got: list = []
     roll.note_selection.connect(got.append)
 
-    roll.mousePressEvent(_ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton))
-    roll.mouseReleaseEvent(_ev(roll, QEvent.Type.MouseButtonRelease, 0.25, 60, Qt.MouseButton.NoButton))
+    roll.mousePressEvent(
+        _ev(roll, QEvent.Type.MouseButtonPress, 0.25, 60, Qt.MouseButton.LeftButton)
+    )
+    roll.mouseReleaseEvent(
+        _ev(roll, QEvent.Type.MouseButtonRelease, 0.25, 60, Qt.MouseButton.NoButton)
+    )
     assert got == []
 
     roll.set_selection([0])
@@ -473,17 +641,13 @@ def test_the_arrow_keys_step_the_selection_note_by_note(qapp):
     assert roll._bar_items[0].opts["brush"] == roll._color_for_conf(0.9)
 
     # Shift extends the current range by one note at the moving edge
-    roll.keyPressEvent(
-        _key_press(roll, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
-    )
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier))
     assert roll._selection == [1, 2]
     assert got[-1] == [1, 2]
 
     # Shift+Left walks back past the start edge, collapsing onto the note
     roll.set_selection([1])
-    roll.keyPressEvent(
-        _key_press(roll, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier)
-    )
+    roll.keyPressEvent(_key_press(roll, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier))
     assert roll._selection == [0, 1]
 
 
@@ -524,7 +688,7 @@ def test_waveform_envelope_keeps_the_true_peaks(qapp):
     makes isolated peaks disappear and a long take look flat."""
     wf = WaveformView()
     y = np.zeros(600_000, dtype=np.float32)  # x12 decimation at display
-    y[5] = 1.0                               # peak never reached by y[::12]
+    y[5] = 1.0  # peak never reached by y[::12]
     y[500_000] = -0.8
     wf.set_signal(y, 1000)
 
@@ -553,4 +717,4 @@ def test_paint_does_not_crash_offscreen(qapp):
     pv.set_playhead(0.2)
     pix = pv.grab()  # forces a paintEvent pass offscreen
     assert not pix.isNull()
-    assert pix.width() == 400
+    assert pix.width() / pix.devicePixelRatioF() == pytest.approx(400)

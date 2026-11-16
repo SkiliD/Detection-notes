@@ -9,8 +9,10 @@ note's close in `LiveTake._apply_grid_policy` (the sole owner of the live
 policy), reads `LiveNote.dev` — the live twin of `Note.deviation`.
 
 What the test pins:
-- an ambiguous live note (dev beyond ±0.30) leans toward its scale degree
-  and changes label at close;
+- an ambiguous live note (dev beyond ±0.30) whose pitch class is NOT in the
+  key leans toward the neighbour it leans to and changes label at close,
+  keeping its measured `dev` (the label is the key's decision, the mistune
+  is the singer's — `LiveNote.snap_st` records the move);
 - a clear note (dev under the threshold) stays itself;
 - the `note_closed` event publishes the ALREADY-snapped note (adapters
   consume, they do not re-snap);
@@ -48,24 +50,23 @@ class FakeCapture:
 
 
 class SnapStream:
-    """One note per block, at a known dev: the snap's raw material."""
+    """One note per block, as (label, dev): the snap's raw material.
 
-    devs = (0.0,)  # overridden per test
+    The LABEL is what the live segmenter would have rounded (a mistuned
+    plateau can round up or down a semitone — the ±1 family), the dev is
+    how far the plateau sat from that label.
+    """
+
+    notes_src: tuple[tuple[int, float], ...] = ((64, 0.0),)  # per test
 
     def __init__(self, sr, gate_rms):
         self.seg = _SnapSeg()
 
     def feed(self, block, t):
         i = len(self.seg.notes)
-        dev = self.devs[i % len(self.devs)]
-        base = self.seg.base_midi
-        # the note's label follows its own mistune: a clearly sharp dev means
-        # the running median rounded UP a semitone (that is the ±1 family),
-        # a clear one stays on the base, a flat one rounds down
-        midi = base + (1 if dev > 0.3 else (-1 if dev < -0.3 else 0))
+        midi, dev = self.notes_src[i % len(self.notes_src)]
         self.seg.notes.append(
-            LiveNote(start=i * 0.4, end=i * 0.4 + 0.3, midi=midi,
-                     strength=0.5, dev=dev)
+            LiveNote(start=i * 0.4, end=i * 0.4 + 0.3, midi=midi, strength=0.5, dev=dev)
         )
         return 0.01, []
 
@@ -74,7 +75,6 @@ class SnapStream:
 
 
 class _SnapSeg:
-    base_midi = 64  # E: between the C-scale degrees E and F
     notes: list
 
     def __init__(self):
@@ -96,31 +96,67 @@ def _run_take(monkeypatch, stream_cls, n_blocks: int):
     return take, events
 
 
+def _triad_then(source, n_blocks: int):
+    """A C major triad (the key the take is in), then the note under test."""
+
+    class _Stream(SnapStream):
+        notes_src = source
+
+    return _Stream, n_blocks
+
+
 def test_an_ambiguous_live_note_snaps_toward_the_scale(monkeypatch):
-    """An E sung +40 cents (dev 0.4) in C major leans toward F: the live
-    note is re-labeled 65 at its close — the ±1 gap disappears WHERE the
-    singer watches it (the counter), not only in the JSON."""
-
-    class SharpStream(SnapStream):
-        devs = (0.4,) * 12
-
+    """An F# sung 35 cents SHARP in a C major take: outside the key, leaning
+    up — the live note is re-labelled G at its close, so the ±1 gap
+    disappears WHERE the singer watches it (the counter), not only in the
+    JSON. Its measured `dev` survives the move (re-measured against the new
+    label) and the relabel itself is recorded on the note."""
+    stream_cls, blocks = _triad_then(((60, 0.0), (64, 0.0), (67, 0.0)) * 3 + ((66, 0.35),), 10)
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
-    monkeypatch.setattr(live_session, "LivePitchStream", SharpStream)
+    monkeypatch.setattr(live_session, "LivePitchStream", stream_cls)
     events = []
     take = live_session.LiveTake(on_event=events.append)
     take.start()
     block = np.zeros(512, dtype=np.float32)
-    for _ in range(10):
+    for _ in range(blocks):
         take._on_block(block, 2.0)
 
     closed = [e for e in events if e.kind == "note_closed"]
     assert closed, "the policy must publish the closed notes"
-    # the key read off the scale (E+1=F repeatedly, F-heavy histogram) snaps
-    # the note toward its degree: at least the LAST note is re-labeled
-    # and its deviation absorbed
-    assert take.snapped_notes >= 1
+    assert take.snapped_notes == 1  # only the chromatic note moved
     last = closed[-1].note
-    assert last.dev == 0.0  # re-anchored: the deviation was absorbed
+    assert last.midi == 67 and last.snap_st == 1.0
+    assert last.dev == -0.5  # 35 cents sharp of F#, read against G: clipped
+
+
+def test_closed_note_keeps_its_facts_when_the_detected_key_changes(monkeypatch):
+    from types import SimpleNamespace
+
+    from v2m.core.intonation_live import LiveIntonation
+    from v2m.core.keys import KeyCandidate
+
+    keys = iter(["C", "D", "C"])
+    monkeypatch.setattr(
+        live_session,
+        "detect_key",
+        lambda notes: SimpleNamespace(best=KeyCandidate(next(keys), "major", 1.0)),
+    )
+    take = live_session.LiveTake()
+    summary = LiveIntonation()
+    first = LiveNote(start=0.0, end=0.3, midi=66, dev=-0.4)
+    notes = [first]
+    take._apply_grid_policy(notes, 0.3)
+    summary.add(first)
+    published = (first.midi, first.dev, first.snap_st)
+    expected_summary = summary.summary()
+    for index in [1, 2]:
+        notes.append(LiveNote(start=index * 0.4, end=index * 0.4 + 0.3, midi=60))
+        take._apply_grid_policy(notes, index * 0.4 + 0.3)
+        assert (first.midi, first.dev, first.snap_st) == published
+        current = LiveIntonation()
+        current.add(first)
+        assert current.summary() == expected_summary
+    assert take.snapped_notes == 1
 
 
 def test_a_clear_live_note_stays_itself(monkeypatch):
@@ -128,12 +164,13 @@ def test_a_clear_live_note_stays_itself(monkeypatch):
     shade, the snap is not a brutal rounding."""
 
     class CleanStream(SnapStream):
-        devs = (0.1,)
+        notes_src = ((64, 0.1),)
 
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
     monkeypatch.setattr(live_session, "LivePitchStream", CleanStream)
     take, events = _run_take(monkeypatch, CleanStream, 6)
     assert take.snapped_notes == 0
+    assert take.segmenter is not None
     assert all(n.midi == 64 for n in take.segmenter.notes)
 
 
@@ -142,7 +179,7 @@ def test_note_closed_publishes_the_snapped_note(monkeypatch):
     displaying it shows the same label as the final JSON."""
 
     class SnapAtCloseStream(SnapStream):
-        devs = (-0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        notes_src = ((60, 0.0), (64, 0.0), (67, 0.0)) * 3 + ((66, 0.35),)
 
     monkeypatch.setattr(live_session, "LiveCapture", FakeCapture)
     monkeypatch.setattr(live_session, "LivePitchStream", SnapAtCloseStream)
@@ -150,10 +187,12 @@ def test_note_closed_publishes_the_snapped_note(monkeypatch):
     take = live_session.LiveTake(on_event=events.append)
     take.start()
     block = np.zeros(512, dtype=np.float32)
-    for _ in range(4):
+    for _ in range(10):
         take._on_block(block, 2.0)
     closed = [e for e in events if e.kind == "note_closed"]
-    assert len(closed) == 4
-    # the first note was ambiguous; by the time its event was published the
-    # snap had already decided (the policy runs BEFORE the emit)
-    assert take.snapped_notes >= 1
+    assert len(closed) == 10
+    # the ambiguous note was decided BEFORE its event: the published note is
+    # the snapped one, carrying both its label and the mistune it measured
+    assert closed[-1].note.midi == 67
+    assert closed[-1].note.snap_st == 1.0
+    assert closed[-1].note.dev == -0.5

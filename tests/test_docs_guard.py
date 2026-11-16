@@ -1,6 +1,6 @@
 """The session rules have TEETH: they are pinned, not hoped for.
 
-Contracts that so far lived only in AGENTS.md:
+Contracts that require automated enforcement:
 
 1. **The repo tracks NO generated artifact** (the .gitignore header:
    "ignore everything that is not a source"). The only versioned JSONs
@@ -15,8 +15,9 @@ Contracts that so far lived only in AGENTS.md:
    fails this test — the doc can no longer rot behind the code.
 
 3. **"No hard-coded FR string in the code"**: every French literal (an
-   accented letter) in `src/v2m` must live in the i18n table or be    canonical vocabulary (figures, sol-fa). A French `RuntimeError("...")`
-   outside `tr()` is exactly the drift the guard refuses.
+   accented letter) in `src/v2m` must live in the i18n table or be canonical
+   vocabulary (figures, sol-fa). A French `RuntimeError("...")` outside `tr()`
+   is exactly the drift the guard refuses.
 
 4. **The same border for French words WITHOUT accents** ('echec',
    'trouve', 'fichier'…): an FR message without an accented letter would
@@ -90,10 +91,17 @@ REPO = Path(__file__).resolve().parent.parent
 # are exempted by design: they are untenable in English.
 FRENCH_LETTERS = set("àâäéèêëîïôöùûüçœÀÂÄÉÈÊËÎÏÔÖÙÛÜÇŒ")
 CANONICAL = (
-    "pointée", "trente-deuxième", "seizième de soupir", "Ré", "Ré#", "Do", "La",
-    "détaché",  # musical vocabulary quoted as a term (AGENTS.md 2026-09-28 rule)
+    "pointée",
+    "trente-deuxième",
+    "seizième de soupir",
+    "Ré",
+    "Ré#",
+    "Do",
+    "La",
+    "détaché",  # musical vocabulary quoted as a term
 )
 CANONICAL_RE = tuple(re.escape(w) + r"\b" for w in CANONICAL)
+
 
 # Guard 7's text test: an accented letter (canonical exempted) OR one of
 # guard 4's unaccented French words — FRENCH_WORD_RE is defined with guard
@@ -109,9 +117,7 @@ def _has_french(text: str) -> bool:
 
 
 def _tracked() -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=True
-    )
+    out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=True)
     return out.stdout.splitlines()
 
 
@@ -131,13 +137,17 @@ def test_meter_docstring_names_its_stages():
     source = (REPO / "src" / "v2m" / "core" / "meter.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     module_doc = ast.get_docstring(tree) or ""
-    detect = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "detect_meter")
+    detect = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "detect_meter"
+    )
 
     # the real stages: the _detect_* functions detect_meter calls
     called = {
         n.func.id
         for n in ast.walk(detect)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id.startswith("_detect")
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id.startswith("_detect")
     }
     assert called, "detect_meter calls no stage? (structure changed?)"
     undocumented = {stage for stage in called if stage not in module_doc}
@@ -213,24 +223,94 @@ def test_no_french_literals_outside_i18n():
 # audited against this corpus: English neighbours ('quiet', 'describe')
 # are not members, and words quoted in French stay out ('chantez', 'une').
 FRENCH_WORDS = (
-    "est", "trouve", "echec", "fichier", "dossier", "introuvable",
-    "indisponible", "delai", "duree", "analyse",
+    "est",
+    "trouve",
+    "echec",
+    "fichier",
+    "dossier",
+    "introuvable",
+    "indisponible",
+    "delai",
+    "duree",
+    "analyse",
     # guard 7's extension: comments/docstrings vocabulary
-    "aucun", "aucune", "aussi", "avait", "borne", "bornes", "chaque",
-    "courbe", "dans", "deja", "depuis", "donc", "ecrit", "entree",
-    "etre", "etait", "faut", "fenetre", "hauteur", "lorsque", "mais",
-    "meme", "parce", "peut", "peuvent", "plusieurs", "pour", "puis",
-    "rafine", "raffine", "repere", "trame", "trames", "tres", "toujours",
-    "toutes", "tous", "verite", "avec", "cette", "ainsi", "alors",
-    "cela", "enfin", "manquant", "doivent", "pendant", "reelle",
-    "reelles", "verifiee", "verifiees", "arret", "separe", "valeur", "vide",
+    "aucun",
+    "aucune",
+    "aussi",
+    "avait",
+    "borne",
+    "bornes",
+    "chaque",
+    "courbe",
+    "dans",
+    "deja",
+    "depuis",
+    "donc",
+    "ecrit",
+    "entree",
+    "etre",
+    "etait",
+    "faut",
+    "fenetre",
+    "hauteur",
+    "lorsque",
+    "mais",
+    "meme",
+    "parce",
+    "peut",
+    "peuvent",
+    "plusieurs",
+    "pour",
+    "puis",
+    "rafine",
+    "raffine",
+    "repere",
+    "trame",
+    "trames",
+    "tres",
+    "toujours",
+    "toutes",
+    "tous",
+    "verite",
+    "avec",
+    "cette",
+    "ainsi",
+    "alors",
+    "cela",
+    "enfin",
+    "manquant",
+    "doivent",
+    "pendant",
+    "reelle",
+    "reelles",
+    "verifiee",
+    "verifiees",
+    "arret",
+    "separe",
+    "valeur",
+    "vide",
 )
 FRENCH_WORD_RE = re.compile(r"\b(" + "|".join(FRENCH_WORDS) + r")\b", re.I)
-ACCENT_FOLD = str.maketrans({
-    "à": "a", "â": "a", "ä": "a", "é": "e", "è": "e", "ê": "e", "ë": "e",
-    "î": "i", "ï": "i", "ô": "o", "ö": "o", "ù": "u", "û": "u", "ü": "u",
-    "ç": "c", "œ": "e",
-})
+ACCENT_FOLD = str.maketrans(
+    {
+        "à": "a",
+        "â": "a",
+        "ä": "a",
+        "é": "e",
+        "è": "e",
+        "ê": "e",
+        "ë": "e",
+        "î": "i",
+        "ï": "i",
+        "ô": "o",
+        "ö": "o",
+        "ù": "u",
+        "û": "u",
+        "ü": "u",
+        "ç": "c",
+        "œ": "e",
+    }
+)
 
 # EXPLICIT exemptions, per (file relative to src/v2m, literal): a legit
 # unaccented FR word in the code declares ITSELF here with its reason.
@@ -254,7 +334,7 @@ def _unaccented_french_hits(rel: str, source: str) -> list[tuple[int, str]]:
 def test_no_unaccented_french_literals_outside_i18n():
     """No unaccented French word outside i18n.py — guard 3 has a tooth 2.
 
-    The exemptions live in EXEMPT_LITERALS with their reason; docstrings
+    Exemptions live in EXEMPT_LITERALS with their reason; docstrings
     (English) and canonical vocabulary stay outside the guard as for
     guard 3. The target is the user MESSAGE that should have gone through
     `tr()` without needing an accent to be noticed.
@@ -264,14 +344,11 @@ def test_no_unaccented_french_literals_outside_i18n():
         if path.name == "i18n.py":
             continue
         rel = path.relative_to(REPO / "src" / "v2m").as_posix()
-        for lineno, text in _unaccented_french_hits(
-            rel, path.read_text(encoding="utf-8")
-        ):
+        for lineno, text in _unaccented_french_hits(rel, path.read_text(encoding="utf-8")):
             offenders.append(f"{path}:{lineno}: {text!r}")
     assert not offenders, (
         "unaccented FR words outside i18n.py — go through tr(), or declare "
-        "the exception in EXEMPT_LITERALS with its reason:\n  "
-        + "\n  ".join(offenders)
+        "the exception in EXEMPT_LITERALS with its reason:\n  " + "\n  ".join(offenders)
     )
 
 
@@ -313,7 +390,8 @@ def test_suite_cost_over_budget_fails_a_green_run(monkeypatch):
     reporter = _StubReporter()
     session = _stub_session(0, reporter)
     monkeypatch.setattr(
-        conftest, "_SUITE_STARTED_AT",
+        conftest,
+        "_SUITE_STARTED_AT",
         time.perf_counter() - conftest.SUITE_BUDGET_S - 1,
     )
     conftest.pytest_sessionfinish(session, exitstatus=0)
@@ -335,7 +413,8 @@ def test_suite_cost_keeps_failure_codes_and_reports_green_runs(monkeypatch):
 
     # over budget but already failing / interrupted: the codes survive
     monkeypatch.setattr(
-        conftest, "_SUITE_STARTED_AT",
+        conftest,
+        "_SUITE_STARTED_AT",
         time.perf_counter() - conftest.SUITE_BUDGET_S - 1,
     )
     for existing in (1, 3):
@@ -347,12 +426,8 @@ def test_suite_cost_keeps_failure_codes_and_reports_green_runs(monkeypatch):
 def test_the_suite_is_independent_of_the_users_language_file():
     """The suite neither reads nor writes the user's real ~/.v2m_lang.
 
-    Observed regression: a manual `--lang en` had flipped the persisted
-    file; `cli.main` without --lang and MainWindow re-call `get_language()`
-    mid-run, the whole process went English and the French tests
-    ("décoder", "Terminé") literals failed depending on the machine's state. The
-    conftest session fixture sandboxes the file AND forces French: the
-    same starting point at every run.
+    The conftest session fixture sandboxes the file and forces French,
+    giving every run the same starting language regardless of user settings.
     """
     from v2m.core import i18n
 
@@ -392,12 +467,32 @@ def _tr_key_offenders(rel: str, source: str, tables: dict) -> list[str]:
     offenders: list[str] = []
     for node in ast.walk(tree):
         if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in names
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
         ):
             continue
         first = node.args[0] if node.args else None
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            if first.value not in tables["fr"] or first.value not in tables["en"]:
+                offenders.append(f"{rel}:{node.lineno}: {first.value!r}")
+    return offenders
+
+
+def _input_status_offenders(rel: str, source: str, tables: dict) -> list[str]:
+    """Literal keys passed to `_set_input_state()` missing from one table.
+
+    The live page names its microphone-status message by KEY and shows it
+    through the indicator's own `set_input_state`, so the tr()-literal guard
+    never sees these four: a missing entry printed the raw key under the
+    device name.
+    """
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "_set_input_state" or not node.args:
+            continue
+        first = node.args[0]
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             if first.value not in tables["fr"] or first.value not in tables["en"]:
                 offenders.append(f"{rel}:{node.lineno}: {first.value!r}")
@@ -450,7 +545,11 @@ def test_french_docstring_guard_bites():
     tmp = Path(tempfile.mkdtemp())
     bad = tmp / "bad.py"
     bad.write_text(
-        'def f():\n    """Renvoie le tempo détecté.\n\n    Retourne None sinon.\n    """\n    return None\n',
+        "def f():\n"
+        '    """Renvoie le tempo détecté.\n\n'
+        "    Retourne None sinon.\n"
+        '    """\n'
+        "    return None\n",
         encoding="utf-8",
     )
     assert _docstring_offenders(bad), "the guard does not bite?"
@@ -468,7 +567,11 @@ def test_french_docstring_guard_bites():
     # canonical vocabulary inside a docstring is exempted (as guard 3)
     ok = tmp / "ok.py"
     ok.write_text(
-        'def f():\n    """Label this duration as a noire pointée.\n\n    Sol-fa names stay canonical: Do, Ré, Mi.\n    """\n    return None\n',
+        "def f():\n"
+        '    """Label this duration as a noire pointée.\n\n'
+        "    Sol-fa names stay canonical: Do, Ré, Mi.\n"
+        '    """\n'
+        "    return None\n",
         encoding="utf-8",
     )
     assert not _docstring_offenders(ok), "canonical vocabulary must pass"
@@ -488,14 +591,37 @@ def test_every_tr_literal_key_exists_in_both_language_tables():
     for base in ("src/v2m", "scripts"):
         for path in sorted((REPO / base).rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
-            offenders += _tr_key_offenders(
-                rel, path.read_text(encoding="utf-8"), i18n.STRINGS
-            )
+            offenders += _tr_key_offenders(rel, path.read_text(encoding="utf-8"), i18n.STRINGS)
     assert not offenders, (
         "tr() keys missing from the fr/en tables — the fallback would render "
-        "the raw key to the user; add the key to BOTH tables:\n  "
-        + "\n  ".join(offenders)
+        "the raw key to the user; add the key to BOTH tables:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_every_input_status_key_exists_in_both_language_tables():
+    """The microphone status shows a TRANSLATED sentence, never a raw key."""
+    from v2m.core import i18n
+
+    offenders: list[str] = []
+    for path in sorted((REPO / "src/v2m/gui").rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        offenders += _input_status_offenders(
+            rel, path.read_text(encoding="utf-8"), i18n.STRINGS
+        )
+    assert not offenders, (
+        "_set_input_state() keys missing from the fr/en tables — the live page "
+        "would print the raw key:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_input_status_key_guard_bites():
+    """The status guard has teeth on a missing key and spares a real one."""
+    from v2m.core import i18n
+
+    bad = 'self._set_input_state("ui mic absent")\n'
+    assert _input_status_offenders("live_page.py", bad, i18n.STRINGS)
+    ok = 'self._set_input_state("ui mic waiting")\n'
+    assert not _input_status_offenders("live_page.py", ok, i18n.STRINGS)
 
 
 def test_tr_key_guard_bites():
@@ -512,7 +638,7 @@ def test_tr_key_guard_bites():
     one_sided = {"fr": {"key tempo": "Tempo"}, "en": {}}
     assert _tr_key_offenders("cli.py", half, one_sided)
     # a dynamic argument is not checked (the runtime fallback's contract)
-    dyn = 'from v2m.core.i18n import tr\nmsg = tr(key)\n'
+    dyn = "from v2m.core.i18n import tr\nmsg = tr(key)\n"
     assert not _tr_key_offenders("cli.py", dyn, i18n.STRINGS)
     # the import alias is followed ('import tr as _tr' of the smoke test)
     aliased = 'from v2m.core.i18n import tr as _tr\nmsg = _tr("err missing key")\n'
@@ -585,11 +711,7 @@ def _subprocess_launches(source: str) -> list[tuple[int, str]]:
             continue
         argv = node.args[0] if node.args else None
         first = argv.elts[0] if isinstance(argv, ast.List) and argv.elts else None
-        second = (
-            argv.elts[1]
-            if isinstance(argv, ast.List) and len(argv.elts) > 1
-            else None
-        )
+        second = argv.elts[1] if isinstance(argv, ast.List) and len(argv.elts) > 1 else None
         if isinstance(first, ast.Constant) and first.value == "git":
             launches.append((node.lineno, "git"))
         elif (
@@ -619,9 +741,7 @@ def _i18n_touches(path: Path) -> bool:
         if alias.name in {"get_language", "set_language", "toggle_language"}
     }
     return any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in names
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
         for node in ast.walk(tree)
     )
 
@@ -786,7 +906,7 @@ def test_every_production_subprocess_site_is_audited():
         for path in sorted(base.rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
             # strip the src/v2m prefix (scripts/ paths stay whole)
-            key = rel[len("src/v2m/"):] if rel.startswith("src/v2m/") else rel
+            key = rel[len("src/v2m/") :] if rel.startswith("src/v2m/") else rel
             launches = _production_launches(path)
             if not launches:
                 continue
@@ -804,9 +924,7 @@ def test_every_production_subprocess_site_is_audited():
                         f"{rel}:{lineno}: boots {actual!r} but is whitelisted "
                         f"as {kind!r} — re-audit and update PRODUCTION_WHITELIST"
                     )
-    assert not offenders, (
-        "an unaudited PRODUCTION subprocess:\n  " + "\n  ".join(offenders)
-    )
+    assert not offenders, "an unaudited PRODUCTION subprocess:\n  " + "\n  ".join(offenders)
 
 
 def test_production_subprocess_guard_bites():
@@ -823,10 +941,12 @@ def test_production_subprocess_guard_bites():
     tmp = Path(tempfile.mkdtemp())
     probe = tmp / "probe.py"
     probe.write_text(interpreter_probe, encoding="utf-8")
-    assert _production_launches(probe) == [(
-        4,
-        "unreviewed (not a constant external command)",
-    )]
+    assert _production_launches(probe) == [
+        (
+            4,
+            "unreviewed (not a constant external command)",
+        )
+    ]
     # a stranger module with an external-tool launch is refused until whitelisted
     stranger = tmp / "stranger.py"
     stranger.write_text(
@@ -849,15 +969,15 @@ def test_production_subprocess_guard_bites():
     # VARIABLE as list head is fine — pdf_export's shape — a shell string is not)
     dynamic = tmp / "dynamic.py"
     dynamic.write_text(
-        "import subprocess\n"
-        "def go(args):\n"
-        "    subprocess.run(args)\n",
+        "import subprocess\ndef go(args):\n    subprocess.run(args)\n",
         encoding="utf-8",
     )
-    assert _production_launches(dynamic) == [(
-        3,
-        "unreviewed (not a constant external command)",
-    )]
+    assert _production_launches(dynamic) == [
+        (
+            3,
+            "unreviewed (not a constant external command)",
+        )
+    ]
     # the REAL files stay clean: pdf_export classifies as whitelisted kind
     real = _production_launches(REPO / "src" / "v2m" / "core" / "pdf_export.py")
     assert real and all(kind == "external-tool" for _, kind in real)
@@ -876,9 +996,8 @@ def test_production_subprocess_guard_bites():
             path.name, _subprocess_launches(path.read_text(encoding="utf-8")), scripts_dir
         )
     offenders += _whitelist_claim_offenders()
-    assert not offenders, (
-        "an unaudited subprocess (the ~/.v2m_lang hazard):\n  "
-        + "\n  ".join(offenders)
+    assert not offenders, "an unaudited subprocess (the ~/.v2m_lang hazard):\n  " + "\n  ".join(
+        offenders
     )
 
 
@@ -906,9 +1025,7 @@ def test_subprocess_guard_bites():
         "test_x.py", [(9, "script:toucher.py")], tmp, fake_script_whitelist
     )
     clean = tmp / "clean.py"
-    clean.write_text(
-        "from v2m.core.i18n import tr\nprint(tr('key tempo'))\n", encoding="utf-8"
-    )
+    clean.write_text("from v2m.core.i18n import tr\nprint(tr('key tempo'))\n", encoding="utf-8")
     assert not _i18n_touches(clean)
     assert not _subprocess_offenders_for(
         "test_x.py", [(9, "script:clean.py")], tmp, fake_script_whitelist
@@ -1001,9 +1118,7 @@ def test_widgets_are_built_where_their_screen_is_owned():
                 "move it into a Page module (gui/*_page.py) or whitelist "
                 "the module in WIDGET_OWNERS with its reason"
             )
-    assert not offenders, (
-        "a widget constructed outside its owner:\n  " + "\n  ".join(offenders)
-    )
+    assert not offenders, "a widget constructed outside its owner:\n  " + "\n  ".join(offenders)
 
 
 def test_widget_guard_bites():
@@ -1011,17 +1126,14 @@ def test_widget_guard_bites():
     # a bare Q-construction in an unowned module is flagged, with its line
     helper = Path(tempfile.mkdtemp()) / "helper.py"
     helper.write_text(
-        "from PyQt6.QtWidgets import QLabel\n"
-        "def badge():\n"
-        "    return QLabel('boom')\n",
+        "from PyQt6.QtWidgets import QLabel\ndef badge():\n    return QLabel('boom')\n",
         encoding="utf-8",
     )
     assert _widget_constructions(helper) == [(3, "unowned")]
     # pyqtgraph items count too (dotted callee)
     plotter = Path(tempfile.mkdtemp()) / "plotter.py"
     plotter.write_text(
-        "import pyqtgraph as pg\n"
-        "w = pg.PlotWidget()\n",
+        "import pyqtgraph as pg\nw = pg.PlotWidget()\n",
         encoding="utf-8",
     )
     assert _widget_constructions(plotter) == [(2, "unowned")]

@@ -14,7 +14,10 @@ divergence fails the test — conscious re-freeze via
 `rm <name>.fingerprint.json` after reading the diff, like the golden
 fingerprints of `chant.wav`/`demo.wav`.
 
-Missing takes (empty folder, cloned repo): the test skips.
+Missing takes (empty folder, cloned repo): the test skips. A take whose
+truth is still a `--annotate` DRAFT also skips, and says so by name: the
+draft waits for the ear without freezing a machine reading as the net's
+reference, and without turning the suite red while the human listens.
 """
 
 from __future__ import annotations
@@ -38,9 +41,7 @@ def _fingerprint(res) -> dict:
     """A take's compared landmark: note count + their fingerprint."""
     return {
         "n_notes": len(res.notes),
-        "notes": [
-            [round(n.start, 2), round(n.end, 2), n.midi] for n in res.notes
-        ],
+        "notes": [[round(n.start, 2), round(n.end, 2), n.midi] for n in res.notes],
     }
 
 
@@ -52,9 +53,67 @@ def _corpus() -> list[Path]:
     )
 
 
+def _draft_reason(path: Path) -> str | None:
+    """Why this truth is still a draft (None when a human checked it).
+
+    `guide_capture.py --annotate` writes the engine's own reading as a
+    skeleton for the human to correct, and marks it `checked_by: "machine"`.
+    A draft silently entering the corpus would freeze a machine reading as
+    the net's reference — the exact opposite of what this folder is for.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("checked_by") == "humain":
+        return None
+    return (
+        f"{path.name}: checked_by={data.get('checked_by')!r} — a draft is not a truth "
+        '(check the notes by ear, then set checked_by to "humain")'
+    )
+
+
+def _verified_truth(path: Path) -> dict:
+    """A take's EAR-CHECKED truth; a machine draft is refused."""
+    reason = _draft_reason(path)
+    if reason is not None:
+        raise ValueError(reason)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_the_corpus_folder_documents_its_format():
     """The folder exists in the repo with its README committing to the format."""
     assert (TRUTH_DIR / "README.md").exists()
+
+
+def test_a_machine_draft_is_not_a_truth(tmp_path: Path):
+    """The --annotate draft must never pass as the corpus' reference."""
+    p = tmp_path / "ma_prise.truth.json"
+    p.write_text(
+        json.dumps({"audio": "ma_prise.wav", "checked_by": "machine", "notes": []}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="a draft is not a truth"):
+        _verified_truth(p)
+    # ...and a checked file goes through (the refusal is not a blanket one)
+    p.write_text(
+        json.dumps({"audio": "ma_prise.wav", "checked_by": "humain", "notes": []}),
+        encoding="utf-8",
+    )
+    assert _verified_truth(p)["checked_by"] == "humain"
+
+
+def test_a_machine_draft_waits_for_the_ear_without_freezing(tmp_path: Path):
+    """A draft must not red the suite, nor ever become the reference."""
+    p = tmp_path / "attente.truth.json"
+    p.write_text(
+        json.dumps({"audio": "attente.wav", "checked_by": "machine", "notes": []}),
+        encoding="utf-8",
+    )
+    reason = _draft_reason(p)
+    assert reason is not None and "machine" in reason
+    p.write_text(
+        json.dumps({"audio": "attente.wav", "checked_by": "humain", "notes": []}),
+        encoding="utf-8",
+    )
+    assert _draft_reason(p) is None
 
 
 @pytest.mark.parametrize("audio", _corpus(), ids=lambda p: p.stem)
@@ -68,17 +127,18 @@ def test_each_verified_take_does_not_drift(audio: Path):
     truth_path = audio.with_name(audio.stem + ".truth.json")
     fp_path = audio.with_name(audio.stem + ".fingerprint.json")
 
-    truth = json.loads(truth_path.read_text(encoding="utf-8"))
-    res = analyze_signal(audio_io.load_file(str(audio)), audio_io.SR,
-                         source=str(audio))
+    draft = _draft_reason(truth_path)
+    if draft is not None:
+        pytest.skip(f"waiting for an ear: {draft}")
+    truth = _verified_truth(truth_path)
+    res = analyze_signal(audio_io.load_file(str(audio)), audio_io.SR, source=str(audio))
     fp = _fingerprint(res)
 
     # accuracy is REPORTED (the test harness, like score_accuracy),
     # never demanded here: the fingerprint judges drift
     from voicetruth import SungNote, measure
 
-    sung = [SungNote(n["midi"], n["start"], n["end"] - n["start"])
-            for n in truth["notes"]]
+    sung = [SungNote(n["midi"], n["start"], n["end"] - n["start"]) for n in truth["notes"]]
     acc = measure(res.notes, sung, tol_s=0.15)
     print(f"\n{audio.name}: {acc.line()}")
 

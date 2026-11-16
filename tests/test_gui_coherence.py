@@ -146,7 +146,7 @@ def test_home_page_button_aggregates_the_sessions(qapp, monkeypatch, tmp_path):
     try:
         win.stack.setCurrentWidget(win.page_home)
         win.on_show_coherence()
-        # QStackedWidget subtlety (AGENTS.md): a child of the CURRENT page
+        # A child of the CURRENT page
         # still reports isVisible()==False on the offscreen platform; the
         # explicit setVisible state is `isHidden()`
         assert not win.page_home.coherence_text.isHidden()

@@ -4,8 +4,8 @@ Replaying a take through the REAL chain has ONE owner: `replay_take`
 (the CLI script and the GUI worker are adapters). This test pins the
 measured rules:
 
-1. **1x real time**: delivering faster lies (7 notes instead of 24 on
-   take 140425) — the fake stream sleeps between two blocks;
+1. **1x real time**: the injected stream sleeps between blocks so the
+   live recognizer receives the take at capture speed;
 2. **injection, not a global patch**: the stream is passed as a
    parameter — a GUI replay NEVER replaces `audio_io.sd` (the real mic
    is read through it);
@@ -66,6 +66,7 @@ def test_replay_feeds_the_real_chain_in_real_time(tmp_path):
     wav = _save_sung_wav(tmp_path)
     y = audio_io.load_file(str(wav), sr=44_100)
     feed = _fake_input_stream(y, 44_100)
+    started_at = time.monotonic()
 
     class TimedFake:
         def __init__(self, samplerate, channels, blocksize, callback, **kwargs):
@@ -82,6 +83,11 @@ def test_replay_feeds_the_real_chain_in_real_time(tmp_path):
             self._stream.close()
 
     row = replay_take(wav, stream_factory=TimedFake)
+    elapsed = time.monotonic() - started_at
+    duration = y.shape[0] / 44_100
+    assert elapsed >= duration * 0.8, (
+        f"the replay delivered {duration:.1f} s in {elapsed:.1f} s : too fast to be honest"
+    )
     # the injected factory opened the stream at the MIC's rate and block
     assert opened == [{"samplerate": 44_100, "blocksize": 1024}]
     # the audit row carries the ONE policy's decomposition
@@ -92,27 +98,21 @@ def test_replay_feeds_the_real_chain_in_real_time(tmp_path):
     # the row carries the SCRIPT TABLE vocabulary; the block vocabulary
     # (`live`/`final`) is the sidecar's, written by the worker test below
     assert {
-        "stem", "duration_s", "live_notes", "final_notes", "contours",
-        "off1", "moved", "absorbed", "rate", "tempo_bpm", "dropped",
+        "stem",
+        "duration_s",
+        "live_notes",
+        "final_notes",
+        "contours",
+        "off1",
+        "moved",
+        "absorbed",
+        "rate",
+        "tempo_bpm",
+        "dropped",
         "drain_min",
     } <= set(row)
     assert isinstance(row["dropped"], int) and row["dropped"] >= 0
     assert 0.0 <= row["drain_min"] <= 1.0
-
-
-@pytest.mark.slow  # real-time delivery IS the assertion: it costs the duration
-def test_replay_is_never_faster_than_the_take(tmp_path, monkeypatch):
-    """Delivering 1.9 s of audio costs ~1.9 s: the real clock IS the measure."""
-    monkeypatch.setattr(audio_io, "sd", __import__("types").SimpleNamespace(InputStream=FakeMic))
-    wav = _save_sung_wav(tmp_path)
-    y = audio_io.load_file(str(wav), sr=44_100)
-    t0 = time.monotonic()
-    replay_take(wav, stream_factory=_fake_input_stream(y, 44_100))
-    elapsed = time.monotonic() - t0
-    duration = y.shape[0] / 44_100
-    assert elapsed >= duration * 0.8, (
-        f"the replay delivered {duration:.1f} s in {elapsed:.1f} s : too fast to be honest"
-    )
 
 
 @pytest.mark.slow  # a full real-time replay on the worker's thread
@@ -164,15 +164,141 @@ def test_a_cancelled_worker_archives_nothing(qapp, tmp_path, monkeypatch):
     assert not Path(str(stem) + ".live_vs_final.json").exists()
 
 
-def test_a_worker_without_wav_stays_silent(qapp, tmp_path):
-    """No WAV (audio box unticked): the worker does nothing, without an error."""
-    from v2m.gui.replay_worker import ReplayWorker
+@pytest.mark.slow
+def test_replay_reuses_valid_cache_without_pyin(tmp_path, monkeypatch):
+    from v2m.core import pipeline
+    from v2m.core.observation import VoiceObservation
+    from v2m.core.pipeline import LIVE_CONF
 
-    worker = ReplayWorker(tmp_path / "live_20260927_120000")
-    rows: list[dict] = []
-    errors: list[str] = []
-    worker.done.connect(rows.append)
-    worker.failed.connect(errors.append)
-    worker.start()
-    worker.wait(5_000)
-    assert not rows and not errors
+    wav = _save_sung_wav(tmp_path)
+    signal = audio_io.load_file(str(wav))
+    obs = VoiceObservation.from_signal(signal, audio_io.SR, min_conf=LIVE_CONF)
+    obs.source_size = wav.stat().st_size
+    obs.source_mtime = wav.stat().st_mtime
+    obs.save(wav.with_suffix(".observation.npz"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a valid replay cache must avoid pYIN")
+
+    measured_durations = []
+    real_detect_tempo = pipeline.detect_tempo
+
+    def detect_tempo(y, sr):
+        assert sr == audio_io.SR
+        measured_durations.append(len(y) / sr)
+        return real_detect_tempo(y, sr)
+
+    monkeypatch.setattr(VoiceObservation, "from_signal", forbidden)
+    monkeypatch.setattr(pipeline, "detect_tempo", detect_tempo)
+    row = replay_take(wav)
+    assert row["final_notes"] >= 3
+    assert measured_durations == pytest.approx([len(signal) / audio_io.SR], abs=0.001)
+
+
+@pytest.mark.slow
+def test_replay_counts_the_note_closed_at_stop(tmp_path, monkeypatch):
+    import soundfile as sf
+
+    from v2m.core import replay
+
+    sr = replay.REPLAY_SR
+    signal = (0.3 * np.sin(2 * np.pi * 330 * np.arange(sr) / sr)).astype(np.float32)
+    wav = tmp_path / "held.wav"
+    sf.write(wav, signal, sr)
+    # The live count must include the flush independently of offline analysis.
+    monkeypatch.setattr(replay, "_final_reading", lambda *args: None)
+    row = replay_take(wav)
+    assert row["live_notes"] == 1
+
+
+def test_replay_delivers_every_sample_before_stopping(tmp_path, monkeypatch):
+    from v2m.core import replay
+    from v2m.core.live_session import LiveTake
+
+    n_samples = replay.REPLAY_SR + 17
+    signal = np.linspace(-0.1, 0.1, n_samples, dtype=np.float32)
+    monkeypatch.setattr(audio_io, "load_file", lambda *args, **kwargs: signal)
+    monkeypatch.setattr(replay, "_final_reading", lambda *args: None)
+    delivered = []
+    real_stop = LiveTake.stop
+
+    def observed_stop(self):
+        assert self.capture is not None
+        delivered.append(sum(len(chunk) for chunk in self.capture.chunks))
+        return real_stop(self)
+
+    monkeypatch.setattr(LiveTake, "stop", observed_stop)
+    # Remove wall-clock waits while exercising the actual stream callbacks.
+    monkeypatch.setattr(replay.time, "sleep", lambda _: None)
+    replay_take(tmp_path / "tail.wav")
+    assert delivered == [n_samples]
+
+
+def test_cancelled_replay_stops_without_final_analysis(tmp_path, monkeypatch):
+    from v2m.core import replay
+
+    wav = _save_sung_wav(tmp_path)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a cancelled replay must not finalize")
+
+    monkeypatch.setattr(replay, "_final_reading", forbidden)
+    assert replay_take(wav, stop=lambda: True) == {}
+
+
+@pytest.mark.parametrize("ending", ["complete", "cancel", "timeout"])
+def test_replay_waits_for_the_last_blocks_and_always_stops(tmp_path, monkeypatch, ending):
+    from types import SimpleNamespace
+
+    from v2m.core import live_session, replay
+
+    clock = [0.0]
+    capture = SimpleNamespace(
+        state="recording",
+        elapsed=0.0,
+        segmenter=SimpleNamespace(notes=[]),
+        dropped_blocks=0,
+        drain_min=1.0,
+    )
+    stopped = []
+    analysis_signals = []
+    signal = np.zeros(replay.REPLAY_SR, dtype=np.float32)
+    final_signal = np.zeros(audio_io.SR, dtype=np.float32)
+    last_note = SimpleNamespace(start=0.98, end=1.0, midi=64)
+
+    def advance(_):
+        clock[0] += 31.0 if ending == "timeout" else 0.01
+        capture.elapsed = min(1.0, capture.elapsed + 0.01)
+
+    def stop_capture():
+        stopped.append(capture.elapsed)
+        if capture.elapsed >= 1.0:
+            capture.segmenter.notes.append(last_note)
+        return final_signal
+
+    capture.start = lambda: None
+    capture.stop = stop_capture
+    monkeypatch.setattr(live_session, "LiveTake", lambda **kwargs: capture)
+    monkeypatch.setattr(audio_io, "load_file", lambda *args, **kwargs: signal)
+    monkeypatch.setattr(replay.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(replay.time, "sleep", advance)
+    monkeypatch.setattr(replay, "_final_reading", lambda take, path, y: analysis_signals.append(y))
+
+    def cancel():
+        return ending == "cancel" and capture.elapsed >= 0.5
+
+    if ending == "timeout":
+        with pytest.raises(TimeoutError, match="delivery"):
+            replay_take(tmp_path / "tail.wav", stream_factory=lambda: None, stop=cancel)
+        assert not analysis_signals
+    else:
+        row = replay_take(tmp_path / "tail.wav", stream_factory=lambda: None, stop=cancel)
+        if ending == "cancel":
+            assert row == {}
+            assert not analysis_signals
+        else:
+            assert row["live_notes"] == 1
+            assert stopped == [1.0]
+            assert len(analysis_signals) == 1
+            assert analysis_signals[0] is final_signal
+    assert len(stopped) == 1

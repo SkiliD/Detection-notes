@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .audio_io import GATE_RMS
 from .figures import classify_duration
 from .grid import BeatGrid
 from .observation import VoiceObservation
@@ -40,14 +41,15 @@ from .observation import VoiceObservation
 # stay under ~70 ms.
 MIN_REST_S = 0.070
 
+
 @dataclass
 class Rest:
     """A written silence: a gap between two sung notes."""
 
-    start: float                  # seconds
-    end: float                    # seconds
-    figure: str | None = None     # canonical French rest name when classifiable
-    breath: bool = False          # an air intake was HEARD inside the gap
+    start: float  # seconds
+    end: float  # seconds
+    figure: str | None = None  # canonical French rest name when classifiable
+    breath: bool = False  # an air intake was HEARD inside the gap
 
     @property
     def duration(self) -> float:
@@ -103,8 +105,8 @@ def detect_breaths(
         return
     env = np.asarray(accent_envelope, dtype=float)
     floor = float(np.percentile(env, 10))
-    if floor <= 0:
-        return  # a fully silent take has nothing to hear in any gap
+    # A zero background still permits an audible bump; numerical ripples do not.
+    minimum_peak = BREATH_PEAK_RATIO * floor if floor > 0 else GATE_RMS
     for r in rests:
         i0 = max(0, int(r.start / accent_hop_s))
         i1 = min(len(env), max(i0 + 1, int(np.ceil(r.end / accent_hop_s))))
@@ -113,10 +115,7 @@ def detect_breaths(
             continue
         peak = float(body.max())
         typical = float(np.median(body))
-        r.breath = (
-            peak >= BREATH_PEAK_RATIO * floor
-            and peak >= BREATH_SHAPE_RATIO * max(typical, 1e-9)
-        )
+        r.breath = peak >= minimum_peak and peak >= BREATH_SHAPE_RATIO * max(typical, 1e-9)
 
 
 def detect_rests(

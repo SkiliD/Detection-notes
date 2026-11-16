@@ -52,9 +52,14 @@ SESSION_GAP_S = 30 * 60
 # Per-take CSV columns (superset of what continuity wrote before: the
 # plateau now carries its time and its signed interval).
 CSV_HEADER = (
-    "start_s", "duration_s", "midi", "inner_range_st",
-    "secondary_plateau_s", "secondary_plateau_start_s",
-    "secondary_plateau_midi", "secondary_plateau_offset_st",
+    "start_s",
+    "duration_s",
+    "midi",
+    "inner_range_st",
+    "secondary_plateau_s",
+    "secondary_plateau_start_s",
+    "secondary_plateau_midi",
+    "secondary_plateau_offset_st",
 )
 
 # The real-time health REGRESSION threshold, in contour-rate POINTS between
@@ -71,7 +76,7 @@ class TakeAudit:
     stem: str
     date: str
     clock: str
-    epoch_s: float          # the take's timestamp, for the gap rule
+    epoch_s: float  # the take's timestamp, for the gap rule
     suspects: list[dict] = field(default_factory=list)
     checked: int | None = None
     verify_ok: bool | None = None  # None: nothing to verify (no artifacts)
@@ -82,6 +87,7 @@ class TakeAudit:
     # before the block existed — the column shows "-", it never guesses.
     contour_rate: float | None = None
     live_notes: int | None = None
+    final_notes: int | None = None
 
     @property
     def rate_per_100(self) -> float | None:
@@ -103,7 +109,6 @@ class EvidenceSnapshot:
     health_weeks: list[dict]
     regression: dict | None
     journal: dict
-
 
 
 def build_snapshot(root: Path) -> EvidenceSnapshot:
@@ -186,6 +191,7 @@ def load_take(csv_path: Path) -> TakeAudit:
     checked: int | None = None
     contour_rate: float | None = None
     live_notes: int | None = None
+    final_notes: int | None = None
     # ONE source per take, never a mix of two readings: the REPLAYED
     # sidecar wins (fresh, engine-tagged, replaced by the cross-check);
     # the export-time block in the report fills the gap — a trend point
@@ -205,10 +211,11 @@ def load_take(csv_path: Path) -> TakeAudit:
         except (OSError, ValueError):
             checked = None  # an unreadable JSON must not cost the table
     if parsed is not None:
-        if parsed.rate is not None:
-            contour_rate = parsed.rate
+        contour_rate = parsed.comparable_rate
         if parsed.live is not None:
             live_notes = parsed.live
+        if parsed.final is not None:
+            final_notes = parsed.final
     # no sidecar, no report block: the trend simply waits for a replay
     ok, lines = verify_take(csv_path.with_name(stem))
     # the NOTHING-ON-DISK case (`verify_none` is its only line): nothing was
@@ -225,6 +232,7 @@ def load_take(csv_path: Path) -> TakeAudit:
         verify_lines=lines if not (ok and verified) else [],
         contour_rate=contour_rate,
         live_notes=live_notes,
+        final_notes=final_notes,
     )
 
 
@@ -324,14 +332,9 @@ def _session_row(group: list[TakeAudit], prev: list[TakeAudit]) -> dict:
             if prev_total
             else (0.0 if prev_total == 0 else None)
         )
-    deltas = (
-        None
-        if rate is None or prev_rate is None
-        else round(rate - prev_rate, 2)
-    )
+    deltas = None if rate is None or prev_rate is None else round(rate - prev_rate, 2)
     plateaus = [
-        s["secondary_plateau_s"] for s in suspects
-        if s.get("secondary_plateau_s") is not None
+        s["secondary_plateau_s"] for s in suspects if s.get("secondary_plateau_s") is not None
     ]
     return {
         "label": f"{group[0].date} {group[0].clock}",
@@ -342,9 +345,7 @@ def _session_row(group: list[TakeAudit], prev: list[TakeAudit]) -> dict:
         "rate_per_100": rate,
         "contour_rate": contour,
         "delta_vs_prev": deltas,
-        "plateau_mean_s": (
-            round(sum(plateaus) / len(plateaus), 2) if plateaus else 0.0
-        ),
+        "plateau_mean_s": (round(sum(plateaus) / len(plateaus), 2) if plateaus else 0.0),
         "plateau_max_s": max(plateaus) if plateaus else 0.0,
         "verify_bad": sum(1 for t in group if t.verify_ok is False),
         "takes_list": list(group),
@@ -385,9 +386,7 @@ def day_rows(session_rows_list: list[dict], takes: list[TakeAudit]) -> list[dict
                 "checked": total,
                 "suspects": suspects,
                 "rate_per_100": (
-                    round(100.0 * suspects / total, 2)
-                    if total
-                    else (0.0 if total == 0 else None)
+                    round(100.0 * suspects / total, 2) if total else (0.0 if total == 0 else None)
                 ),
             }
         )
@@ -420,8 +419,11 @@ def update_journal(root: Path, takes: list[TakeAudit]) -> dict:
     point). Each entry also carries the take's live/final CONTOUR RATE
     when its JSON published a `live_vs_final` block: the multi-week
     real-time health trend reads HERE, from the journal, even after the
-    take's folder has been cleaned up. Best-effort: a read-only folder
-    keeps the in-memory merge.
+    take's folder has been cleaned up. Note counts are copied from the
+    same block exactly; a rate cannot reconstruct either count. New final
+    counts carry their source, so old rate-derived journal values remain
+    unknown instead of being presented as exact history. Best-effort: a
+    read-only folder keeps the in-memory merge.
     """
     data = read_journal(root)
     for t in takes:
@@ -435,11 +437,8 @@ def update_journal(root: Path, takes: list[TakeAudit]) -> dict:
             "verify_ok": t.verify_ok,
             "contour_rate": t.contour_rate,
             "live_notes": t.live_notes,
-            "final_notes": (
-                int(round(t.live_notes / t.contour_rate))
-                if t.live_notes and t.contour_rate
-                else None
-            ),
+            "final_notes": t.final_notes,
+            "final_notes_source": "live_vs_final" if t.final_notes is not None else None,
         }
     try:
         journal_path(root).write_text(
@@ -473,6 +472,23 @@ def contour_trend(root: Path) -> list[dict]:
     return contour_trend_entries(read_journal(root))
 
 
+def _sum_known_counts(entries: list[dict], key: str) -> int | None:
+    """Sum a weekly count only when every entry has a trusted exact value.
+
+    Old journals persisted a rate-derived final count without provenance;
+    treating that as exact would keep the false total alive after this fix.
+    """
+    values: list[int] = []
+    for entry in entries:
+        value = entry.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        if key == "final_notes" and entry.get("final_notes_source") != "live_vs_final":
+            return None
+        values.append(value)
+    return sum(values)
+
+
 def contour_trend_entries(data: dict) -> list[dict]:
     """Build the weekly trend from an already-read journal snapshot.
 
@@ -481,7 +497,14 @@ def contour_trend_entries(data: dict) -> list[dict]:
     """
     weeks: dict[str, list[dict]] = {}
     for stem, entry in data.items():
-        if not isinstance(entry, dict) or entry.get("contour_rate") is None:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("contour_rate") is None and not (
+            entry.get("live_notes") == 0
+            or (
+                entry.get("final_notes_source") == "live_vs_final" and entry.get("final_notes") == 0
+            )
+        ):
             continue
         weeks.setdefault(
             _week_key(entry),
@@ -490,20 +513,32 @@ def contour_trend_entries(data: dict) -> list[dict]:
     out = []
     for week in sorted(k for k in weeks if k != "?"):
         entries = weeks[week]
-        rates = [e["contour_rate"] for e in entries]
+        rates = []
+        for entry in entries:
+            parsed = read_block(
+                {
+                    "live": entry.get("live_notes"),
+                    "final": entry.get("final_notes")
+                    if entry.get("final_notes_source") == "live_vs_final"
+                    else None,
+                    "rate": entry.get("contour_rate"),
+                }
+            )
+            if parsed is not None and parsed.comparable_rate is not None:
+                rates.append(parsed.comparable_rate)
+        if not rates:
+            continue
         out.append(
             {
                 "week": week,
                 "takes": len(entries),
                 "contour_rate": round(sum(rates) / len(rates), 3),
-                "live_notes": sum(int(e.get("live_notes") or 0) for e in entries),
-                "final_notes": sum(int(e.get("final_notes") or 0) for e in entries),
+                "live_notes": _sum_known_counts(entries, "live_notes"),
+                "final_notes": _sum_known_counts(entries, "final_notes"),
                 # the week's OWN takes (chronological): the health chart's
                 # click-through hands them to the session table — the drill-
                 # down reads the SAME journal, it never re-reads the folder
-                "stems": sorted(
-                    e.get("stem", "") for e in entries if e.get("stem")
-                ),
+                "stems": sorted(e.get("stem", "") for e in entries if e.get("stem")),
             }
         )
     return out
@@ -600,9 +635,7 @@ def practice_time_report(takes: list[TakeAudit]) -> list[dict]:
                 "window": name,
                 "takes": len(group),
                 "suspect_rate": round(sum(rates) / len(rates), 2) if rates else None,
-                "contour_rate": (
-                    round(sum(contours) / len(contours), 3) if contours else None
-                ),
+                "contour_rate": (round(sum(contours) / len(contours), 3) if contours else None),
             }
         )
     return out
@@ -611,6 +644,7 @@ def practice_time_report(takes: list[TakeAudit]) -> list[dict]:
 # --------------------------------------------------------------------- #
 # The retention: `prises_live/` is the singer's disk, not an archive
 # --------------------------------------------------------------------- #
+
 
 def sparkline(values, width: int = 10) -> str:
     """The one-line trend of a numeric series: ▁▂▃▅▆▇, left = oldest.
@@ -680,14 +714,8 @@ def render(
     for r in rows:
         checked = f"{r['checked']}" if r["checked"] is not None else "-"
         rate = f"{r['rate_per_100']:.2f}" if r["rate_per_100"] is not None else "-"
-        delta = (
-            f"{r['delta_vs_prev']:+.2f}"
-            if r["delta_vs_prev"] is not None
-            else "-"
-        )
-        contours = (
-            f"{r['contour_rate']*100:.0f}%" if r["contour_rate"] is not None else "-"
-        )
+        delta = f"{r['delta_vs_prev']:+.2f}" if r["delta_vs_prev"] is not None else "-"
+        contours = f"{r['contour_rate'] * 100:.0f}%" if r["contour_rate"] is not None else "-"
         bad = f"{r['verify_bad']}" if r["verify_bad"] else "ok"
         out.write(
             f"{r['label']:<16}{r['takes']:>7}{checked:>12}{r['suspects']:>10}"
@@ -702,8 +730,12 @@ def render(
         rate = f"{d['rate_per_100']:.2f}" if d["rate_per_100"] is not None else "-"
         out.write(
             tr("coh day row").format(
-                date=d["date"], sessions=d["sessions"], takes=d["takes"],
-                checked=checked, suspects=d["suspects"], rate=rate,
+                date=d["date"],
+                sessions=d["sessions"],
+                takes=d["takes"],
+                checked=checked,
+                suspects=d["suspects"],
+                rate=rate,
             )
             + "\n"
         )
@@ -713,19 +745,13 @@ def render(
         rate = f"{t.rate_per_100:.2f}" if t.rate_per_100 is not None else "-"
         if t.verify_ok is False:
             out.write(
-                tr("coh take divergent").format(
-                    stem=t.stem, checked=checked, rate=rate
-                )
-                + "\n"
+                tr("coh take divergent").format(stem=t.stem, checked=checked, rate=rate) + "\n"
             )
             for line in t.verify_lines:
                 out.write(f"      {line}\n")
             continue
         if not t.suspects:
-            out.write(
-                tr("coh take clean").format(stem=t.stem, checked=checked)
-                + "\n"
-            )
+            out.write(tr("coh take clean").format(stem=t.stem, checked=checked) + "\n")
             continue
         out.write(
             tr("coh take suspects").format(
@@ -802,14 +828,8 @@ def session_table_text(
     for i, r in enumerate(rows):
         checked = f"{r['checked']}" if r["checked"] is not None else "-"
         rate = f"{r['rate_per_100']:.2f}" if r["rate_per_100"] is not None else "-"
-        delta = (
-            f"{r['delta_vs_prev']:+.2f}"
-            if r["delta_vs_prev"] is not None
-            else "-"
-        )
-        contours = (
-            f"{r['contour_rate']*100:.0f}%" if r["contour_rate"] is not None else "-"
-        )
+        delta = f"{r['delta_vs_prev']:+.2f}" if r["delta_vs_prev"] is not None else "-"
+        contours = f"{r['contour_rate'] * 100:.0f}%" if r["contour_rate"] is not None else "-"
         trend = sparkline(
             [x["rate_per_100"] for x in rows[: i + 1] if x["rate_per_100"] is not None],
             width=12,
@@ -827,16 +847,15 @@ def session_table_text(
         selected_weeks = []
     if selected_weeks:
         out.write("\n" + tr("coh weeks title") + "\n")
-        out.write(
-            sparkline([w["contour_rate"] for w in selected_weeks], width=16)
-            + "\n"
-        )
+        out.write(sparkline([w["contour_rate"] for w in selected_weeks], width=16) + "\n")
         for w in selected_weeks:
             out.write(
                 tr("coh week row").format(
-                    week=w["week"], takes=w["takes"],
-                    rate=f"{w['contour_rate']*100:.0f}%",
-                    live=w["live_notes"], final=w["final_notes"],
+                    week=w["week"],
+                    takes=w["takes"],
+                    rate=f"{w['contour_rate'] * 100:.0f}%",
+                    live=w["live_notes"] if w["live_notes"] is not None else "-",
+                    final=w["final_notes"] if w["final_notes"] is not None else "-",
                 )
                 + "\n"
             )

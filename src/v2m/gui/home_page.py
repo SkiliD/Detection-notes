@@ -1,4 +1,12 @@
-"""The home page: its widgets and coherence presentation."""
+"""The home page: its widgets and coherence presentation.
+
+The page is a MASTHEAD, not a stack of centered blocks. One measure holds a
+heavy rule, the headline, the deck, a hairline, the three-step standfirst and
+a second hairline above the actions; the type is flush left inside that
+measure so the page has one left edge instead of five centered axes. The
+primary take-off spans the measure and the two secondary ones share a row
+under it (a column when the translated labels do not fit).
+"""
 
 from __future__ import annotations
 
@@ -6,7 +14,12 @@ from typing import Callable
 
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
+    QBoxLayout,
+    QComboBox,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -17,23 +30,39 @@ from PyQt6.QtWidgets import (
 
 from ..core import coherence as coh
 from ..core.i18n import tr
+from . import widgets
 from .calibration_card import CalibrationCard
-from .widgets import (
-    ACCENT,
-    BG_SUNKEN,
-    BORDER,
-    HINT_CARD_STYLE,
-    TEXT,
-    TEXT_DIM,
-    action_button_style,
-)
+from .widgets import action_button_style, page_scroll, quiet_button_style
 
-# The action column's measure: wide enough for the longest label in both
-# languages, narrow enough to read as a menu instead of a form.
-ACTION_COLUMN_MAX = 560
-# The hero sentence and the steps card wrap on a comfortable line length.
-HERO_MAX = 640
-STEPS_MAX = 720
+# The reading measure: wide enough for the two secondary take-offs to share
+# a row in both languages (their labels measure 599 px together) and for a
+# headline to break on a phrase, narrow enough that the eye returns to the
+# left edge without hunting — a column, not a full-width form.
+ACTION_COLUMN_MAX = 640
+
+
+def _rule(object_name: str, thickness: int) -> QFrame:
+    """One horizontal rule, painted by the application stylesheet.
+
+    The colour lives in the QSS (`QFrame#masthead` is the heavy rule over the
+    headline, `QFrame#hairline` the thin separators), so a theme switch
+    repaints every rule without restyling them one by one.
+    """
+    rule = QFrame()
+    rule.setObjectName(object_name)
+    rule.setFrameShape(QFrame.Shape.NoFrame)
+    rule.setFixedHeight(thickness)
+    return rule
+
+
+def _chapeau_style() -> str:
+    """The deck under the headline: one step down in size, still readable."""
+    return f"color: {widgets.TEXT_DIM}; font-size: 11pt;"
+
+
+def _sommaire_style() -> str:
+    """The three-step standfirst: quiet, so it reads as a caption, not a menu."""
+    return f"color: {widgets.TEXT_FAINT}; font-size: 9pt;"
 
 
 class HomePage(QWidget):
@@ -48,11 +77,25 @@ class HomePage(QWidget):
         snapshot_factory: Callable[[], coh.EvidenceSnapshot],
         show_status: Callable[[str, int], None],
         on_calibrate_toggled: Callable[[bool], None] | None = None,
+        input_devices: Callable[[], list[tuple[str, str]]] | None = None,
+        selected_input_key: str | None = None,
+        input_device_changed: Callable[[str | None], None] | None = None,
+        driver_note: Callable[[str], str | None] | None = None,
+        theme: str = "dark",
+        theme_changed: Callable[[str], None] | None = None,
     ) -> None:
         self._on_calibrate_toggled = on_calibrate_toggled or (lambda _on: None)
         super().__init__()
         self._snapshot_factory = snapshot_factory
         self._show_status = show_status
+        self._input_devices = input_devices or (lambda: [])
+        self._input_device_changed = input_device_changed or (lambda _key: None)
+        self._driver_note = driver_note or (lambda _name: None)
+        self._selected_input_key = selected_input_key
+        self._theme_changed = theme_changed or (lambda _theme: None)
+        self._theme = theme
+        self._input_device_name = ""
+        self._input_device_fell_back = False
         self._snapshot: coh.EvidenceSnapshot | None = None
         self._build(open_file, start_live, open_finder, toggle_language)
 
@@ -63,98 +106,198 @@ class HomePage(QWidget):
         open_finder: Callable[[], None],
         toggle_language: Callable[[], None],
     ) -> None:
-        layout = QVBoxLayout(self)
-        # Equal top/bottom stretches: the menu sits dead center instead of
-        # drifting up and leaving a hollow third under the hint.
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(9, 9, 9, 9)
         layout.addStretch(2)
 
-        # Hero: title over a one-line pitch, on a bounded measure so the
-        # sentence wraps in two balanced lines instead of spanning the window.
-        self.title = QLabel("<h1>🎤 Voix → MIDI</h1>")
-        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.title)
+        # The reading column: ONE measure, every line flush left inside it.
+        # Centering each block on its own gave the page five competing axes;
+        # a heavy rule, a headline and one shared left edge read as a page.
+        self._measure = QWidget()
+        column = QVBoxLayout(self._measure)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+
+        self._masthead_rule = _rule("masthead", 2)
+        column.addWidget(self._masthead_rule)
+        column.addSpacing(16)
+
+        self.title = QLabel("")
+        self.title.setStyleSheet(widgets.display_title_style(28.0))
+        self.title.setWordWrap(True)
+        self.title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        column.addWidget(self.title)
+        column.addSpacing(6)
+
         self.subtitle = QLabel("")
-        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.subtitle.setStyleSheet(_chapeau_style())
         self.subtitle.setWordWrap(True)
-        self.subtitle.setMaximumWidth(HERO_MAX)
-        layout.addWidget(self.subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(22)
+        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        column.addWidget(self.subtitle)
+        column.addSpacing(14)
+
+        self._deck_rule = _rule("hairline", 1)
+        column.addWidget(self._deck_rule)
+        column.addSpacing(10)
 
         self.steps = QLabel("")
-        self.steps.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.steps.setStyleSheet(_sommaire_style())
         self.steps.setWordWrap(True)
-        self.steps.setMaximumWidth(STEPS_MAX)
-        self.steps.setStyleSheet(HINT_CARD_STYLE)
-        steps = QHBoxLayout()
-        steps.addStretch(1)
-        steps.addWidget(self.steps)
-        steps.addStretch(1)
-        layout.addLayout(steps)
-        layout.addSpacing(24)
+        self.steps.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        column.addWidget(self.steps)
+        column.addSpacing(14)
 
-        # The three actions in ONE centered column of equal width: full-bleed
-        # bars read as a form to fill, a bounded column reads as a menu of
-        # choices, and the primary accent stays the first thing the eye finds.
-        actions = QVBoxLayout()
-        actions.setSpacing(12)
-        self.btn_file = QPushButton("")
-        self.btn_file.setMinimumHeight(54)
-        self.btn_file.setStyleSheet(action_button_style(primary=True))
-        self.btn_file.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_file.clicked.connect(open_file)
-        actions.addWidget(self.btn_file)
+        self._actions_rule = _rule("hairline", 1)
+        column.addWidget(self._actions_rule)
+        column.addSpacing(18)
 
+        # The take-off actions keep one predictable order: the primary action
+        # spans the measure, the two others share ONE row under it.
         self.btn_live = QPushButton("")
         self.btn_live.setMinimumHeight(54)
-        self.btn_live.setStyleSheet(action_button_style(primary=False))
+        self.btn_live.setStyleSheet(action_button_style(primary=True))
         self.btn_live.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_live.clicked.connect(start_live)
-        actions.addWidget(self.btn_live)
+
+        self.btn_file = QPushButton("")
+        self.btn_file.setMinimumHeight(46)
+        self.btn_file.setStyleSheet(action_button_style(primary=False))
+        self.btn_file.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_file.clicked.connect(open_file)
 
         self.btn_finder = QPushButton("")
-        self.btn_finder.setMinimumHeight(54)
+        self.btn_finder.setMinimumHeight(46)
         self.btn_finder.setStyleSheet(action_button_style(primary=False))
         self.btn_finder.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_finder.clicked.connect(open_finder)
-        actions.addWidget(self.btn_finder)
 
-        actions_host = QWidget()
-        actions_host.setLayout(actions)
-        actions_host.setMaximumWidth(ACTION_COLUMN_MAX)
-        actions_row = QHBoxLayout()
-        actions_row.addStretch(1)
-        actions_row.addWidget(actions_host)
-        actions_row.addStretch(1)
-        layout.addLayout(actions_row)
-        layout.addSpacing(18)
+        # Three full-width rows read as a menu of equals, so the secondary
+        # take-offs pair up in ONE grid: the primary spans it, the two others
+        # share the row beneath it and drop to their own rows when the
+        # translated labels no longer fit. A grid keeps all three buttons
+        # SIBLINGS, so the tab order stays the creation order.
+        self._actions_grid = QGridLayout()
+        self._actions_grid.setContentsMargins(0, 0, 0, 0)
+        self._actions_grid.setHorizontalSpacing(12)
+        self._actions_grid.setVerticalSpacing(12)
+        self._actions_grid.setColumnStretch(0, 1)
+        self._actions_grid.setColumnStretch(1, 1)
+        self._actions_grid.addWidget(self.btn_live, 0, 0, 1, 2)
+        self._actions_grid.addWidget(self.btn_file, 1, 0)
+        self._actions_grid.addWidget(self.btn_finder, 1, 1)
+        self._actions_host = QWidget()
+        self._actions_host.setLayout(self._actions_grid)
+        self._actions_paired = True
+        column.addWidget(self._actions_host)
 
-        # The quiet controls share one footer row: they are settings and
-        # follow-ups, not take-off points, so they sit side by side and
-        # small instead of stacking three more full-width bars.
-        footer = QHBoxLayout()
-        footer.setSpacing(12)
-        footer.addStretch(1)
+        # The measure joins the page LAST, once every line it carries (the
+        # actions, the settings strip, the device line and the tip) is on it:
+        # one left edge, no block centred on its own axis.
+        column.addSpacing(22)
+
+        # Quiet settings and follow-ups form a responsive row at wide sizes;
+        # they stack when translated labels cannot fit side by side.
+        self._footer = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self._footer.setSizeConstraint(QBoxLayout.SizeConstraint.SetNoConstraint)
+        self._footer.setContentsMargins(0, 0, 0, 0)
+        self._footer.setSpacing(12)
         self.btn_lang = QPushButton("")
+        self.btn_lang.setMinimumWidth(0)
         self.btn_lang.setMinimumHeight(40)
+        self.btn_lang.setStyleSheet(quiet_button_style())
         self.btn_lang.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_lang.clicked.connect(toggle_language)
-        footer.addWidget(self.btn_lang)
+        self._footer.addWidget(self.btn_lang)
+        # The selector names the active theme itself; its accessible name and
+        # tooltip carry "appearance" without spending a label's width.
+        self.theme_selector = QComboBox()
+        self.theme_selector.setMinimumWidth(0)
+        self.theme_selector.currentIndexChanged.connect(self._on_theme_selected)
+        self._footer.addWidget(self.theme_selector)
         self.btn_coherence = QPushButton("")
+        self.btn_coherence.setMinimumWidth(0)
         self.btn_coherence.setMinimumHeight(40)
+        self.btn_coherence.setStyleSheet(quiet_button_style())
         self.btn_coherence.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_coherence.clicked.connect(self.show_coherence)
-        footer.addWidget(self.btn_coherence)
+        self._footer.addWidget(self.btn_coherence)
         self.btn_calibrate = QPushButton("")
+        self.btn_calibrate.setMinimumWidth(0)
         self.btn_calibrate.setMinimumHeight(40)
+        self.btn_calibrate.setStyleSheet(quiet_button_style())
         self.btn_calibrate.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_calibrate.clicked.connect(self.show_calibration)
-        footer.addWidget(self.btn_calibrate)
-        footer.addStretch(1)
-        layout.addLayout(footer)
+        self._footer.addWidget(self.btn_calibrate)
+        self._footer_row = QWidget()
+        self._footer_row.setLayout(self._footer)
+        self._footer_row.setMinimumWidth(0)
+        self._footer_row.setSizePolicy(
+            self._footer_row.sizePolicy().Policy.Fixed,
+            self._footer_row.sizePolicy().Policy.Fixed,
+        )
+        column.addWidget(self._footer_row)
 
-        # The calibration card: one guided flow (the approved design)
-        # hidden under the footer until asked.
-        self.calibration_card = CalibrationCard(self)
+        self.input_device = QComboBox()
+        self.input_device.setMinimumWidth(0)
+        self.input_device.setMaximumWidth(ACTION_COLUMN_MAX)
+        self.input_device.setSizePolicy(
+            self.input_device.sizePolicy().Policy.Ignored,
+            self.input_device.sizePolicy().Policy.Fixed,
+        )
+        self.input_device.setAccessibleName(tr("ui home microphone"))
+        self.input_device.currentIndexChanged.connect(self._on_input_device_selected)
+        device_row = QHBoxLayout()
+        device_row.setContentsMargins(0, 0, 0, 0)
+        device_row.addStretch(1)
+        device_row.addWidget(self.input_device)
+        device_row.addStretch(1)
+        device_row.setSizeConstraint(QBoxLayout.SizeConstraint.SetNoConstraint)
+        self._device_row = device_row
+        column.addLayout(device_row)
+
+        self.input_device_status = QLabel("")
+        self.input_device_status.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.input_device_status.setWordWrap(True)
+        self.input_device_status.setMinimumWidth(0)
+        self.input_device_status.setMaximumWidth(ACTION_COLUMN_MAX)
+        self.input_device_status.setSizePolicy(
+            self.input_device_status.sizePolicy().Policy.Ignored,
+            self.input_device_status.sizePolicy().Policy.Preferred,
+        )
+        column.addWidget(self.input_device_status)
+
+        # The OS's own record, when the chosen endpoint publishes a driver
+        # effects chain: a take the driver already filtered is a different
+        # signal, and nothing INSIDE the take can say so.
+        self.input_device_note = QLabel("")
+        self.input_device_note.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.input_device_note.setWordWrap(True)
+        self.input_device_note.setMinimumWidth(0)
+        self.input_device_note.setMaximumWidth(ACTION_COLUMN_MAX)
+        self.input_device_note.setSizePolicy(
+            self.input_device_note.sizePolicy().Policy.Ignored,
+            self.input_device_note.sizePolicy().Policy.Preferred,
+        )
+        self.input_device_note.setVisible(False)
+        column.addWidget(self.input_device_note)
+
+        self.hint = QLabel("")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet(f"color: {widgets.TEXT_DIM};")
+        self.hint.setMinimumWidth(0)
+        self.hint.setSizePolicy(
+            self.hint.sizePolicy().Policy.Ignored,
+            self.hint.sizePolicy().Policy.Preferred,
+        )
+        column.addWidget(self.hint)
+
+        layout.addWidget(self._measure, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.calibration_card = CalibrationCard(
+            self, on_close=lambda: self._on_calibrate_toggled(False)
+        )
         self.calibration_card.setVisible(False)
         layout.addWidget(self.calibration_card)
         layout.addSpacing(10)
@@ -163,8 +306,8 @@ class HomePage(QWidget):
         self.coherence_text.setReadOnly(True)
         self.coherence_text.setVisible(False)
         self.coherence_text.setStyleSheet(
-            f"background: {BG_SUNKEN}; color: {TEXT}; border: 1px solid {BORDER};"
-            "border-radius: 8px; padding: 8px; font-size: 9pt;"
+            f"background: {widgets.BG_SUNKEN}; color: {widgets.TEXT}; "
+            f"border: 1px solid {widgets.BORDER}; border-radius: 8px; padding: 8px; font-size: 9pt;"
         )
         self.coherence_text.setMinimumHeight(180)
         layout.addWidget(self.coherence_text)
@@ -178,35 +321,294 @@ class HomePage(QWidget):
         item.hideButtons()
         item.setMouseEnabled(x=False, y=False)
         item.setMenuEnabled(False)
-        item.setTitle(tr("ui health chart title"), color=TEXT, size="9pt")
+        item.setTitle(tr("ui health chart title"), color=widgets.TEXT, size="9pt")
         for axis in ("left", "bottom"):
-            item.getAxis(axis).setPen(pg.mkPen(BORDER))
-            item.getAxis(axis).setTextPen(pg.mkPen(TEXT_DIM))
-        item.vb.setBackgroundColor(BG_SUNKEN)
+            item.getAxis(axis).setPen(pg.mkPen(widgets.BORDER))
+            item.getAxis(axis).setTextPen(pg.mkPen(widgets.TEXT_DIM))
+        item.vb.setBackgroundColor(widgets.BG_SUNKEN)
         self.health_plot.scene().sigMouseClicked.connect(self._on_health_clicked)
         layout.addWidget(self.health_plot, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self.hint = QLabel("")
-        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hint.setStyleSheet(f"color: {TEXT_DIM};")
-        layout.addWidget(self.hint)
         layout.addStretch(2)
 
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = page_scroll(content)
+        outer.addWidget(self.scroll)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._arrange_footer()
+
+    def _arrange_footer(self) -> None:
+        """Keep translated secondary actions inside the home-page width."""
+        if not self.btn_lang.text():
+            return
+        labels = (
+            (self.btn_lang, tr("ui lang button")),
+            (self.btn_coherence, tr("ui coherence sessions btn")),
+            (self.btn_calibrate, tr("ui calibrate mic button")),
+        )
+        # quiet_button_style's 14 px side padding plus its 1 px border.
+        button_widths = [
+            QFontMetrics(button.font()).horizontalAdvance(label) + 30
+            for button, label in labels
+        ]
+        required = (
+            sum(button_widths)
+            + self.theme_selector.sizeHint().width()
+            + self._footer.spacing() * 3
+        )
+        # Measure the page, not the scroll viewport: during a resize Qt may
+        # still report the previous (narrower) viewport, which stacked the row
+        # on a wide window and never re-ran once the layout settled.
+        available = max(
+            0,
+            self.width() - 18 - self.scroll.verticalScrollBar().sizeHint().width(),
+        )
+        measure = min(ACTION_COLUMN_MAX, available)
+        stacked = available < required
+        # The strip spans the measure whether it folds or not: the settings
+        # start on the headline's own left edge instead of drifting to the
+        # centre of the page.
+        width = measure
+        self._footer_row.setMinimumWidth(0)
+        self._footer_row.setMaximumWidth(width)
+        self._footer_row.setSizePolicy(
+            self._footer_row.sizePolicy().Policy.Fixed,
+            self._footer_row.sizePolicy().Policy.Fixed,
+        )
+        self._footer.setDirection(
+            QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight
+        )
+        self.theme_selector.setMaximumWidth(width)
+        self._footer_row.setMinimumHeight(0)
+        self._footer_row.setMaximumHeight(16777215)
+        self._footer.invalidate()
+        self._footer_row.layout().invalidate()
+        self._footer_row.layout().setGeometry(self._footer_row.rect())
+        self._device_row.invalidate()
+        self._device_row.activate()
+        for (button, label), button_width in zip(labels, button_widths, strict=True):
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(width)
+            if stacked:
+                button.setText(self._wrapped_label(label, button, width - 24))
+                button.setMinimumWidth(width)
+                button.setMaximumWidth(width)
+                button.setMinimumHeight(40)
+                button.setMaximumHeight(16777215)
+            else:
+                button.setText(label)
+                button.setMinimumWidth(button_width)
+                button.setMaximumWidth(button_width)
+                button.setMinimumHeight(40)
+                button.setMaximumHeight(40)
+        self._footer.invalidate()
+        self._footer.activate()
+        # The layout centres this row (its width is fixed above); placing it by
+        # hand pinned the y read before the column re-flowed, which left the
+        # row a few pixels over the action above it.
+        self._footer_row.setSizePolicy(
+            self._footer_row.sizePolicy().Policy.Fixed,
+            self._footer_row.sizePolicy().Policy.Fixed,
+        )
+        self._footer_row.updateGeometry()
+        self._footer_row.layout().setGeometry(self._footer_row.rect())
+        # The column's width is the ONLY horizontal fact: the layouts inside
+        # it place the headline, the rules and the actions against one edge.
+        self._measure.setMinimumWidth(measure)
+        self._measure.setMaximumWidth(measure)
+        self._layout_action_pair(measure)
+        self._measure.layout().invalidate()
+        self._measure.layout().activate()
+        self.input_device.setMinimumWidth(measure)
+        self.input_device.setMaximumWidth(measure)
+        self.input_device.setSizePolicy(
+            self.input_device.sizePolicy().Policy.Fixed,
+            self.input_device.sizePolicy().Policy.Fixed,
+        )
+        self.input_device_status.setMinimumWidth(0)
+        self.input_device_status.setMaximumWidth(measure)
+        self.input_device_status.setSizePolicy(
+            self.input_device_status.sizePolicy().Policy.Ignored,
+            self.input_device_status.sizePolicy().Policy.Preferred,
+        )
+        self.input_device.updateGeometry()
+        self.input_device_status.updateGeometry()
+        content = self.scroll.widget()
+        content.layout().invalidate()
+        content.updateGeometry()
+        self.scroll.updateGeometry()
+
+    def _layout_action_pair(self, measure: int) -> None:
+        """Keep the two secondary take-offs in one row, or give each its own.
+
+        Measured from the LIVE labels: a French label runs ~40 % longer than
+        its English twin, so a fixed breakpoint would overflow the measure on
+        one language and waste a row on the other.
+        """
+        padding = 46  # action_button_style's 22 px side padding + 1 px border
+        needed = (
+            sum(
+                QFontMetrics(button.font()).horizontalAdvance(button.text()) + padding
+                for button in (self.btn_file, self.btn_finder)
+            )
+            + self._actions_grid.horizontalSpacing()
+        )
+        paired = needed <= measure
+        if paired == self._actions_paired:
+            return
+        self._actions_paired = paired
+        self._actions_grid.removeWidget(self.btn_file)
+        self._actions_grid.removeWidget(self.btn_finder)
+        if paired:
+            self._actions_grid.addWidget(self.btn_file, 1, 0)
+            self._actions_grid.addWidget(self.btn_finder, 1, 1)
+        else:
+            # each own row, both spanning the measure
+            self._actions_grid.addWidget(self.btn_file, 1, 0, 1, 2)
+            self._actions_grid.addWidget(self.btn_finder, 2, 0, 1, 2)
+
+    @staticmethod
+    def _wrapped_label(text: str, button: QPushButton, max_width: int) -> str:
+        """Wrap secondary labels at word boundaries for narrow high-DPI views."""
+        metrics = QFontMetrics(button.font())
+        words = text.split()
+        lines: list[str] = []
+        line = ""
+        for word in words:
+            candidate = f"{line} {word}".strip()
+            if line and metrics.horizontalAdvance(candidate) > max_width:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        return "\n".join(lines)
+
     def retranslate(self) -> None:
-        self.title.setText("<h1>🎤 Voix → MIDI</h1>")
+        self.title.setText(tr("ui home title"))
+        self.input_device.setAccessibleName(tr("ui home microphone"))
         self.subtitle.setText(tr("ui app subtitle"))
         self.steps.setText(tr("ui steps"))
         self.btn_file.setText(tr("ui open file"))
         self.btn_live.setText(tr("ui sing live"))
         self.btn_finder.setText(tr("ui finder button"))
         self.btn_lang.setText(tr("ui lang button"))
+        self.theme_selector.setAccessibleName(tr("ui theme label"))
+        self.theme_selector.setToolTip(tr("ui theme label"))
+        self.theme_selector.blockSignals(True)
+        self.theme_selector.clear()
+        self.theme_selector.addItem(tr("ui theme dark"), "dark")
+        self.theme_selector.addItem(tr("ui theme light"), "light")
+        self.theme_selector.setCurrentIndex(max(0, self.theme_selector.findData(self._theme)))
+        self.theme_selector.blockSignals(False)
         self.btn_coherence.setText(tr("ui coherence sessions btn"))
         self.btn_calibrate.setText(tr("ui calibrate mic button"))
         self.hint.setText(tr("ui drop hint"))
+        self._refresh_input_devices()
+        self._render_input_device_status()
+        self.btn_coherence.setToolTip(tr("ui coherence sessions tooltip"))
         self.calibration_card.retranslate()
+        self._arrange_footer()
         self.health_plot.getPlotItem().setTitle(
-            tr("ui health chart title"), color=TEXT, size="9pt"
+            tr("ui health chart title"), color=widgets.TEXT, size="9pt"
         )
+
+    def _on_theme_selected(self, index: int) -> None:
+        theme = self.theme_selector.itemData(index)
+        if theme not in ("dark", "light") or theme == self._theme:
+            return
+        self._theme = theme
+        self._theme_changed(theme)
+
+    def refresh_theme(self) -> None:
+        """Refresh the home page's inline palette and its plot axes."""
+        self.title.setStyleSheet(widgets.display_title_style(28.0))
+        self.subtitle.setStyleSheet(_chapeau_style())
+        self.steps.setStyleSheet(_sommaire_style())
+        self.btn_live.setStyleSheet(action_button_style(primary=True))
+        self.btn_file.setStyleSheet(action_button_style(primary=False))
+        self.btn_finder.setStyleSheet(action_button_style(primary=False))
+        self.input_device_status.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.input_device_note.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.coherence_text.setStyleSheet(
+            f"background: {widgets.BG_SUNKEN}; color: {widgets.TEXT}; "
+            f"border: 1px solid {widgets.BORDER}; border-radius: 8px; padding: 8px; font-size: 9pt;"
+        )
+        self.hint.setStyleSheet(f"color: {widgets.TEXT_DIM};")
+        item = self.health_plot.getPlotItem()
+        for axis in ("left", "bottom"):
+            item.getAxis(axis).setPen(pg.mkPen(widgets.BORDER))
+            item.getAxis(axis).setTextPen(pg.mkPen(widgets.TEXT_DIM))
+        item.vb.setBackgroundColor(widgets.BG_SUNKEN)
+        item.setTitle(tr("ui health chart title"), color=widgets.TEXT, size="9pt")
+        self._draw_health(self._snapshot.health_weeks if self._snapshot else [])
+        self.btn_lang.setStyleSheet(quiet_button_style())
+        self.btn_coherence.setStyleSheet(quiet_button_style())
+        self.btn_calibrate.setStyleSheet(quiet_button_style())
+        self.theme_selector.setStyleSheet(
+            f"background: {widgets.BG_SUNKEN}; color: {widgets.TEXT}; "
+            f"border: 1px solid {widgets.BORDER}; border-radius: 6px; padding: 4px;"
+        )
+
+    def set_theme(self, theme: str) -> None:
+        """Keep the selector aligned with the application theme fact."""
+        if theme not in widgets.THEMES:
+            raise ValueError(f"unknown theme: {theme}")
+        self._theme = theme
+        index = self.theme_selector.findData(theme)
+        if index >= 0 and index != self.theme_selector.currentIndex():
+            self.theme_selector.blockSignals(True)
+            self.theme_selector.setCurrentIndex(index)
+            self.theme_selector.blockSignals(False)
+
+    def _refresh_input_devices(self) -> None:
+        """Refresh the available-input list while preserving its stable key."""
+        selected = self._selected_input_key
+        devices = self._input_devices()
+        self.input_device.blockSignals(True)
+        self.input_device.clear()
+        self.input_device.addItem(tr("ui input device default"), None)
+        found_selected = selected is None
+        for key, label in devices:
+            self.input_device.addItem(label, key)
+            found_selected = found_selected or key == selected
+        if selected is not None and not found_selected:
+            parts = selected.split("\x1f")
+            missing_name = parts[1] if len(parts) > 1 else selected
+            self.input_device.addItem(
+                tr("ui input device unavailable").format(device=missing_name), selected
+            )
+        index = self.input_device.findData(selected)
+        self.input_device.setCurrentIndex(index if index >= 0 else 0)
+        self.input_device.blockSignals(False)
+        self.input_device.setToolTip(tr("ui input device tooltip"))
+
+    def _on_input_device_selected(self, index: int) -> None:
+        key = self.input_device.itemData(index)
+        self._selected_input_key = key
+        self._input_device_changed(key)
+
+    def set_input_device_status(self, name: str, fell_back: bool = False) -> None:
+        """Show the endpoint selected for the next capture."""
+        self._input_device_name = name
+        self._input_device_fell_back = fell_back
+        self._refresh_input_devices()
+        self._render_input_device_status()
+
+    def _render_input_device_status(self) -> None:
+        key = (
+            "ui input device fallback next"
+            if self._input_device_fell_back
+            else "ui input device next"
+        )
+        self.input_device_status.setText(tr(key).format(device=self._input_device_name))
+        note = self._driver_note(self._input_device_name) or ""
+        self.input_device_note.setText(note)
+        self.input_device_note.setVisible(bool(note))
 
     def show_calibration(self) -> None:
         """Toggle the calibration card (the window wires the timer around it)."""
@@ -238,21 +640,22 @@ class HomePage(QWidget):
             text += "\n" + tr("ui practice windows title") + "\n"
             for window in snapshot.practice_windows:
                 rate = (
-                    f"{window['suspect_rate']:.1f}"
-                    if window["suspect_rate"] is not None
-                    else "-"
+                    f"{window['suspect_rate']:.1f}" if window["suspect_rate"] is not None else "-"
                 )
                 contours = (
                     f"{window['contour_rate'] * 100:.0f}%"
                     if window["contour_rate"] is not None
                     else "-"
                 )
-                text += tr("ui practice window row").format(
-                    window=tr(f"time {window['window']}"),
-                    takes=window["takes"],
-                    rate=rate,
-                    contours=contours,
-                ) + "\n"
+                text += (
+                    tr("ui practice window row").format(
+                        window=tr(f"time {window['window']}"),
+                        takes=window["takes"],
+                        rate=rate,
+                        contours=contours,
+                    )
+                    + "\n"
+                )
         self.coherence_text.setPlainText(text)
         self.coherence_text.setVisible(True)
         self._draw_health(snapshot.health_weeks)
@@ -264,14 +667,14 @@ class HomePage(QWidget):
             return
         xs = list(range(len(weeks)))
         ys = [week["contour_rate"] * 100.0 for week in weeks]
-        self.health_plot.plot(xs, ys, pen=pg.mkPen(ACCENT, width=2), antialias=True)
+        self.health_plot.plot(xs, ys, pen=pg.mkPen(widgets.ACCENT, width=2), antialias=True)
         self.health_plot.addItem(
             pg.ScatterPlotItem(
                 xs,
                 ys,
                 size=9,
-                brush=pg.mkBrush(ACCENT),
-                pen=pg.mkPen(BG_SUNKEN),
+                brush=pg.mkBrush(widgets.ACCENT),
+                pen=pg.mkPen(widgets.BG_SUNKEN),
             )
         )
         self.health_plot.setXRange(-0.5, len(weeks) - 0.5, padding=0)
@@ -300,9 +703,7 @@ class HomePage(QWidget):
             self._show_status(tr("ui health click none"), 5_000)
             return
         stems = week.get("stems") or []
-        self._show_status(
-            tr("ui health click").format(week=week["week"], n=len(stems)), 8_000
-        )
+        self._show_status(tr("ui health click").format(week=week["week"], n=len(stems)), 8_000)
         by_stem = {take.stem: take for take in snapshot.takes}
         week_takes = [by_stem[stem] for stem in stems if stem in by_stem]
         missing = len(stems) - len(week_takes)
@@ -311,34 +712,38 @@ class HomePage(QWidget):
             checked = f"{take.checked}" if take.checked is not None else "-"
             rate = f"{take.contour_rate * 100:.0f}%" if take.contour_rate is not None else "-"
             if take.verify_ok is False:
-                lines.append(tr("coh take divergent").format(
-                    stem=take.stem, checked=checked, rate=rate
-                ))
+                lines.append(
+                    tr("coh take divergent").format(stem=take.stem, checked=checked, rate=rate)
+                )
             elif not take.suspects:
-                lines.append(tr("coh take clean").format(
-                    stem=take.stem, checked=checked
-                ) + f"  ({rate})")
+                lines.append(
+                    tr("coh take clean").format(stem=take.stem, checked=checked) + f"  ({rate})"
+                )
             else:
-                lines.append(tr("coh take suspects").format(
-                    stem=take.stem, checked=checked, rate=rate, n=len(take.suspects)
-                ))
+                lines.append(
+                    tr("coh take suspects").format(
+                        stem=take.stem, checked=checked, rate=rate, n=len(take.suspects)
+                    )
+                )
             for suspect in take.suspects:
-                lines.append(tr("coh suspect row").format(
-                    midi=suspect["midi"],
-                    span=suspect["inner_range_st"],
-                    dur=suspect["secondary_plateau_s"],
-                    at=(
-                        tr("coh plateau at").format(t=suspect["secondary_plateau_start_s"])
-                        if suspect.get("secondary_plateau_start_s") is not None
-                        else ""
-                    ),
-                    offset=(
-                        f"{suspect['secondary_plateau_offset_st']:+.2f}st"
-                        if suspect.get("secondary_plateau_offset_st") is not None else "?"
-                    ),
-                    target=suspect.get("secondary_plateau_midi", "?"),
-                ))
+                lines.append(
+                    tr("coh suspect row").format(
+                        midi=suspect["midi"],
+                        span=suspect["inner_range_st"],
+                        dur=suspect["secondary_plateau_s"],
+                        at=(
+                            tr("coh plateau at").format(t=suspect["secondary_plateau_start_s"])
+                            if suspect.get("secondary_plateau_start_s") is not None
+                            else ""
+                        ),
+                        offset=(
+                            f"{suspect['secondary_plateau_offset_st']:+.2f}st"
+                            if suspect.get("secondary_plateau_offset_st") is not None
+                            else "?"
+                        ),
+                        target=suspect.get("secondary_plateau_midi", "?"),
+                    )
+                )
         if missing:
             lines.append(tr("ui health click none") if missing == len(stems) else f"  ({missing})")
         self.coherence_text.setPlainText("\n".join(lines))
-        self.coherence_text.setVisible(True)

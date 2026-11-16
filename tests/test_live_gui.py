@@ -117,6 +117,16 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         assert win.page_live.box_controls.title() == tr("ui live controls")
         assert win.page_live.box_monitor.title() == tr("ui live monitor")
         assert win.page_live.box_feedback.title() == tr("ui live feedback")
+        page = win.page_live
+        assert page.details_panel.isHidden(), "secondary singing details should start collapsed"
+        assert not page.btn_stop_live.isHidden(), (
+            "the finish action must remain in the singing view"
+        )
+        assert not page.piano_live.isHidden(), (
+            "the roll that draws the take belongs to the singing view"
+        )
+        assert not page.box_monitor.isHidden() and not page.level_meter.isHidden()
+        assert page.live_indicator.label_note.text() != "—", "the sung pitch was not shown"
         seg = live_thread.segmenter
         assert seg is not None and seg.notes, "no note detected during live"
         assert win.page_live.piano_live._bar_items, "the live piano roll stayed empty"
@@ -166,9 +176,10 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         if win.live_thread is not None and win.live_thread.isRunning():
             win.live_thread.stop()
             win.live_thread.wait(3000)
+        win.close()
 
 
-def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatch):
+def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatch, tmp_path):
     """A re-sung range replaces the selected phrase without auto-exporting."""
     import sounddevice as sd
 
@@ -176,9 +187,24 @@ def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatc
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
     exported: list[tuple] = []
-    monkeypatch.setattr(
-        te, "export_result", lambda res, stem, **kw: exported.append((res, stem, kw))
-    )
+
+    def fake_export(res, stem, **kwargs):
+        stem = Path(stem)
+        exported.append((res, stem, kwargs))
+        if stem.parent.is_relative_to(tmp_path):
+            import json
+
+            from v2m.core.report import ARTIFACT_EXTENSIONS
+
+            stem.parent.mkdir(parents=True, exist_ok=True)
+            notes = [{"midi": note.midi} for note in res.notes]
+            for suffix in ARTIFACT_EXTENSIONS:
+                content = json.dumps({"notes": notes}) if suffix == ".json" else "{}"
+                Path(f"{stem}{suffix}").write_text(content, encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr(te, "export_result", fake_export)
+    monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
 
     win = mw.MainWindow()
     win.page_live.chk_record_audio.setChecked(False)
@@ -195,8 +221,13 @@ def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatc
         original = win.result
         assert original is not None
         original_audio = win._live_signal
+        automatic_result = win._automatic_live_result
+        automatic_signal = win._automatic_live_signal
         assert original_audio is not None
+        assert automatic_result is not None
+        assert automatic_signal is not None
         original_count = len(original.notes)
+
         original_samples = len(original_audio)
         assert not exported
 
@@ -213,9 +244,11 @@ def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatc
         win.on_finish_phrase_replacement()
         assert _pump_until(
             qapp,
-            lambda: not win._replacement_pending_analysis
-            and win._signal_analysis_thread is None
-            and win.result is not original,
+            lambda: (
+                win._workflow.phase is mw.WorkflowPhase.REPLACEMENT_DECISION
+                and win._signal_analysis_thread is None
+                and win.result is not original
+            ),
             timeout=90,
         ), "the edited take was not re-analyzed"
 
@@ -228,18 +261,36 @@ def test_phrase_replacement_stays_pending_until_explicit_export(qapp, monkeypatc
         # the spliced take awaits the singer's decision: the audition/keep/
         # cancel row is up, export waits with it (isHidden: the window is
         # never shown here — isVisible() is False for every widget)
-        assert win._replacement_decision is not None
+        assert win._workflow.phase is mw.WorkflowPhase.REPLACEMENT_DECISION
         assert not win.page_results.btn_accept_replacement.isHidden()
         assert not exported, "phrase replacement must not export implicitly"
         win._export_results()
         assert not exported, "export waits for the keep/cancel decision"
 
         win._on_accept_replacement()
-        assert win._replacement_decision is None
+        assert win._workflow.phase is mw.WorkflowPhase.IDLE
         assert win._edit_history.can_undo, "the kept splice is an undoable edit"
+        assert win.result.manual_pitch_corrections
+        assert win._automatic_live_result is automatic_result
+        assert win._automatic_live_signal is automatic_signal
         win._export_results()
-        assert len(exported) == 1
-        assert exported[0][0] is win.result
+        assert len(exported) == 2
+        assert exported[0][0] is automatic_result
+        assert exported[1][0] is win.result
+        assert exported[0][1] != exported[1][1]
+        from v2m.core.takes import automatic_reading_dir, corrected_reading_dir
+
+        take_dir = exported[1][1].parent
+        automatic_json = automatic_reading_dir(take_dir) / f"{exported[1][1].name}.json"
+        corrected_json = corrected_reading_dir(take_dir, 1) / f"{exported[1][1].name}.json"
+        import json
+
+        assert json.loads(automatic_json.read_text(encoding="utf-8"))["notes"] == [
+            {"midi": note.midi} for note in automatic_result.notes
+        ]
+        assert json.loads(corrected_json.read_text(encoding="utf-8"))["notes"] == [
+            {"midi": note.midi} for note in win.result.notes
+        ]
     finally:
         if win.live_thread is not None and win.live_thread.isRunning():
             win.live_thread.stop()
@@ -262,7 +313,9 @@ def test_audition_clip_of_a_real_resing_contains_the_new_singing(qapp, monkeypat
 
     monkeypatch.setattr(sd, "InputStream", FakeMic)
     monkeypatch.setattr(
-        te, "export_result", lambda res, stem, **kw: None  # the decision waits
+        te,
+        "export_result",
+        lambda res, stem, **kw: None,  # the decision waits
     )
 
     win = mw.MainWindow()
@@ -317,9 +370,14 @@ def test_audition_clip_of_a_real_resing_contains_the_new_singing(qapp, monkeypat
             notes[first].start,
             notes[last].end + delta,
         )
-        win._replacement_decision = (win._edit_snapshot(), window[0], window[1])
-        win._on_replacement_analysis_done(spliced, merged_signal)
-        assert win._replacement_decision is not None
+        before = win._edit_snapshot(action="replacement")
+        assert before is not None
+        context = win._workflow.begin_replacement(before, first, last, win._live_record_audio)
+        assert context is not None
+        assert win._workflow.begin_splice_analysis(context.token) is not None
+        assert win._workflow.set_splice_window(context.token, window)
+        win._on_replacement_analysis_done(spliced, merged_signal, context.token)
+        assert win._workflow.phase is mw.WorkflowPhase.REPLACEMENT_DECISION
 
         # the audition clip: spectral fingerprint of the NEW singing
         win.on_audition_replacement()
@@ -430,28 +488,31 @@ def test_correction_and_replacement_recover_with_undo_and_redo(qapp, monkeypatch
                 pitch=None,
                 sr=sr,
             )
-            win._replacement_decision = (before, 0.9, 1.4 + delta)
-            win._on_replacement_analysis_done(spliced, merged)
+            context = win._workflow.begin_replacement(before, 1, 1, win._live_record_audio)
+            assert context is not None
+            assert win._workflow.begin_splice_analysis(context.token) is not None
+            assert win._workflow.set_splice_window(context.token, (0.9, 1.4 + delta))
+            win._on_replacement_analysis_done(spliced, merged, context.token)
             return merged
 
+        before_state = win._edit_snapshot()
+        assert before_state is not None
         merged = begin_decision()
-        assert win._replacement_decision is not None
+        assert win._workflow.phase is mw.WorkflowPhase.REPLACEMENT_DECISION
         assert not win.page_results.btn_accept_replacement.isHidden()
         assert not win.page_results.btn_export.isEnabled()
         assert not win.page_results.btn_undo.isEnabled()
         assert not win.page_results.btn_redo.isEnabled()
 
         played: list[str] = []
-        monkeypatch.setattr(
-            win.playback, "play", lambda mode, t=0.0: played.append(mode) or True
-        )
+        monkeypatch.setattr(win.playback, "play", lambda mode, t=0.0: played.append(mode) or True)
         win.on_audition_replacement()
         assert played == ["voice"]
         # the audition clip IS the replaced span of the merged audio
         assert len(win.playback.voice) == int(round(0.8 * sr))
 
         win._on_cancel_replacement()
-        assert win._replacement_decision is None
+        assert win._workflow.phase is mw.WorkflowPhase.IDLE
         assert len(win.result.notes) == 3  # the splice is gone
         assert win.result.notes[1].midi == 65  # the correction survived it
         assert len(win._live_signal) == 3 * sr  # the original audio is back
@@ -461,7 +522,14 @@ def test_correction_and_replacement_recover_with_undo_and_redo(qapp, monkeypatch
         # -- keeping the splice turns it into an undoable edit -----------------
         begin_decision()
         win._on_accept_replacement()
-        assert win._replacement_decision is None
+        assert win._workflow.phase is mw.WorkflowPhase.IDLE
+        assert win.result.manual_pitch_corrections
+        assert win._automatic_live_result is not before_state.result
+        assert [note.midi for note in win._automatic_live_result.notes] == [
+            note.midi for note in before_state.result.notes
+        ]
+        assert win._automatic_live_signal is not before_state.signal
+        assert np.array_equal(win._automatic_live_signal, before_state.signal)
         assert len(win.result.notes) == 4
         assert len(win._live_signal) == len(merged)
         assert win.page_results.btn_accept_replacement.isHidden()
@@ -520,7 +588,9 @@ def test_state_dropdown_jumps_to_any_previous_state(qapp, monkeypatch):
         combo = win.page_results.combo_edit_states
         assert combo.count() == 3
         assert [combo.itemText(i) for i in range(3)] == [
-            tr("correction"), tr("correction"), tr("current"),
+            tr("correction"),
+            tr("correction"),
+            tr("current"),
         ]
         assert combo.currentIndex() == 2, "the dropdown sits on the current take"
 
@@ -584,14 +654,12 @@ def test_audition_original_plays_the_selected_span_of_the_current_audio(qapp, mo
 
         win.page_results.results._notes_table.selectRow(1)
         played: list[str] = []
-        monkeypatch.setattr(
-            win.playback, "play", lambda mode, t=0.0: played.append(mode) or True
-        )
+        monkeypatch.setattr(win.playback, "play", lambda mode, t=0.0: played.append(mode) or True)
         win.on_audition_original()
 
         assert played == ["voice"]
         # the clip is notes[1]'s span (0.9 s -> 1.4 s) of the CURRENT audio
-        expected = signal[int(round(0.9 * sr)):int(round(1.4 * sr))]
+        expected = signal[int(round(0.9 * sr)) : int(round(1.4 * sr))]
         assert len(win.playback.voice) == len(expected)
         assert np.array_equal(win.playback.voice, expected)
 
@@ -626,12 +694,14 @@ def test_clicking_results_piano_corrects_only_the_selected_note(qapp):
     try:
         win.page_results.piano_keys.key_clicked.emit(62)
 
-        assert result.notes[0].midi == 62
-        assert result.notes[1].midi == 64
-        assert result.notes[0] is not original and original.midi == 60
-        assert (result.notes[0].start, result.notes[0].end) == (0.2, 0.7)
-        assert result.pitch is None
-        assert result.manual_pitch_corrections
+        assert win.result is not result
+        assert win.result.notes[0].midi == 62
+        assert win.result.notes[1].midi == 64
+        assert result.notes[0] is original and original.midi == 60
+        assert (win.result.notes[0].start, win.result.notes[0].end) == (0.2, 0.7)
+        assert win.result.pitch is None
+        assert win.result.manual_pitch_corrections
+
         assert not win.error_banner.isVisible()
         assert "live/final" in win.page_results.results._lbl_explain.text()
     finally:
@@ -676,7 +746,7 @@ def test_a_graph_gesture_selects_the_row_and_drives_the_edit(qapp):
         assert page.piano._bar_items[0].opts["brush"] == page.piano._color_for_conf(0.9)
 
         page.piano_keys.key_clicked.emit(62)  # correct THROUGH the selection
-        assert [n.midi for n in result.notes] == [60, 62]  # only row 1 moved
+        assert [n.midi for n in win.result.notes] == [60, 62]  # only row 1 moved
     finally:
         win.close()
 
@@ -800,7 +870,7 @@ def test_del_removes_the_selected_range_as_one_undoable_edit(qapp):
         page.results._notes_table.selectRow(1)
         win.on_delete_selection()
 
-        assert [n.midi for n in result.notes] == [60, 67]
+        assert [n.midi for n in win.result.notes] == [60, 67]
         assert page.label_selection.isHidden()  # the new result starts unselected
         # the state browser names the edit that archived the past state
         assert page.combo_edit_states.itemText(0) == tr("deletion")
@@ -844,7 +914,7 @@ def test_del_that_would_empty_the_take_is_refused_and_announced(qapp):
         win.page_results.results._notes_table.selectRow(0)
         win.on_delete_selection()
 
-        assert [n.midi for n in result.notes] == [60]  # untouched
+        assert [n.midi for n in win.result.notes] == [60]  # untouched
         assert not win._edit_history.can_undo
         prefix = tr("err note deletion failed").split("{e}")[0]
         assert prefix in win.error_banner.text()  # the banner adds its ⚠ mark
@@ -875,15 +945,13 @@ def test_the_status_bar_reports_a_deletion_and_a_correction(qapp):
         table = win.page_results.results._notes_table
         table.selectRow(0)
         win.page_results.piano_keys.key_clicked.emit(62)  # correct one note
-        assert win.statusBar().currentMessage() == tr(
-            "ui status note corrected"
-        ).format(note=note_display_pair(62))
+        assert win.statusBar().currentMessage() == tr("ui status note corrected").format(
+            note=note_display_pair(62)
+        )
 
         table.selectRow(1)
         win.on_delete_selection()
-        assert win.statusBar().currentMessage() == tr(
-            "ui status notes deleted"
-        ).format(n=1)
+        assert win.statusBar().currentMessage() == tr("ui status notes deleted").format(n=1)
     finally:
         win.close()
 
@@ -1152,9 +1220,9 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
             seg = thr.segmenter if thr is not None else None
             return seg is not None and bool(seg.notes) and win._live_grid.bpm != 120.0
 
-        assert _pump_until(
-            qapp, published_grid, timeout=60
-        ), "the live grid published by LiveTake never reached the GUI"
+        assert _pump_until(qapp, published_grid, timeout=60), (
+            "the live grid published by LiveTake never reached the GUI"
+        )
         # the live staff engraves the consumed grid (the staff reads
         # grid.bpm — any drift of the publication would show here)
         assert _pump_until(
@@ -1172,6 +1240,7 @@ def test_live_grid_is_the_take_published_one(qapp, monkeypatch):
         if win.live_thread is not None and win.live_thread.isRunning():
             win.live_thread.stop()
             win.live_thread.wait(3000)
+        win.close()
 
 
 def test_a_failed_take_leaves_a_trace_in_its_folder(qapp, monkeypatch, tmp_path):
@@ -1215,14 +1284,12 @@ def test_a_failed_take_leaves_a_trace_in_its_folder(qapp, monkeypatch, tmp_path)
         win.on_stop_live()
         # the trace IS the outcome: pump on the file (the failure signal is
         # queued — it delivers while the loop runs)
-        assert _pump_until(
-            qapp, lambda: list(tmp_path.rglob("*.trace.json")), timeout=60
-        ), "the failed take left no trace in its folder"
+        assert _pump_until(qapp, lambda: list(tmp_path.rglob("*.trace.json")), timeout=60), (
+            "the failed take left no trace in its folder"
+        )
         import json
 
-        payload = json.loads(
-            next(tmp_path.rglob("*.trace.json")).read_text(encoding="utf-8")
-        )
+        payload = json.loads(next(tmp_path.rglob("*.trace.json")).read_text(encoding="utf-8"))
         assert "too short" in payload["reason"]
         assert payload["exported"] is False
         # the failure reached the singer too: the status label says why
@@ -1231,6 +1298,7 @@ def test_a_failed_take_leaves_a_trace_in_its_folder(qapp, monkeypatch, tmp_path)
         if win.live_thread is not None and win.live_thread.isRunning():
             win.live_thread.stop()
             win.live_thread.wait(3000)
+        win.close()
 
 
 def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
@@ -1263,7 +1331,9 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
         # the piano keyboard is the only displayed answer
         assert win.page_finder.keys._active <= {57, 60, 62, 64}
         assert win.page_finder.label_note.text() != ""
-        assert "🎹" in win.page_finder.history.item(0).text()
+        chips = win.page_finder.history_chips
+        assert chips, "the confirmed note produced no history chip"
+        assert chips[-1].text(), "the history chip carries no note name"
 
         win.on_close_finder()
         assert win.stack.currentWidget() is win.page_home
@@ -1276,6 +1346,7 @@ def test_note_finder_lights_the_sung_key_and_keeps_nothing(qapp, monkeypatch):
         if win.page_finder.thread is not None and win.page_finder.thread.isRunning():
             win.page_finder.thread.stop()
             win.page_finder.thread.wait(3000)
+        win.close()
 
 
 def test_metronome_follows_detected_bpm(qapp):
@@ -1346,18 +1417,17 @@ def _synthetic_result(win):
     from v2m.core.pipeline import AnalysisResult
 
     result = AnalysisResult(source="live", duration_s=1.0, notes=[], tempo=None, key=None)
-    result.notes = [
-        Note(start=0.1, end=0.9, midi=60, confidence=0.9)
-    ]
+    result.notes = [Note(start=0.1, end=0.9, midi=60, confidence=0.9)]
     win.result = result
     sr = audio_io.SR
-    win._live_signal = (
-        0.4 * np.sin(2 * np.pi * 220 * np.arange(int(0.3 * sr)) / sr)
-    ).astype(np.float32)
+    win._live_signal = (0.4 * np.sin(2 * np.pi * 220 * np.arange(int(0.3 * sr)) / sr)).astype(
+        np.float32
+    )
 
 
 def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
-    """🎙 and 🎹+🎙 drive the same playhead as the piano button."""
+    """The Voice and Together actions drive the same playhead as Piano."""
+    from v2m.core.i18n import tr
     from v2m.gui import main_window as mw
 
     _fake_sd_for_gui(monkeypatch)
@@ -1368,10 +1438,10 @@ def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
         win.player = mw.NotePlayer(win.result.notes, sr=audio_io.SR)
 
         win.on_toggle_voice()
-        assert _pump_until(
-            qapp, lambda: win.page_results.waveform._line.value() > 0.0, 5
-        ), "the playhead does not follow the voice"
-        assert win.page_results.btn_voice.text() == "■"
+        assert _pump_until(qapp, lambda: win.page_results.waveform._line.value() > 0.0, 5), (
+            "the playhead does not follow the voice"
+        )
+        assert win.page_results.btn_voice.text() == f"■ {tr('ui play voice')}"
         win.stop_playback()
         assert win.playback.mode is None
 
@@ -1382,7 +1452,7 @@ def test_voice_and_both_follow_the_playhead(qapp, monkeypatch):
             5,
         ), "the combined mode must sound both sources"
         win.stop_playback()
-        assert win.page_results.btn_both.text() == "🎹+🎙"
+        assert win.page_results.btn_both.text() == f"▶ {tr('ui play both')}"
     finally:
         win.close()
 
@@ -1511,8 +1581,11 @@ def test_piano_volume_rebuilds_player(qapp):
     win = mw.MainWindow()
     try:
         win.result = AnalysisResult(
-            source="live", duration_s=1.0,
-            notes=[Note(0.0, 1.0, 60, 0.9)], tempo=None, key=None,
+            source="live",
+            duration_s=1.0,
+            notes=[Note(0.0, 1.0, 60, 0.9)],
+            tempo=None,
+            key=None,
         )
         win._live_signal = np.zeros(audio_io.SR, np.float32)
         win.page_results.slider_volume.setValue(70)
@@ -1542,8 +1615,11 @@ def test_back_home_stops_the_audio(qapp, monkeypatch):
     win = mw.MainWindow()
     try:
         win.result = AnalysisResult(
-            source="live", duration_s=1.0,
-            notes=[Note(0.0, 1.0, 60, 0.9)], tempo=None, key=None,
+            source="live",
+            duration_s=1.0,
+            notes=[Note(0.0, 1.0, 60, 0.9)],
+            tempo=None,
+            key=None,
         )
         win._live_signal = np.zeros(audio_io.SR, np.float32)
         win.player = mw.NotePlayer(win.result.notes, sr=audio_io.SR)
@@ -1602,11 +1678,9 @@ def test_dragging_a_bar_moves_the_note_as_one_recorded_edit(qapp):
     win._show_result(result)
     try:
         win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
-        moved = result.notes[1]
+        moved = win.result.notes[1]
         assert (moved.start, moved.end, moved.midi) == (0.7, 1.1, 62)
-        assert "déplacée" in win.statusBar().currentMessage(), (
-            win.statusBar().currentMessage()
-        )
+        assert "déplacée" in win.statusBar().currentMessage(), win.statusBar().currentMessage()
         assert win._edit_history.can_undo
         win.on_undo_edit()
         restored = win.result.notes[1]  # the undo lands a restored COPY
@@ -1637,8 +1711,9 @@ def test_a_drag_is_refused_where_no_edit_may_happen(qapp):
     try:
         win.on_back_home()  # the edits live on the results page only
         win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
-        assert [(n.start, n.end, n.midi) for n in result.notes] == [
-            (0.1, 0.5, 60), (0.6, 1.0, 64),
+        assert [(n.start, n.end, n.midi) for n in win.result.notes] == [
+            (0.1, 0.5, 60),
+            (0.6, 1.0, 64),
         ]
         assert not win._edit_history.can_undo
     finally:
@@ -1752,8 +1827,11 @@ def test_reinterpret_button_rereads_evidence_without_pyin(qapp, monkeypatch):
     win = mw.MainWindow()
     try:
         win.result = AnalysisResult(
-            source="test.wav", duration_s=t,
-            notes=[Note(0.0, 0.3, 57, 0.9)], tempo=None, key=None,
+            source="test.wav",
+            duration_s=t,
+            notes=[Note(0.0, 0.3, 57, 0.9)],
+            tempo=None,
+            key=None,
             observation=observation,
         )
         before = len(win.result.notes)
@@ -1766,8 +1844,7 @@ def test_reinterpret_button_rereads_evidence_without_pyin(qapp, monkeypatch):
 
         from v2m.core import pitch as pitch_mod
 
-        monkeypatch.setattr(pitch_mod, "track_pitch_offline",
-                            lambda *a, **k: _forbidden("pYIN"))
+        monkeypatch.setattr(pitch_mod, "track_pitch_offline", lambda *a, **k: _forbidden("pYIN"))
         monkeypatch.setattr(sf, "read", lambda *a, **k: _forbidden("décodage"))
 
         win.page_results.spin_min_note.setValue(80)
@@ -1872,6 +1949,23 @@ def test_full_reanalysis_uses_retained_audio_and_publishes_only_on_success(qapp,
         assert not win.page_results._full_reanalysis_active
         assert win.page_results.btn_export.isEnabled()
         assert win.statusBar().currentMessage() == tr("ui status full reanalyzed").format(n=2)
+
+        # A duplicate completion carries the consumed worker token and must
+        # not publish a second result or clear a later workflow's context.
+        later = AnalysisResult(
+            source="later.wav",
+            duration_s=0.5,
+            notes=[Note(0.1, 0.3, 62, 0.9)],
+            tempo=None,
+            key=None,
+        )
+        later_audio = np.full(64, 0.25, dtype=np.float32)
+        win.result = later
+        win._signal_cache = {later.source: later_audio}
+        win._show_result(later, later_audio)
+        worker.finishedOk.emit(updated)
+        assert win.result is later
+        assert win._signal_cache[later.source] is later_audio
     finally:
         win.close()
 
@@ -1962,6 +2056,86 @@ def test_full_reanalysis_requires_available_audio(qapp):
         win.close()
 
 
+def test_abandoned_replacement_completion_cannot_replace_a_newer_reading(qapp):
+    """A queued splice completion is inert after its decision was abandoned."""
+    from v2m.core.edits import snapshot_state
+    from v2m.core.notes import Note
+    from v2m.core.pipeline import AnalysisResult
+    from v2m.core.tempo import TempoResult
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    sr = 8000
+    original = AnalysisResult(
+        source="live",
+        duration_s=1.5,
+        notes=[Note(0.1, 0.4, 60, 0.9), Note(0.7, 1.0, 64, 0.9)],
+        tempo=TempoResult(bpm=120.0, beats=np.arange(0.0, 1.5, 0.5)),
+        key=None,
+        pitch=None,
+        sr=sr,
+    )
+    original_audio = np.linspace(-0.2, 0.2, int(1.5 * sr), dtype=np.float32)
+    win.result = original
+    win._live_signal = original_audio
+    win.take_ctl.set_signal(original_audio.tobytes())
+    win._show_result(original, original_audio)
+    active_token: int | None = None
+    try:
+        before = snapshot_state(original, original_audio, action="replacement")
+        replacement = win._workflow.begin_replacement(before, 0, 0, False)
+        assert replacement is not None
+        assert win._workflow.begin_splice_analysis(replacement.token) is not None
+        assert win._workflow.set_splice_window(replacement.token, (0.1, 0.4))
+        stale_token = replacement.token
+
+        win._abandon_pending_replacement()
+        newer = AnalysisResult(
+            source="new.wav",
+            duration_s=0.5,
+            notes=[Note(0.1, 0.3, 67, 0.9)],
+            tempo=None,
+            key=None,
+            pitch=None,
+            sr=sr,
+        )
+        newer_audio = np.full(int(0.5 * sr), 0.125, dtype=np.float32)
+        win.result = newer
+        win._live_signal = None
+        win._signal_cache = {newer.source: newer_audio}
+        win._show_result(newer, newer_audio)
+        active = win._workflow.begin_full_reanalysis(newer, newer_audio)
+        assert active is not None
+        active_token = active.token
+        history = win._edit_history.entries(snapshot_state(newer, newer_audio))
+
+        stale_candidate = AnalysisResult(
+            source="live",
+            duration_s=1.0,
+            notes=[Note(0.2, 0.8, 72, 0.9)],
+            tempo=None,
+            key=None,
+            pitch=None,
+            sr=sr,
+        )
+        win._on_replacement_analysis_done(
+            stale_candidate, np.ones(sr, dtype=np.float32), stale_token
+        )
+
+        assert win.result is newer
+        assert win._signal_cache == {newer.source: newer_audio}
+        assert win._live_signal is None
+        assert win._edit_history.entries(snapshot_state(newer, newer_audio)) == history
+        assert win._workflow.is_current(active.token, mw.WorkflowPhase.FULL_REANALYSIS)
+        assert win.page_results.results._values["key notes count"].text() == "1"
+    finally:
+        win._workflow.abandon_replacement()
+        # The synthetic full-reanalysis operation has no thread to finish.
+        if active_token is not None:
+            win._workflow.fail_full_reanalysis(active_token)
+        win.close()
+
+
 def test_results_control_column_scrolls_at_compact_window_height(qapp):
     """The diagnostics and lower actions stay reachable without enlarging."""
     from PyQt6.QtCore import QRect
@@ -2012,7 +2186,11 @@ def test_reinterpret_button_errors_without_evidence(qapp):
     win = mw.MainWindow()
     try:
         win.result = AnalysisResult(
-            source="x", duration_s=1.0, notes=[], tempo=None, key=None,
+            source="x",
+            duration_s=1.0,
+            notes=[],
+            tempo=None,
+            key=None,
         )
         win.on_reinterpret()  # must show the banner, not raise
         # the warning is announced, not silently swallowed
@@ -2031,8 +2209,11 @@ def test_live_keyboard_marks_expected_pitch(qapp):
     win = mw.MainWindow()
     try:
         win.result = AnalysisResult(
-            source="live", duration_s=1.0,
-            notes=[Note(0.0, 1.0, 60, 0.9)], tempo=None, key=None,
+            source="live",
+            duration_s=1.0,
+            notes=[Note(0.0, 1.0, 60, 0.9)],
+            tempo=None,
+            key=None,
         )
         win._live_t = 0.5
         win._on_live_note((60.0, 261.63))
@@ -2141,12 +2322,10 @@ def test_releasing_a_drag_auditions_the_note_before_then_after(qapp, monkeypatch
     try:
         assert win._auditions.active_identity is None
         played: list[str] = []
-        monkeypatch.setattr(
-            win.playback, "play", lambda mode, t=0.0: played.append(mode) or True
-        )
+        monkeypatch.setattr(win.playback, "play", lambda mode, t=0.0: played.append(mode) or True)
         win.page_results.piano.note_dragged.emit(1, 0.7, 1.1, 62)
 
-        moved = result.notes[1]
+        moved = win.result.notes[1]
         assert (moved.start, moved.end, moved.midi) == (0.7, 1.1, 62)
         # the controller owns the sequence: the drag identity is active
         assert win._auditions.active_kind == "drag"

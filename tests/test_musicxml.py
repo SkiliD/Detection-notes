@@ -8,11 +8,11 @@ from scorexml import assert_measures_close, score_root, text_of
 from v2m.core.grid import BeatGrid, Meter
 from v2m.core.keys import KeyCandidate, KeyResult
 from v2m.core.musicxml import (
-    DIVISIONS,
     _TUPLET_STEPS,
     _TYPE_BY_STEPS,
-    build_score_xml,
+    DIVISIONS,
     _key_fifths,
+    build_score_xml,
     save_musicxml,
 )
 from v2m.core.notation import layout_staff
@@ -45,30 +45,20 @@ def test_valid_xml_and_structure():
     assert text_of(attrs.find("clef/sign")) == "G"
 
 
-def test_measures_fill_total_duration():
-    # 4 quarters = 1 measure of 4/4
-    notes = [Note(start=i * 0.5, end=(i + 1) * 0.5, midi=60 + i, confidence=0.9) for i in range(4)]
-    xml = build_score_xml(notes, GRID, KEY_C)
-    root = _parse(xml)
-    measures = root.findall("part/measure")
-    assert len(measures) == 1
-    # 4 notes, no rests
-    rest = root.findall("part/measure/note/rest")
-    assert len(rest) == 0
-
-
 def test_key_fifths_mapping():
     assert _key_fifths("C", "major") == 0
     assert _key_fifths("G", "major") == 1
     assert _key_fifths("Eb", "major") == -3
-    assert _key_fifths("A", "minor") == 0      # C major's relative
-    assert _key_fifths("Em", "minor") == 0 if False else _key_fifths("E", "minor") == 1
+    assert _key_fifths("A", "minor") == 0  # C major's relative
+    assert _key_fifths("E", "minor") == 1
 
 
 def test_long_note_tied_across_beats():
     # half note (2 beats) -> two tied notes
-    notes = [Note(start=0.0, end=1.0, midi=60, confidence=0.9),
-             Note(start=1.0, end=1.5, midi=60, confidence=0.9)]
+    notes = [
+        Note(start=0.0, end=1.0, midi=60, confidence=0.9),
+        Note(start=1.0, end=1.5, midi=60, confidence=0.9),
+    ]
     xml = build_score_xml(notes, GRID, KEY_C)
     root = _parse(xml)
     notes_xml = root.findall("part/measure/note")
@@ -153,17 +143,17 @@ def test_unlabeled_rest_still_engraves_its_duration():
         Note(start=0.0, end=0.5, midi=60, confidence=0.9),
         Note(start=1.5, end=2.0, midi=62, confidence=0.9),
     ]
-    rests = [Rest(start=0.5, end=1.5)]          # 2 beats, unknown figure
+    rests = [Rest(start=0.5, end=1.5)]  # 2 beats, unknown figure
     xml = build_score_xml(notes, GRID, KEY_C, rests=rests)
     root = _parse(xml)
     rest_notes = [n for n in root.findall("part/measure/note") if n.find("rest") is not None]
-    assert len(rest_notes) == 1                           # merged, not fragmented
-    assert text_of(rest_notes[0].find("duration")) == "48"    # 2 beats = 48 divisions
-    assert text_of(rest_notes[0].find("type")) == "half"      # the real value, not generic
+    assert len(rest_notes) == 1  # merged, not fragmented
+    assert text_of(rest_notes[0].find("duration")) == "48"  # 2 beats = 48 divisions
+    assert text_of(rest_notes[0].find("type")) == "half"  # the real value, not generic
 
 
 # ------------------------------------------- what the takes never exercise
-BEAT, SLOT = 0.5, 0.75          # 120 BPM: a quarter beat, a dotted beat
+BEAT, SLOT = 0.5, 0.75  # 120 BPM: a quarter beat, a dotted beat
 GRID_44 = BeatGrid(BPM)
 GRID_68 = BeatGrid(BPM, Meter(6, 8))
 
@@ -178,7 +168,8 @@ SYNTHETIC = {
     "4/4 plein": lambda: (GRID_44, [_note(60 + i, i * BEAT, (i + 1) * BEAT) for i in range(4)]),
     "4/4 note tenue": lambda: (GRID_44, [_note(60, 0.0, 2 * BEAT)]),
     "4/4 seizièmes": lambda: (
-        GRID_44, [_note(60 + i, i * BEAT / 4, (i + 1) * BEAT / 4) for i in range(4)]
+        GRID_44,
+        [_note(60 + i, i * BEAT / 4, (i + 1) * BEAT / 4) for i in range(4)],
     ),
     "4/4 triolet de croches": lambda: (
         GRID_44,
@@ -188,31 +179,26 @@ SYNTHETIC = {
     "6/8 vide": lambda: (GRID_68, []),
     "6/8 partiel": lambda: (GRID_68, [_note(60, 0.0, SLOT)]),
     "6/8 trois mesures": lambda: (
-        GRID_68, [_note(60 + i, i * SLOT, (i + 1) * SLOT) for i in range(6)]
+        GRID_68,
+        [_note(60 + i, i * SLOT, (i + 1) * SLOT) for i in range(6)],
     ),
 }
 
 
 @pytest.mark.parametrize("label", sorted(SYNTHETIC))
-def test_a_synthetic_score_closes_and_its_types_do_not_lie(label):
-    """The contract also holds where the two takes never go: a 6/8 measure of
-    two dotted beats (36 divisions), a triplet (two thirds of a duration),
-    short durations. A 6/8 engraved over six beats instead of two came out
-    three times too long and did not close."""
+def test_a_synthetic_score_closes_with_valid_types_and_snapped_durations(label):
+    """Each synthetic meter closes, and snapped notes stay at least a sixteenth."""
     grid, notes = SYNTHETIC[label]()
-    assert_measures_close(score_root(build_score_xml(notes, grid, KEY_C)), label)
+    root = score_root(build_score_xml(notes, grid, KEY_C))
+    assert_measures_close(root, label)
+    for note in root.findall("part/measure/note"):
+        assert int(text_of(note.find("duration"))) >= 6, label
+        assert text_of(note.find("type")) != "32nd", label
 
-
-def test_the_snapped_score_writes_no_duration_below_a_sixteenth():
-    """The 32nd (3 divisions at 24 per beat) is expressible, but the snapped
-    path never goes there: boundaries sit on quarter beats, so the shortest
-    written value is a sixteenth (6 divisions) and the type never appears."""
-    for label, make in sorted(SYNTHETIC.items()):
-        grid, notes = make()
-        root = score_root(build_score_xml(notes, grid, KEY_C))
-        for n in root.findall("part/measure/note"):
-            assert int(text_of(n.find("duration"))) >= 6, label
-            assert text_of(n.find("type")) != "32nd", label
+    if label == "4/4 plein":
+        measures = root.findall("part/measure")
+        assert len(measures) == 1
+        assert root.findall("part/measure/note/rest") == []
 
 
 def test_the_closure_property_refuses_a_type_that_lies_about_its_duration():
@@ -223,8 +209,8 @@ def test_the_closure_property_refuses_a_type_that_lies_about_its_duration():
         '<?xml version="1.0"?><score-partwise><part><measure number="1">'
         "<attributes><divisions>24</divisions><time><beats>4</beats>"
         "<beat-type>4</beat-type></time></attributes>"
-        + '<note><rest/><duration>24</duration><type>quarter</type></note>' * 3
-        + '<note><rest/><duration>24</duration><type>half</type></note>'
+        + "<note><rest/><duration>24</duration><type>quarter</type></note>" * 3
+        + "<note><rest/><duration>24</duration><type>half</type></note>"
         + "</measure></part></score-partwise>"
     )
     with pytest.raises(AssertionError, match="half pour 24 divisions"):
@@ -281,8 +267,8 @@ def test_a_dotted_sixteenth_is_written_on_the_staff_but_snapped_in_the_file():
     sounding = [n for n in _parse(xml).findall("part/measure/note") if n.find("rest") is None]
     assert [text_of(n.find("type")) for n in sounding] == ["eighth", "eighth"]
     assert [int(text_of(n.find("duration"))) for n in sounding] == [12, 12]
-    assert "<time-modification>" not in xml       # hence no triplet
-    assert 0.375 * DIVISIONS in _TYPE_BY_STEPS    # 9: the value is expressible
+    assert "<time-modification>" not in xml  # hence no triplet
+    assert 0.375 * DIVISIONS in _TYPE_BY_STEPS  # 9: the value is expressible
 
 
 def test_an_isolated_short_note_keeps_its_duration_and_rests_the_beat():
@@ -291,13 +277,15 @@ def test_an_isolated_short_note_keeps_its_duration_and_rests_the_beat():
     beat."""
     notes = [Note(start=0.0, end=GRID.seconds(0.5), midi=60, confidence=0.9)]
     written = [
-        (text_of(n.find("type")), int(text_of(n.find("duration"))),
-         "silence" if n.find("rest") is not None else "note")
+        (
+            text_of(n.find("type")),
+            int(text_of(n.find("duration"))),
+            "silence" if n.find("rest") is not None else "note",
+        )
         for n in _parse(build_score_xml(notes, GRID, KEY_C)).findall("part/measure/note")
     ]
     # sung eighth + eighth rest + dotted half for the remainder
-    assert written == [("eighth", 12, "note"), ("eighth", 12, "silence"),
-                       ("half", 72, "silence")]
+    assert written == [("eighth", 12, "note"), ("eighth", 12, "silence"), ("half", 72, "silence")]
 
 
 def test_a_silent_compound_measure_closes_on_a_dotted_half_rest():

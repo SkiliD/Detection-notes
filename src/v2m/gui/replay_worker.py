@@ -11,8 +11,8 @@ trend read back without re-running anything.
 
 Two hard rules, both learned the hard way elsewhere in this codebase:
 
-- **Never block the UI**: the replay costs the take's DURATION (real-time
-  delivery is the only honest clock — AGENTS.md). It lives on its own
+- **Never block the UI**: replay delivery follows the take's DURATION,
+  measured on the real clock. It lives on its own
   QThread, emits `done`/`failed` through queued connections (thread-safe
   by construction), and `stop()` breaks the wait loop without touching
   any stream: `closeEvent` calls it, so closing the window never joins a

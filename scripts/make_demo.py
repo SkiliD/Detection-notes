@@ -27,13 +27,19 @@ def voice_note(f0: float, dur: float, sr: int = SR, amp: float = 0.4) -> np.ndar
     return (amp * y * env).astype(np.float32)
 
 
-# C major scale up + down (C4..C5..C4), long final tonic
+# C major scale up + down (C4..C5..C4), long final tonic, then a low C2 pedal.
+#
+# The pedal is not decoration: `web/test/yin-rates.json` reads the take's TAIL,
+# and a C2's period (~337 samples at 22 050 Hz) is what puts the YIN's lag
+# search at the edge of `tau_max` (339 there, 678 at 44.1 kHz, 738 at 48 kHz).
+# A C4..C5 melody never reaches that edge, so the capture-rate fixture would
+# pass while the low-lag limit stayed untested.
 scale_hz = [261.63, 293.66, 329.63, 349.23, 392.0, 440.0, 493.88, 523.25]
-seq = scale_hz + list(reversed(scale_hz[:-1])) + [261.63]
-durs = [BEAT] * (len(seq) - 1) + [2 * BEAT]
+seq = scale_hz + list(reversed(scale_hz[:-1])) + [261.63, 65.41]
+durs = [BEAT] * (len(seq) - 2) + [2 * BEAT, 2 * BEAT]
 
 parts = []
-for hz, d in zip(seq, durs):
+for hz, d in zip(seq, durs, strict=True):
     parts.append(voice_note(hz, d - 0.04))
     parts.append(np.zeros(int(0.04 * SR), dtype=np.float32))  # articulation micro-gap
 

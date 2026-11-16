@@ -1,4 +1,5 @@
 # ===== Voix -> MIDI — ignore everything that is not a source =====
+# Guided results review keeps no persistent state or generated output.
 
 # --- Virtual environments ---
 .venv/
@@ -37,6 +38,7 @@ coverage.xml
 .freebuff/
 
 # --- Generated audio artifacts (analysis, demo, tests) ---
+# Live take folders include immutable automatic/corrected reading archives.
 *.wav
 *.mp3
 *.flac
@@ -47,12 +49,13 @@ coverage.xml
 *.midi
 /live_*
 prises_live/
-# persisted vocal observations (<take>.observation.npz, scripts/reinterpret.py)
+# persisted vocal observations (analysis and replay share <take>.observation.npz)
 *.npz
 
 # --- Analysis outputs: scores + reports (export_result) ---
 # Everything the pipeline writes with an arbitrary prefix:
 # .musicxml / .pdf (MuseScore-LilyPond engraving) / .json / .csv
+# Coherence, intonation registers, closed labels and live/final rates share these outputs.
 *.musicxml
 *.pdf
 *.json
@@ -65,6 +68,15 @@ prises_live/
 # it is a fingerprint, not an analysis output — it must be tracked.
 !tests/data/*.wav
 !tests/reference/*.json
+# the web page's own sources: its two-language labels and the conformance
+# cases the JavaScript port replays (web/, see AGENTS.md)
+!/web/strings.json
+!/web/test/cases.json
+!/web/test/yin.json
+!/web/test/yin-rates.json
+# NB: demo.wav stays ignored (make_demo.py regenerates it), so yin.json and
+# yin-rates.json are the committed half of those comparisons and must NEVER be
+# ignored.
 
 # --- IDE / editors ---
 .idea/
@@ -95,8 +107,10 @@ docker-compose.override.yml
 /demo_dbg.*
 /_ours.pdf
 /_via_py.pdf
-# temporary captures and logs of the GUI / PDF checks
+# temporary captures and logs of the GUI / PDF checks (including home-screen layout)
 /shot_*.png
+# the Pages workflow's 1600 px screenshot (web/test/wide-shot.mjs)
+/wide-*.png
 /_*.txt
 /_dbg.log
 /out_dir
@@ -109,6 +123,9 @@ docs/adr/
 /docs/agents/*
 !/docs/agents/issue-tracker.md
 !/docs/agents/domain.md
+!/docs/superpowers/
+!/docs/superpowers/specs/
+!/docs/superpowers/specs/2026-10-25-analysis-workflow-design.md
 /out*
 # prises_verite: the TAKES and truths stay personal (wav/json), but the
 # README committing the format and the non-drift fingerprints are tracked

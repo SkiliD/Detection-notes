@@ -1,6 +1,5 @@
 """Tests for the local playback renderer (playback.render_notes)."""
 
-import threading
 import time
 import types
 
@@ -9,12 +8,20 @@ import pytest
 
 from v2m.core import audio_io, playback
 from v2m.core.notes import Note
-from v2m.core.playback import PlaybackSession, NotePlayer, Timeline, render_notes, pitch_shift_signal
+from v2m.core.playback import (
+    NotePlayer,
+    PlaybackSession,
+    Timeline,
+    pitch_shift_signal,
+    render_notes,
+)
 
 
 def test_render_produces_nonempty_signal():
-    notes = [Note(start=0.0, end=0.5, midi=60, confidence=0.9),
-             Note(start=0.5, end=1.0, midi=64, confidence=0.9)]
+    notes = [
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),
+        Note(start=0.5, end=1.0, midi=64, confidence=0.9),
+    ]
     y = render_notes(notes, sr=22050)
     assert len(y) > 0
     assert np.max(np.abs(y)) > 0.1
@@ -22,8 +29,10 @@ def test_render_produces_nonempty_signal():
 
 
 def test_render_duration_covers_last_note():
-    notes = [Note(start=0.0, end=0.5, midi=60, confidence=0.9),
-             Note(start=1.5, end=2.0, midi=67, confidence=0.9)]
+    notes = [
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),
+        Note(start=1.5, end=2.0, midi=67, confidence=0.9),
+    ]
     y = render_notes(notes, sr=22050)
     assert len(y) >= int(2.0 * 22050)
 
@@ -78,22 +87,12 @@ def test_note_player_is_a_rendered_source():
     assert not hasattr(p, "playing") and not hasattr(p, "bind_session")
 
 
-def test_render_sample_exact_tone_length():
-    """tone() uses the EXACT sample slice length: a seconds round-trip
-    (int(dur * sr)) loses one sample on some durations -> ValueError while
-    mixing (30870 vs 30869 samples). `end` below makes i1 - i0 == 30870."""
-    sr = audio_io.SR
-    end = (30870 + 0.5) / sr  # int(end * sr) == 30870 exactly
-    notes = [Note(start=0.0, end=end, midi=60, confidence=0.9)]
-    y = render_notes(notes, sr=sr)  # used to raise ValueError
-    assert len(y) > 0
-
-
 def test_render_prime_and_edge_lengths():
-    """Off-by-one-prone slice lengths must all render without a shape error."""
+    """Off-by-one-prone sample slices must render without a shape error."""
+    sr = audio_io.SR
     for n in (1, 7, 30869, 30870, 30871):
-        notes = [Note(start=0.0, end=(n + 0.5) / 22050, midi=60, confidence=0.9)]
-        assert len(render_notes(notes, sr=22050)) >= n
+        notes = [Note(start=0.0, end=(n + 0.5) / sr, midi=60, confidence=0.9)]
+        assert len(render_notes(notes, sr=sr)) >= n
 
 
 def test_render_arbitrary_durations_never_crash():
@@ -118,6 +117,7 @@ def test_render_arbitrary_durations_never_crash():
 # ----------------------------------------------------------------------
 # PlaybackSession: THE player (one OutputStream, one clock)
 # ----------------------------------------------------------------------
+
 
 class FakeOutputStream:
     """Records what a player streams; simulates a slow device drain."""
@@ -147,16 +147,13 @@ class FakeOutputStream:
 
 def _fake_sd(monkeypatch) -> list[FakeOutputStream]:
     FakeOutputStream.instances = []
-    monkeypatch.setattr(
-        playback, "sd", types.SimpleNamespace(OutputStream=FakeOutputStream)
-    )
+    monkeypatch.setattr(playback, "sd", types.SimpleNamespace(OutputStream=FakeOutputStream))
     return FakeOutputStream.instances
 
 
 def _notes(n: int = 30) -> list[Note]:
     return [
-        Note(start=0.1 * i, end=0.1 * i + 0.09, midi=60 + (i % 5), confidence=0.9)
-        for i in range(n)
+        Note(start=0.1 * i, end=0.1 * i + 0.09, midi=60 + (i % 5), confidence=0.9) for i in range(n)
     ]
 
 
@@ -236,9 +233,7 @@ def test_pitch_shift_has_the_requested_frequency_and_keeps_the_tail():
     expected = 220.0 * 2.0 ** (3.0 / 12.0)
     assert _peak_frequency(up, sr) == pytest.approx(expected, abs=3.0)
     assert np.max(np.abs(up[-sr // 10 :])) > 0.1
-    assert float(np.sqrt(np.mean(up**2))) == pytest.approx(
-        float(np.sqrt(np.mean(y**2))), rel=0.2
-    )
+    assert float(np.sqrt(np.mean(up**2))) == pytest.approx(float(np.sqrt(np.mean(y**2))), rel=0.2)
 
 
 def test_pitch_shift_supports_downward_transposition():
@@ -346,7 +341,10 @@ def test_render_notes_do_not_overlap_the_next_onset_too_much():
     """The human offset (a soft note starts ~18 ms late) stays under the
     collision window: two consecutive eighths do not overlap to the point
     of blurring the next attack."""
-    notes = [_one_note(start=0.0, dur=0.3, strength=0.0), _one_note(start=0.3, dur=0.3, strength=0.0)]
+    notes = [
+        _one_note(start=0.0, dur=0.3, strength=0.0),
+        _one_note(start=0.3, dur=0.3, strength=0.0),
+    ]
     y = render_notes(notes, sr=22050)
     assert len(y) > int(0.62 * 22050)  # the shifted second note still renders
 

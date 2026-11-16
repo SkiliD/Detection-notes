@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .grid import BeatGrid, CATALOGUE, Figure
+from .grid import CATALOGUE, BeatGrid, Figure
 
 LETTERS = ("C", "D", "E", "F", "G", "A", "B")
 LETTER_PC = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -295,6 +295,16 @@ def layout_staff(
         )
 
     measures = max(1, int(out[-1].onset // beats_per_measure) + 1) if out else 0
+    key_tonic = None
+    key_mode = None
+    if isinstance(key, str):
+        key_tonic, _, key_mode = key.partition(" ")
+        key_tonic = key_tonic or None
+        key_mode = key_mode or None
+    elif key is not None:
+        key_tonic = getattr(key, "tonic", None)
+        key_mode = getattr(key, "mode", None)
+
     return StaffLayout(
         notes=out,
         rests=silences,
@@ -303,8 +313,8 @@ def layout_staff(
         slot_quarters=slot_quarters,
         fifths=fifths,
         meter_label=grid.meter.label,
-        key_tonic=getattr(key, "tonic", None) or (str(key).partition(" ")[0] or None),
-        key_mode=getattr(key, "mode", None) or (str(key).partition(" ")[2] or None),
+        key_tonic=key_tonic,
+        key_mode=key_mode,
     )
 
 

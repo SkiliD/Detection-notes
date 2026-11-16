@@ -38,6 +38,7 @@ pitch deviations by deviation — the bands that decide the key snap
 (AMBIGUOUS_DEV_ST). And the LIVE path replayed in stream: real display
 latency (confirm_s), the note in progress, and where real time is spent.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,13 +74,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("audio", nargs="?", default=DEFAULT_AUDIO, help="audio file to analyze")
     p.add_argument("--truth", help="JSON of known notes (ground truth)")
     p.add_argument("--json", dest="json_out", help="write the report as JSON")
-    p.add_argument("--no-attacks", action="store_true", help="without attack evidence (geometry only)")
-    p.add_argument("--compare", action="store_true",
-                   help="replay the analysis and check the segmentation numbers' stability")
-    p.add_argument("--golden", action="store_true",
-                   help="save the segmentation fingerprint to <audio>.golden.json")
-    p.add_argument("--diagnose", action="store_true",
-                   help="thresholds audit: pitch ranges, strengths, deviations, the live path")
+    p.add_argument(
+        "--no-attacks", action="store_true", help="without attack evidence (geometry only)"
+    )
+    p.add_argument(
+        "--compare",
+        action="store_true",
+        help="replay the analysis and check the segmentation numbers' stability",
+    )
+    p.add_argument(
+        "--golden",
+        action="store_true",
+        help="save the segmentation fingerprint to <audio>.golden.json",
+    )
+    p.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="thresholds audit: pitch ranges, strengths, deviations, the live path",
+    )
     p.add_argument("--output", help="folder for the exported artifacts (default: temporary)")
     return p.parse_args(argv)
 
@@ -92,7 +104,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def analyze(path: str, use_attacks: bool, out_dir: Path):
     """Analyze the file and return (result, detected attacks)."""
     y = audio_io.load_file(path)
-    result = analyze_signal(y, audio_io.SR, source=path, opts=AnalyzeOptions(use_attacks=use_attacks))
+    result = analyze_signal(
+        y, audio_io.SR, source=path, opts=AnalyzeOptions(use_attacks=use_attacks)
+    )
     found = detect_attacks(y, audio_io.SR)
     export_result(result, str(out_dir / Path(path).stem))
     return result, found
@@ -116,9 +130,7 @@ def diagnostics(result, attacks, attacks_used: bool) -> dict:
     onsets = [n.start for n in result.notes]
     articulated = sum(1 for t in onsets if attacks.near(t, ATTACK_TOL_S) is not None)
     orphans = [
-        float(t)
-        for t in attacks.times
-        if not any(abs(t - o) <= ATTACK_TOL_S for o in onsets)
+        float(t) for t in attacks.times if not any(abs(t - o) <= ATTACK_TOL_S for o in onsets)
     ]
     fragments = [
         {"midi": n.midi, "start": round(n.start, 3), "duration": round(n.duration, 3)}
@@ -152,7 +164,9 @@ def diagnostics(result, attacks, attacks_used: bool) -> dict:
 
 def _deciles(values) -> list[float]:
     """A series' deciles, rounded (empty -> [])."""
-    return [round(float(v), 3) for v in np.percentile(values, np.arange(0, 101, 10))] if len(values) else []
+    if not len(values):
+        return []
+    return [round(float(v), 3) for v in np.percentile(values, np.arange(0, 101, 10))]
 
 
 def diagnose_thresholds(result) -> dict:
@@ -182,7 +196,11 @@ def diagnose_thresholds(result) -> dict:
         [float(n.midi) + float(getattr(n, "deviation", 0.0)) for n in result.notes]
     )
     return {
-        "pitch_range_hz": [round(float(voiced_hz.min()), 1), round(float(voiced_hz.max()), 1)] if len(voiced_hz) else None,
+        "pitch_range_hz": (
+            [round(float(voiced_hz.min()), 1), round(float(voiced_hz.max()), 1)]
+            if len(voiced_hz)
+            else None
+        ),
         "reading_bounds_hz": [FMIN, FMAX],
         "transition_share": round(trans_share, 3),
         "tuning_offset_cents": round(100.0 * tuning, 1),
@@ -192,6 +210,9 @@ def diagnose_thresholds(result) -> dict:
         "deviations_deciles": _deciles(deviations),
         "ambiguous_dev_threshold": AMBIGUOUS_DEV_ST,
         "notes_in_ambiguous_band": sum(1 for d in deviations if abs(d) >= AMBIGUOUS_DEV_ST),
+        # published doubt, never a filter: how many notes rested on frames
+        # whose voicing probability sat under the reading's own line
+        "voice_doubt_notes": sum(1 for n in result.notes if getattr(n, "voice_doubt", False)),
     }
 
 
@@ -205,7 +226,7 @@ def live_diagnosis(path: str) -> dict:
     (`core.compare` — the same net as the GUI marking and the JSON
     block), not a local rule.
     """
-    from v2m.core.compare import breakdown
+    from v2m.core.compare import breakdown, read_block
     from v2m.core.liveseg import LivePitchStream
     from v2m.core.pipeline import analyze_signal as _analyze
 
@@ -221,6 +242,7 @@ def live_diagnosis(path: str) -> dict:
     stream.seg.flush(len(y) / sr)
     result = _analyze(y, sr, source=path, opts=AnalyzeOptions())
     block = breakdown(stream.seg.notes, result.notes, result.grid)
+    parsed = read_block(block)
     return {
         "notes": len(stream.seg.notes),
         "first_active_s": round(first_on, 3) if first_on is not None else None,
@@ -229,6 +251,7 @@ def live_diagnosis(path: str) -> dict:
         "off1": block["off1"],
         "moved": block["moved"],
         "rate": block["rate"],
+        "comparable_rate": parsed.comparable_rate if parsed is not None else None,
     }
 
 
@@ -265,10 +288,7 @@ def summary(result) -> list[str]:
 
 def report(result, diag: dict, attacks_used: bool, table: bool = True) -> str:
     out = ["", "Analyse", "-------", *summary(result), "", "Découpage", "---------"]
-    out.append(
-        f"  attaques   : {diag['attacks']} "
-        f"(utilisées : {'oui' if attacks_used else 'non'})"
-    )
+    out.append(f"  attaques   : {diag['attacks']} (utilisées : {'oui' if attacks_used else 'non'})")
     out.append(
         f"  débuts     : {diag['articulated_onsets']} articulés, "
         f"{diag['unarticulated_onsets']} non (datés par la stabilisation)"
@@ -291,12 +311,11 @@ def truth_accuracy(path: str, truth_path: str) -> str:
     root = Path(v2m.__file__).resolve().parents[2]
     if str(root / "tests") not in sys.path:
         sys.path.insert(0, str(root / "tests"))
-    from voicetruth import SungNote, detect_notes, describe, measure  # test helper
+    from voicetruth import SungNote, describe, detect_notes, measure  # test helper
 
     payload = json.loads(Path(truth_path).read_text(encoding="utf-8"))
     truth = [
-        SungNote(int(n["midi"]), float(n["start_s"]), float(n["dur_s"]))
-        for n in payload["notes"]
+        SungNote(int(n["midi"]), float(n["start_s"]), float(n["dur_s"])) for n in payload["notes"]
     ]
     notes = detect_notes(audio_io.load_file(path), audio_io.SR)
     return "  " + describe(measure(notes, truth))
@@ -307,7 +326,6 @@ def truth_accuracy(path: str, truth_path: str) -> str:
 # `v2m.core.audit` — the FROZEN format is core, the script only prints
 # it. Imported at the top like every other v2m piece.
 # --------------------------------------------------------------------------- #
-
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -332,8 +350,10 @@ def main(argv: list[str] | None = None) -> int:
         pr = d["pitch_range_hz"]
         bounds = d["reading_bounds_hz"]
         print(
-            f"  hauteur courbe   : {pr[0]}-{pr[1]} Hz (bornes de lecture {bounds[0]}-{bounds[1]} Hz)"
-            if pr else "  hauteur courbe   : aucune trame voisée"
+            f"  hauteur courbe   : {pr[0]}-{pr[1]} Hz "
+            f"(bornes de lecture {bounds[0]}-{bounds[1]} Hz)"
+            if pr
+            else "  hauteur courbe   : aucune trame voisée"
         )
         print(f"  trames transition: {d['transition_share'] * 100:.1f} % (dérivée f0)")
         print(f"  accordage absorbé: {d['tuning_offset_cents']:+.1f} cents (offset global)")
@@ -348,9 +368,15 @@ def main(argv: list[str] | None = None) -> int:
             f"  chemin live      : {lv['notes']} notes, confirm_s={lv['confirm_s']}, "
             f"première note active à {lv['first_active_s']} s"
         )
+        comparable_rate = lv["comparable_rate"]
+        rate_label = (
+            f"{comparable_rate * 100:.0f}%"
+            if comparable_rate is not None
+            else "N/A (non comparable)"
+        )
         print(
             f"  live/final       : contours {lv['contours']} "
-            f"(±1: {lv['off1']}, déplacées: {lv['moved']}), taux {lv['rate']*100:.0f}%"
+            f"(±1: {lv['off1']}, déplacées: {lv['moved']}), taux {rate_label}"
         )
 
     stable = True

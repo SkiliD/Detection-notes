@@ -21,8 +21,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from v2m.core.pipeline import AnalyzeOptions, analyze_signal
 from v2m.core import audio_io
+from v2m.core.pipeline import AnalyzeOptions, analyze_signal
 
 
 def segmentation_fingerprint(result) -> dict:
@@ -66,10 +66,21 @@ def save_golden(audio: str, fingerprint: dict) -> Path:
     return path
 
 
+def voice_doubt_count(result) -> int:
+    """How many notes rest on UNCERTAIN voicing (published, never removed).
+
+    Deliberately OUTSIDE `segmentation_fingerprint`: a doubt describes the
+    evidence under a note, not a segmentation number, so counting it must
+    never move a golden reference.
+    """
+    return sum(1 for n in result.notes if getattr(n, "voice_doubt", False))
+
+
 def replay_fingerprint(path: str, use_attacks: bool) -> dict:
     """A full second pass (re-decoding included, no artifact written)."""
     y = audio_io.load_file(path)
-    result = analyze_signal(y, audio_io.SR, source=path, opts=AnalyzeOptions(use_attacks=use_attacks))
+    opts = AnalyzeOptions(use_attacks=use_attacks)
+    result = analyze_signal(y, audio_io.SR, source=path, opts=opts)
     return segmentation_fingerprint(result)
 
 
@@ -83,7 +94,7 @@ def compare_fingerprints(first: dict, second: dict) -> list[str]:
         if len(first[key]) != len(second[key]):
             lines.append(f"  {key} : {len(first[key])} -> {len(second[key])}")
             continue
-        for i, (a, b) in enumerate(zip(first[key], second[key])):
+        for i, (a, b) in enumerate(zip(first[key], second[key], strict=True)):
             if a != b:
                 lines.append(f"  {label} {i + 1} : {a} -> {b}")
     return lines

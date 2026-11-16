@@ -3,19 +3,14 @@
 The decisive split of the architecture passes: core owns the musical
 FACTS (bpm, meter, figures, grid), the GUI and the CLI own only the
 PRESENTATION and consume published facts (`note_closed` carries the
-labeled note and the grid). The regression to refuse is an adapter that
-RE-DERIVES a fact — it already happened three times: the CLI re-labeled
-the list (`estimate_bpm_live` + `label_notes` in `_on_event`), the GUI
-tick rebuilt a third `BeatGrid`, and the GUI metronome called
-`detect_meter` itself — which CRASHED silently on `LiveNote`s without a
-`strength` field.
+labeled note and the grid). Adapters never re-derive a musical fact: the
+CLI consumes the labels and grid published by the live take, the GUI tick reads
+the same grid, and the metronome consumes the detected meter. In particular,
+`detect_meter` expects analysis notes with a `strength` field, not `LiveNote`s.
 
 The check is an AST, not a grep: aliases (`import x as y`) and module
-path calls (`x.detect_meter(...)`) are seen like direct imports. The
-proof the guard bites lives in the test: the historical regressions,
-rewritten as snippets, are rejected by the same checker — should anyone
-reintroduce them in a real adapter, the first test fails by the same
-logic.
+path calls (`x.detect_meter(...)`) are seen like direct imports. Representative
+adapter snippets verify that the checker rejects forbidden imports and calls.
 """
 
 from __future__ import annotations
@@ -92,7 +87,6 @@ def test_adapters_import_no_detection_entry():
     ids=["cli-direct", "cli-alias", "gui-direct", "gui-module-path", "gui-labels",
          "live-module-must-not-come-back"],
 )
-def test_the_guard_bites_on_the_historical_regressions(snippet):
-    """The historical regressions (CLI re-labeling, GUI tick, GUI metronome
-    on detect_meter) are exactly what the checker refuses."""
+def test_the_guard_rejects_adapter_fact_derivation(snippet):
+    """Representative detection imports and calls are refused in adapters."""
     assert _violations(snippet), "the checker must reject this snippet"

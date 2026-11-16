@@ -63,6 +63,52 @@ def test_midi_transpose_and_velocity():
     assert all(40 <= m.velocity <= 127 for m in ons)
 
 
+@pytest.mark.parametrize("quantize", [None, 0.125])
+def test_repeated_key_releases_before_restrike_at_the_same_tick(tmp_path, quantize):
+    notes = [
+        Note(start=0.0, end=0.5, midi=60, confidence=0.9),
+        Note(start=0.5, end=1.0, midi=60, confidence=0.9),
+    ]
+    mid = build_midi(notes, GRID, key=None, quantize_s=quantize)
+    path = tmp_path / "repeat.mid"
+    mid.save(path)
+    events = []
+    tick = 0
+    for event in mido.MidiFile(path).tracks[1]:
+        tick += event.time
+        if tick == 480 and event.type in ("note_on", "note_off"):
+            events.append(event.type)
+    assert events == ["note_off", "note_on"]
+
+
+@pytest.mark.parametrize(
+    "mode,tonic,shift,expected",
+    [
+        ("major", "C", 2, "D"),
+        ("major", "B", 2, "C#"),
+        ("major", "C", -2, "Bb"),
+        ("minor", "A", 2, "Bm"),
+        ("minor", "D#", 1, "Em"),
+        ("minor", "C", -1, "Bm"),
+    ],
+)
+def test_transpose_moves_key_signature_with_notes(tmp_path, mode, tonic, shift, expected):
+    from v2m.core.keys import KeyCandidate, KeyResult
+
+    key = KeyResult(best=KeyCandidate(tonic, mode, 1.0), alternatives=[])
+    mid = build_midi(_sample_notes(), GRID, key=key, transpose=shift)
+    path = tmp_path / "transposed.mid"
+    mid.save(path)
+    loaded = mido.MidiFile(path)
+    signatures = [e.key for e in loaded.tracks[0] if e.type == "key_signature"]
+    assert signatures == [expected]
+    assert [e.note for e in loaded.tracks[1] if e.type == "note_on"] == [
+        60 + shift,
+        64 + shift,
+        67 + shift,
+    ]
+
+
 def test_quantize_aligns_to_grid():
     step = GRID.step_seconds(per_beat=4.0)  # sixteenth at 120 BPM
     assert abs(step - 0.125) < 1e-9
@@ -91,8 +137,8 @@ def test_a_held_note_writes_sustain_pedal_events():
     from v2m.core.grid import BeatGrid
 
     notes = [
-        Note(start=0.0, end=0.3, midi=60, confidence=0.9),   # short
-        Note(start=0.4, end=1.2, midi=64, confidence=0.9),   # held
+        Note(start=0.0, end=0.3, midi=60, confidence=0.9),  # short
+        Note(start=0.4, end=1.2, midi=64, confidence=0.9),  # held
     ]
     mid = build_midi(notes, BeatGrid(bpm=120.0, meter=None), key=None)
     # GRID is at 120 BPM -> MIDI ticks in beats = seconds x 2: we read

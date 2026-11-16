@@ -21,8 +21,7 @@ from v2m.core.notes import Note
 def _notes(deviations_st: list[float], start_midi: int = 60) -> list[Note]:
     """One note per deviation: `start` ascends so the time order is explicit."""
     return [
-        Note(start=i * 0.5, end=i * 0.5 + 0.4, midi=start_midi + i, confidence=0.9,
-             deviation=d)
+        Note(start=i * 0.5, end=i * 0.5 + 0.4, midi=start_midi + i, confidence=0.9, deviation=d)
         for i, d in enumerate(deviations_st)
     ]
 
@@ -92,6 +91,24 @@ def test_register_and_position_tendencies_are_read_separately():
     drifting = summarize(_notes([-0.30] * 6 + [0.30] * 6))
     assert drifting["by_position"]["start"]["mean_cents"] == -30.0
     assert drifting["by_position"]["end"]["mean_cents"] == 30.0
+
+
+def test_one_pitch_never_invents_several_registers():
+    notes = _notes([-0.2] * 4 + [0.2] * 8)
+    for note in notes:
+        note.midi = 60
+    assert all(value is None for value in summarize(notes)["by_register"].values())
+
+
+def test_register_bands_depend_on_pitch_not_repetition_count_or_order():
+    notes = _notes([-0.2] * 12 + [0.2] * 4)
+    for index, note in enumerate(notes):
+        note.midi = 60 if index < 12 else 72
+    bands = summarize(notes)["by_register"]
+    assert bands["low"] == {"n": 12, "mean_cents": -20.0}
+    assert bands["mid"] is None
+    assert bands["high"] == {"n": 4, "mean_cents": 20.0}
+    assert summarize(list(reversed(notes)))["by_register"] == bands
 
 
 def test_the_in_tune_band_is_the_one_the_gui_meter_uses():

@@ -4,8 +4,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
+import pytest
 from conftest import SR, silence, sine_note
+
 from v2m.core.notes import interpret
 from v2m.core.observation import VoiceObservation
 
@@ -13,7 +14,7 @@ from v2m.core.observation import VoiceObservation
 def _three_notes_signal() -> np.ndarray:
     return np.concatenate(
         [
-            sine_note(220.0, 0.5),   # A3
+            sine_note(220.0, 0.5),  # A3
             silence(0.15),
             sine_note(261.63, 0.5),  # C4
             silence(0.15),
@@ -22,29 +23,63 @@ def _three_notes_signal() -> np.ndarray:
     )
 
 
-def test_three_notes_detected():
+def test_three_notes_have_expected_pitch_and_timing():
     y = _three_notes_signal()
     notes = interpret(VoiceObservation.from_signal(y, SR))
     assert len(notes) == 3
-    midis = [n.midi for n in notes]
-    assert midis == [57, 60, 64]  # A3, C4, E4
-
-
-def test_note_times_reasonable():
-    y = _three_notes_signal()
-    notes = interpret(VoiceObservation.from_signal(y, SR))
-    # the first note starts near 0
+    assert [n.midi for n in notes] == [57, 60, 64]  # A3, C4, E4
     assert notes[0].start < 0.15
-    # each note's duration ~0.5 s (± tolerance)
-    for n in notes:
-        assert 0.3 < n.duration < 0.75
-    # chronological order
+    for note in notes:
+        assert 0.3 < note.duration < 0.75
     assert notes[0].end <= notes[1].start + 0.1
 
 
 def test_silence_gives_no_notes():
     y = np.zeros(SR * 2, dtype=np.float32)
     assert interpret(VoiceObservation.from_signal(y, SR)) == []
+
+
+def test_split_rearticulation_preserves_the_measured_deviation():
+    """A new segment keeps the held note's evidence, not a default zero."""
+    import numpy as np
+
+    from v2m.core.notes import Note, _split_rearticulated
+    from v2m.core.onsets import Attacks
+
+    note = Note(0.0, 1.2, 69, 0.9, deviation=0.24)
+    times = np.arange(0.0, 1.21, 0.02)
+    midi_curve = np.full(len(times), 69.28)
+    midi_curve[(times >= 0.4) & (times < 0.8)] = 69.30
+    attacks = Attacks(np.array([0.4, 0.8]), np.ones(2))
+
+    split = _split_rearticulated([note], attacks, midi_curve, times, tuning_offset_st=0.04)
+
+    assert len(split) == 3
+    assert [part.deviation for part in split] == pytest.approx([0.24, 0.26, 0.24])
+
+
+def test_a_refused_late_cut_keeps_an_independent_earlier_cut():
+    from v2m.core.notes import Note, _split_rearticulated
+    from v2m.core.onsets import Attacks
+
+    times = np.arange(0, 2.01, 0.02)
+    curve = np.full(len(times), 60.0)
+    curve[times > 1.2] = 64.0
+    note = Note(0.0, 2.0, 60, 0.9)
+    first = _split_rearticulated(
+        [note],
+        Attacks(np.array([0.5]), np.ones(1)),
+        curve,
+        times,
+    )
+    both = _split_rearticulated(
+        [note],
+        Attacks(np.array([0.5, 1.5]), np.ones(2)),
+        curve,
+        times,
+    )
+    assert [(n.start, n.end) for n in first] == [(0.0, 0.5), (0.5, 2.0)]
+    assert [(n.start, n.end) for n in both] == [(0.0, 0.5), (0.5, 2.0)]
 
 
 def test_vibrato_single_note():
@@ -129,4 +164,3 @@ def pytest_approx_cents(cents: float) -> float:
     import pytest
 
     return pytest.approx(cents, abs=0.08)
-    assert notes[0].midi == 69

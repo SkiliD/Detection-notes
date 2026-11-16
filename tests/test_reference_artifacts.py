@@ -67,8 +67,7 @@ def _analyse(take: Path, out_dir: Path) -> dict:
         "n_rests": len(res.rests or []),
         "tempo_bpm": res.tempo.bpm if res.tempo else 0.0,
         "sha256": {
-            name: hashlib.sha256((out_dir / name).read_bytes()).hexdigest()
-            for name in ARTIFACTS
+            name: hashlib.sha256((out_dir / name).read_bytes()).hexdigest() for name in ARTIFACTS
         },
     }
 
@@ -82,29 +81,31 @@ def _moved(want: dict, got: dict) -> str:
     )
 
 
-def test_the_reference_scores_fill_their_measures_and_agree_with_their_types(tmp_path):
-    """A score must close: every measure totals the duration its signature
-    announces, and every note's `<type>` equals its `<duration>` — on the
-    real takes, where the two numbers come from different paths (the
-    analysis for the duration, the catalogue for the type).
-    The snapped path is the only one concerned; `snap=False` is just a test
-    hook in `test_rests.py`."""
+@pytest.fixture(scope="module")
+def fresh_reference_artifacts(tmp_path_factory):
     present = [(name, ROOT / name) for name in TAKES if (ROOT / name).exists()]
     if not present:
         pytest.skip(f"no reference take in {ROOT}")
 
+    output_root = tmp_path_factory.mktemp("reference-artifacts")
+    fresh = {}
     for name, take in present:
-        _analyse(take, tmp_path / name)
-        xml = (tmp_path / name / "score.musicxml").read_text(encoding="utf-8")
+        out_dir = output_root / name
+        fresh[name] = {"summary": _analyse(take, out_dir), "out_dir": out_dir}
+    return fresh
+
+
+def test_reference_scores_fill_their_measures_and_agree_with_their_types(
+    fresh_reference_artifacts,
+):
+    """Each reference score closes and its written types match durations."""
+    for name, artifacts in fresh_reference_artifacts.items():
+        xml = (artifacts["out_dir"] / "score.musicxml").read_text(encoding="utf-8")
         assert_measures_close(score_root(xml), name)
 
 
-def test_the_reference_takes_still_export_the_same_bytes(tmp_path):
-    present = [(name, ROOT / name) for name in TAKES if (ROOT / name).exists()]
-    if not present:
-        pytest.skip(f"no reference take in {ROOT}")
-
-    fresh = {name: _analyse(take, tmp_path / name) for name, take in present}
+def test_reference_takes_still_export_the_same_bytes(fresh_reference_artifacts):
+    fresh = {name: artifacts["summary"] for name, artifacts in fresh_reference_artifacts.items()}
 
     if FREEZE:
         REFERENCE.parent.mkdir(parents=True, exist_ok=True)
@@ -120,5 +121,5 @@ def test_the_reference_takes_still_export_the_same_bytes(tmp_path):
         assert want is not None, f"{name} missing from {REFERENCE}"
         assert got["sha256"] == want["sha256"], (
             f"{name} : the output moved ({_moved(want, got) or 'same counters, different bytes'})"
-            f" — fresh artifacts to compare : {tmp_path / name}"
+            f" — fresh artifacts to compare : {fresh_reference_artifacts[name]['out_dir']}"
         )

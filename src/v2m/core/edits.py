@@ -91,6 +91,46 @@ def snapshot_state(
 
 
 @dataclass(frozen=True)
+class CorrectPitchIntent:
+    """Request a single note's MIDI pitch be corrected."""
+
+    index: int
+    midi: int
+
+
+@dataclass(frozen=True)
+class MoveNoteIntent:
+    """Request one note's onset, end edge, and optional pitch be moved."""
+
+    index: int
+    start_s: float
+    end_s: float
+    midi: int | None = None
+
+
+@dataclass(frozen=True)
+class DeleteNotesIntent:
+    """Request deletion of a fixed, immutable set of selected note indices."""
+
+    indices: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.indices, tuple):
+            raise TypeError("deletion indices must be an immutable tuple")
+
+
+NoteEditIntent = CorrectPitchIntent | MoveNoteIntent | DeleteNotesIntent
+
+
+@dataclass(frozen=True)
+class EditOutcome:
+    """One committed edit: its published result and archived before-state."""
+
+    result: "AnalysisResult"
+    before: EditState
+
+
+@dataclass(frozen=True)
 class EditMove:
     """One stepped history move, ready for an adapter to apply and render."""
 
@@ -143,9 +183,7 @@ class EditHistory:
         it from the current state. `jump` walks through `undo`/`redo`, which
         keeps ONE owner of the branch bookkeeping.
         """
-        rows: list[tuple[EditState | None, str]] = [
-            (state, state.action) for state in self._undo
-        ]
+        rows: list[tuple[EditState | None, str]] = [(state, state.action) for state in self._undo]
         rows.append((None, CURRENT_ACTION))
         # the redo stack stores its nearest target last; reverse it for
         # the timeline's chronological order after the current row
@@ -167,12 +205,14 @@ class EditHistory:
         state, action = self._redo.pop()
         # the state just left becomes an undo row, labelled by the edit
         # that separates it from the restored one (the reapplied action)
-        self._undo.append(EditState(
-            result=current.result,
-            signal=current.signal,
-            live_notes=current.live_notes,
-            action=action,
-        ))
+        self._undo.append(
+            EditState(
+                result=current.result,
+                signal=current.signal,
+                live_notes=current.live_notes,
+                action=action,
+            )
+        )
         return state
 
     def walk(
@@ -345,9 +385,7 @@ def refresh_result_facts(
         result.meter = meter
         result.note_positions = grid.positions(notes)
         result.num_measures = grid.measures(notes)
-        result.chord_progression = detect_chord_progression(
-            notes, grid, result.num_measures
-        )
+        result.chord_progression = detect_chord_progression(notes, grid, result.num_measures)
     else:
         result.meter = None
         result.note_positions = None
@@ -446,3 +484,52 @@ def delete_notes(result, indices) -> None:
     )
     invalidate_breakdown(result)
     result.manual_pitch_corrections = True
+
+
+def apply_note_edit(
+    result: "AnalysisResult",
+    history: EditHistory,
+    *,
+    signal: np.ndarray | None,
+    live_notes: Any,
+    intent: NoteEditIntent,
+) -> EditOutcome:
+    """Apply one direct edit atomically and record its whole before-state.
+
+    The existing edit helpers mutate their result argument in place and may
+    fail while rebuilding derived facts. A shallow candidate is safe because
+    each helper replaces the note list with copied notes before changing any
+    note, while every other result fact it changes is a result attribute.
+    Thus a late failure is discarded without changing the currently shown
+    take or either history branch.
+
+    The before-state is archived exactly once, only after the musical edit
+    succeeds. The adapter publishes the returned candidate and must not call
+    `history.record` again.
+    """
+    if isinstance(intent, CorrectPitchIntent):
+        action = "correction"
+    elif isinstance(intent, MoveNoteIntent):
+        action = "move"
+    elif isinstance(intent, DeleteNotesIntent):
+        action = "deletion"
+    else:
+        raise TypeError("unsupported note edit intent")
+
+    before = snapshot_state(result, signal, live_notes, action=action)
+    candidate = replace(result)
+    if isinstance(intent, CorrectPitchIntent):
+        correct_note_pitch(candidate, intent.index, intent.midi)
+    elif isinstance(intent, MoveNoteIntent):
+        move_note(
+            candidate,
+            intent.index,
+            start_s=intent.start_s,
+            end_s=intent.end_s,
+            midi=intent.midi,
+        )
+    else:
+        delete_notes(candidate, intent.indices)
+
+    history.record(before)
+    return EditOutcome(result=candidate, before=before)

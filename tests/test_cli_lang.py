@@ -29,15 +29,15 @@ from typing import cast
 import numpy as np
 import pytest
 import soundfile as sf
-
 from conftest import SR, expect_or_dump, silence, sine_note
+
 from v2m import cli
 from v2m.core import audio_io, i18n, pdf_export, playback, report
 from v2m.core.i18n import set_language
 from v2m.core.pdf_export import PdfExportError, PdfToolMissing
 
 LANGS = ("fr", "en")
-# figure names in English — used to prove the Figures line was translated
+# English figure names make translation of the Figures line observable.
 EN_FIGURE_RE = re.compile(
     r"\b(quarter|eighth|sixteenth|whole|half|dotted|triplet|rest)\b"
 )
@@ -84,10 +84,10 @@ def test_summary_speaks_the_selected_language(lang, tmp_path, monkeypatch, capsy
         expect_or_dump(cond, f"[lang={lang}] {msg}", out=out, err=err)
 
     _expect("Tempo" in out, "Tempo line missing")
-    tempo_line = next(l for l in lines if l.startswith("Tempo"))
-    meter_line = next(l for l in lines if l.startswith(("Mesure", "Meter")))
-    key_line = next(l for l in lines if l.startswith(("Tonalité", "Key")))
-    fig_line = next(l for l in lines if l.startswith("Figures"))
+    tempo_line = next(line for line in lines if line.startswith("Tempo"))
+    meter_line = next(line for line in lines if line.startswith(("Mesure", "Meter")))
+    key_line = next(line for line in lines if line.startswith(("Tonalité", "Key")))
+    fig_line = next(line for line in lines if line.startswith("Figures"))
 
     # the label columns share one colon position in BOTH languages
     _expect(

@@ -1,10 +1,9 @@
-"""The take's audio, written on request (workstream 6).
+"""The original take audio, written on request and preserved after capture.
 
 The "record audio" box is read at the take's START (a mid-take toggle
 does not change what this take writes) and only acts live: a file
 analysis already reads its audio at the input, rewriting it would make
-no sense. The .wav is written BEFORE the other artifacts — it is the
-user's rawest data.
+no sense. The first successful .wav is immutable across exports.
 """
 
 from __future__ import annotations
@@ -41,7 +40,17 @@ def test_export_writes_the_take_audio_only_when_asked(qapp, monkeypatch, tmp_pat
 
     from v2m.gui import main_window as mw
 
-    monkeypatch.setattr(te, "export_result", lambda res, stem, **kw: None)
+    def fake_export(res, stem, **_kwargs):
+        stem = Path(stem)
+        if stem.parent.is_relative_to(tmp_path):
+            from v2m.core.report import ARTIFACT_EXTENSIONS
+
+            stem.parent.mkdir(parents=True, exist_ok=True)
+            for suffix in ARTIFACT_EXTENSIONS:
+                Path(f"{stem}{suffix}").write_text("{}", encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr(te, "export_result", fake_export)
     # the take folder is redirected: the test must never write into the repo
     monkeypatch.setattr(mw, "live_export_dir", lambda stem: tmp_path / Path(stem).name)
 
@@ -55,6 +64,7 @@ def test_export_writes_the_take_audio_only_when_asked(qapp, monkeypatch, tmp_pat
         assert not list(tmp_path.rglob("*.wav")), "audio written without the box ticked"
 
         win._live_record_audio = True
+        win._automatic_live_result = cast(Any, _fake_live_result())
         win._export_results()
         wavs = list(tmp_path.rglob("*.wav"))
         assert len(wavs) == 1, f"one .wav expected, saw {wavs}"
@@ -62,7 +72,29 @@ def test_export_writes_the_take_audio_only_when_asked(qapp, monkeypatch, tmp_pat
         y, sr = sf.read(str(wavs[0]))
         assert sr == audio_io.SR
         assert abs(len(y) - audio_io.SR) <= 4
+        original_wav = wavs[0].read_bytes()
         assert win.error_banner.isHidden(), win.error_banner.text()
+
+        # The automatic read is copied into its own stable archive on export.
+        from v2m.core.takes import automatic_reading_dir
+
+        automatic_json = automatic_reading_dir(wavs[0].parent) / f"{wavs[0].stem}.json"
+        assert automatic_json.is_file()
+        assert automatic_json.read_text(encoding="utf-8") == "{}"
+        automatic_bytes = automatic_json.read_bytes()
+
+        # Re-exporting a corrected reading must preserve the original capture.
+        win._live_signal = np.full(audio_io.SR, 0.8, dtype=np.float32)
+        corrected_result = _fake_live_result()
+        corrected_result.manual_pitch_corrections = True
+        win.result = cast(Any, corrected_result)
+        win._export_results()
+        assert wavs[0].read_bytes() == original_wav
+        from v2m.core.takes import corrected_reading_dir
+
+        version_one = corrected_reading_dir(wavs[0].parent, 1)
+        assert (version_one / f"{wavs[0].stem}.json").is_file()
+        assert automatic_json.read_bytes() == automatic_bytes
 
         # ...and a FILE analysis never writes an audio copy, box or no box:
         # its audio already exists at the input path

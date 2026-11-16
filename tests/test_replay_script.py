@@ -16,9 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SPEC = importlib.util.spec_from_file_location(
-    "replay_takes", ROOT / "scripts" / "replay_takes.py"
-)
+SPEC = importlib.util.spec_from_file_location("replay_takes", ROOT / "scripts" / "replay_takes.py")
 replay_takes = importlib.util.module_from_spec(SPEC)
 sys.modules.setdefault("replay_takes", replay_takes)
 SPEC.loader.exec_module(replay_takes)
@@ -52,9 +50,16 @@ def test_the_table_and_the_out_report_classify_each_take(capsys, tmp_path, monke
 
     def fake_replay(wav_path, **kw):
         return {
-            "stem": Path(wav_path).stem, "duration_s": 1.9, "live_notes": 5,
-            "final_notes": 4, "contours": 1, "off1": 1, "moved": 0,
-            "absorbed": 0, "rate": 0.2, "tempo_bpm": 120.0,
+            "stem": Path(wav_path).stem,
+            "duration_s": 1.9,
+            "live_notes": 5,
+            "final_notes": 4,
+            "contours": 1,
+            "off1": 1,
+            "moved": 0,
+            "absorbed": 0,
+            "rate": 0.2,
+            "tempo_bpm": 120.0,
         }
 
     monkeypatch.setattr(replay_takes, "replay_take", fake_replay)
@@ -67,9 +72,33 @@ def test_the_table_and_the_out_report_classify_each_take(capsys, tmp_path, monke
     report = json.loads(out_path.read_text(encoding="utf-8"))
     assert report["root"] == str(tmp_path)
     assert [r["stem"] for r in report["takes"]] == [
-        "live_20260927_090000", "live_20260927_091500",
+        "live_20260927_090000",
+        "live_20260927_091500",
     ]
     assert report["takes"][0]["rate"] == 0.2
+
+
+def test_empty_final_prints_no_agreement_percentage(capsys, tmp_path, monkeypatch):
+    _take_with_wav(tmp_path, "live_20260927_090000")
+    row = {
+        "stem": "live_20260927_090000",
+        "duration_s": 1.0,
+        "live_notes": 3,
+        "final_notes": 0,
+        "contours": 0,
+        "off1": 0,
+        "moved": 0,
+        "absorbed": 0,
+        "rate": 0.0,
+        "tempo_bpm": 120.0,
+    }
+    monkeypatch.setattr(replay_takes, "replay_take", lambda *args: row)
+    out_path = tmp_path / "report.json"
+    assert replay_takes.main([str(tmp_path), "--out", str(out_path)]) == 0
+    output = capsys.readouterr().out
+    assert "not comparable" in output
+    assert "0%" not in output
+    assert json.loads(out_path.read_text(encoding="utf-8"))["takes"][0] == row
 
 
 def test_a_failing_take_never_costs_the_others(capsys, tmp_path, monkeypatch):
@@ -80,9 +109,16 @@ def test_a_failing_take_never_costs_the_others(capsys, tmp_path, monkeypatch):
         if Path(wav_path).stem.endswith("090000"):
             raise RuntimeError("prise cassée")
         return {
-            "stem": Path(wav_path).stem, "duration_s": 1.0, "live_notes": 1,
-            "final_notes": 1, "contours": 0, "off1": 0, "moved": 0,
-            "absorbed": 0, "rate": 0.0, "tempo_bpm": 120.0,
+            "stem": Path(wav_path).stem,
+            "duration_s": 1.0,
+            "live_notes": 1,
+            "final_notes": 1,
+            "contours": 0,
+            "off1": 0,
+            "moved": 0,
+            "absorbed": 0,
+            "rate": 0.0,
+            "tempo_bpm": 120.0,
         }
 
     monkeypatch.setattr(replay_takes, "replay_take", flaky)

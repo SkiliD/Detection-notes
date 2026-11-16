@@ -38,9 +38,7 @@ def _no_real_audio(monkeypatch):
     overrides this instance attribute."""
     from v2m.core.playback import PlaybackSession
 
-    monkeypatch.setattr(
-        PlaybackSession, "play", lambda self, mode="piano", t=0.0: True
-    )
+    monkeypatch.setattr(PlaybackSession, "play", lambda self, mode="piano", t=0.0: True)
 
 
 def _result(source: str = "song.wav"):
@@ -70,6 +68,7 @@ def _window():
     win.result = result
     win._signal_cache = {result.source: np.ones(2 * SR, dtype=np.float32)}
     win._show_result(result)
+    win.page_results.tools_toggle.setChecked(True)
     return win
 
 
@@ -140,31 +139,22 @@ def _audition_probe(monkeypatch, win) -> dict:
 
 
 def test_space_on_the_table_auditions_that_note(qapp, monkeypatch):
-    win = _window()
-    try:
-        table = win.page_results.results._notes_table
-        played = _audition_probe(monkeypatch, win)
-
-        table.setCurrentCell(1, 0)  # the second note: 0.5 s -> 0.8 s
-        _press(table, Qt.Key.Key_Space)
-
-        assert played["mode"] == "voice"
-        assert len(played["voice"]) == pytest.approx(int(0.3 * SR), abs=4)
-    finally:
-        win.close()
-
-
-def test_space_audition_shows_the_note_and_stop_button(qapp, monkeypatch):
-    """Keyboard audition is visibly identified and a second Space stops it."""
+    """Keyboard audition is visibly identified, plays the cursor note's own
+    segment, and a second Space stops it."""
     from v2m.core.i18n import tr
 
     win = _window()
     try:
         table = win.page_results.results._notes_table
         played = _audition_probe(monkeypatch, win)
-        table.setCurrentCell(1, 0)
+        table.setCurrentCell(1, 0)  # the second note: 0.5 s -> 0.8 s
 
         _press(table, Qt.Key.Key_Space)
+
+        # the slice handed to playback is the note's own segment
+        assert played["mode"] == "voice"
+        assert len(played["voice"]) == pytest.approx(int(0.3 * SR), abs=4)
+        # and the readout identifies it, with its stop action
         label = win.page_results.label_note_audition
         stop = win.page_results.btn_stop_audition
         assert not label.isHidden()
@@ -172,7 +162,6 @@ def test_space_audition_shows_the_note_and_stop_button(qapp, monkeypatch):
         assert not stop.isHidden() and stop.text() == tr("ui piano stop audition")
 
         _press(table, Qt.Key.Key_Space)
-        assert played["mode"] == "voice"
         assert label.isHidden() and stop.isHidden()
     finally:
         win.close()
@@ -228,6 +217,8 @@ def test_focus_order_reaches_keyboard_actions_and_export(qapp):
                 break
             if current in page._focus_order and current not in traversed:
                 traversed.append(current)
+            if current is page.tools_toggle:
+                page.tools_toggle.click()
             if current is page.details_toggle:
                 page.details_toggle.click()  # reveal the controls before tabbing into them
             page.focusNextPrevChild(True)
@@ -270,6 +261,8 @@ def test_audition_stop_button_works_when_keyboard_focused(qapp, monkeypatch):
         QTest.keyClick(page.btn_stop_audition, Qt.Key.Key_Space)
 
         assert played["mode"] == "voice"
+        # the ONE stop path clears the readout and its action alike
+        assert page.label_note_audition.isHidden()
         assert page.btn_stop_audition.isHidden()
     finally:
         win.close()
@@ -363,50 +356,43 @@ def test_piano_keyboard_escape_cancels_without_editing(qapp):
 
 
 def test_choosing_a_pitch_plays_it_before_enter(qapp, monkeypatch):
-    """Arrows stage a key AND sound it: the candidate is heard BEFORE Enter,
-    and validating does not replay it a second time."""
+    """Arrows stage a key AND sound it through the real render path (a
+    piano buffer handed to the shared playback session): the candidate is
+    heard BEFORE Enter, once per arrow, and validating does not replay it."""
     win = _window()
     try:
         page = win.page_results
         page.results._notes_table.setCurrentCell(0, 0)  # the first note is C4
-        played: list[int] = []
-        monkeypatch.setattr(page, "_audition_pitch", played.append)
+        events: list = []
+        heard: list[int] = []
+        original_audition = page._audition_pitch
+        monkeypatch.setattr(
+            page,
+            "_audition_pitch",
+            lambda key: (heard.append(key), original_audition(key))[1],
+        )
+        monkeypatch.setattr(win.playback, "set_sources", lambda **kw: events.append(("src", kw)))
+        monkeypatch.setattr(
+            win.playback, "play", lambda mode: events.append(("play", mode)) or True
+        )
         win.show()
         win.stack.setCurrentWidget(page)
         page.piano_keys.setFocus()
         qapp.processEvents()
 
         QTest.keyClick(page.piano_keys, Qt.Key.Key_Right)  # C4 -> C#4, heard
-        assert played == [61]
+        assert heard == [61]
+        assert [kind for kind, _ in events] == ["src", "play"]
+        assert len(events[0][1]["piano"]) > 0  # a real render, not a stub
+        assert events[1][1] == "piano"
         QTest.keyClick(page.piano_keys, Qt.Key.Key_Right)  # C#4 -> D4
-        assert played == [61, 62]
+        assert heard == [61, 62]
+        assert len(events) == 4  # one more render+play, no suppression
 
         QTest.keyClick(page.piano_keys, Qt.Key.Key_Return)  # validate: no replay
-        assert played == [61, 62]
+        assert heard == [61, 62]  # Enter adds no preview
+        assert [kind for kind, _ in events].count("play") == 2  # and no second play
         assert win.result is not None and win.result.notes[0].midi == 62
-    finally:
-        win.close()
-
-
-def test_staging_a_pitch_really_plays_a_tone(qapp, monkeypatch):
-    """The preview goes through the window's ONE one-tone path (a piano
-    render handed to the shared playback session)."""
-    win = _window()
-    try:
-        page = win.page_results
-        page.results._notes_table.setCurrentCell(0, 0)
-        played: dict = {}
-        monkeypatch.setattr(win.playback, "set_sources", lambda **kw: played.update(kw))
-        monkeypatch.setattr(win.playback, "play", lambda mode: played.update(mode=mode) or True)
-        win.show()
-        win.stack.setCurrentWidget(page)
-        page.piano_keys.setFocus()
-        qapp.processEvents()
-
-        QTest.keyClick(page.piano_keys, Qt.Key.Key_Right)
-
-        assert played.get("mode") == "piano"
-        assert len(played["piano"]) > 0
     finally:
         win.close()
 
@@ -497,24 +483,6 @@ def test_a_note_outside_the_keyboard_is_not_staged(qapp):
         win.close()
 
 
-def test_space_stop_button_clears_the_audition_readout(qapp, monkeypatch):
-    """The visible stop action and Space use one stop path."""
-    win = _window()
-    try:
-        played = _audition_probe(monkeypatch, win)
-        win.page_results.results._notes_table.setCurrentCell(0, 0)
-        _press(win.page_results.results._notes_table, Qt.Key.Key_Space)
-        assert not win.page_results.label_note_audition.isHidden()
-
-        win.page_results.btn_stop_audition.click()
-
-        assert played["mode"] == "voice"
-        assert win.page_results.label_note_audition.isHidden()
-        assert win.page_results.btn_stop_audition.isHidden()
-    finally:
-        win.close()
-
-
 def test_audition_playback_completion_hides_readout(qapp, monkeypatch):
     """The 33 ms playback tick clears a stale label if the device ends early."""
     win = _window()
@@ -536,6 +504,7 @@ def test_audition_playback_completion_hides_readout(qapp, monkeypatch):
 # --------------------------------------------------------------------------- #
 # The audition readout's lifetime IS the playback's (one clock, one clear)
 # --------------------------------------------------------------------------- #
+
 
 def _sounding_probe(monkeypatch, win) -> dict:
     """`play` behaves like the real session (mode + playing) without audio."""
@@ -634,6 +603,31 @@ def test_a_failed_audition_shows_no_readout(qapp, monkeypatch):
         assert win.page_results.label_note_audition.isHidden()
         assert win.page_results.btn_stop_audition.isHidden()
         assert win._auditions.active_identity is None
+    finally:
+        win.close()
+
+
+def test_a_separated_roll_selection_reaches_the_table(qapp):
+    """Ctrl/Cmd-click picks SEPARATED notes: the table holds exactly that set.
+
+    A contiguous range would have swallowed the note between them — the
+    page used to apply the gesture as `first..last`, which turned every
+    toggle into a range.
+    """
+    win = _window()
+    try:
+        page = win.page_results
+        win.show()
+        win.stack.setCurrentWidget(page)
+        qapp.processEvents()
+
+        page._on_roll_selection([0, 2])
+        assert page._selected_note_indices() == [0, 2]
+        assert page.piano._selection == [0, 2], "the roll renders the same set"
+
+        page._on_roll_selection([])
+        assert page._selected_note_indices() == []
+        assert page.piano._selection == []
     finally:
         win.close()
 

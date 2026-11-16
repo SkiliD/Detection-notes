@@ -9,7 +9,6 @@ no audio, no decode, just the exported reports.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -26,8 +25,7 @@ def _report(midis, starts, bpm=120.0):
     return {
         "tempo": {"bpm": bpm},
         "notes": [
-            {"midi": m, "start_s": s, "end_s": s + 0.4}
-            for m, s in zip(midis, starts)
+            {"midi": m, "start_s": s, "end_s": s + 0.4} for m, s in zip(midis, starts, strict=True)
         ],
     }
 
@@ -103,9 +101,62 @@ def test_pairs_form_within_one_beat_of_b_never_a_fixed_second_bound():
     assert cmp.missing == [0] and cmp.added == [0]
     assert cmp.paired == []
     # a FASTER take B keeps proportionally more pairs: the bound is its beat
-    cmp_fast = compare_reports(_report([62], [0.9]), _report([64], [1.3]),
-                               stem_a="a", stem_b="fast")
+    cmp_fast = compare_reports(
+        _report([62], [0.9]), _report([64], [1.3]), stem_a="a", stem_b="fast"
+    )
     assert cmp_fast.paired, "0.4 s apart pairs inside one beat of a faster B"
+
+
+def _greedy_reference(starts_a, starts_b, bound):
+    """The previous nearest-by-onset first-fit policy, as a baseline.
+
+    Kept IN THE TEST so the shipped chronological pairing is compared
+    against it on the same annotated inputs instead of against a
+    remembered result.
+    """
+    used_b: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    missing: list[int] = []
+    for ia, start_a in enumerate(starts_a):
+        best_ib: int | None = None
+        best_shift = 0.0
+        for ib, start_b in enumerate(starts_b):
+            if ib in used_b:
+                continue
+            shift = abs(start_b - start_a)
+            if shift > bound:
+                continue
+            if best_ib is None or shift < best_shift:
+                best_ib, best_shift = ib, shift
+        if best_ib is None:
+            missing.append(ia)
+        else:
+            used_b.add(best_ib)
+            pairs.append((ia, best_ib))
+    return pairs, missing
+
+
+def test_the_adversarial_onset_case_pairs_take_b_without_manufacturing_an_absence():
+    """The report's ALG18 case, take-to-take: both notes have a partner.
+
+    Take A sings at 0.4 and 0.7 s, take B at 0 and 0.5 s (one beat =
+    0.5 s). Greedy first-fit takes A0's closest neighbour (0.4 -> 0.5)
+    and leaves A1 with nothing inside the bound, reporting one missing
+    and one added note; the annotated truth is A0 -> B0 (0.4 s) and
+    A1 -> B1 (0.2 s), a complete pairing where both notes moved in time
+    and no note disappeared.
+    """
+    a = _report([60, 62], [0.4, 0.7])
+    b = _report([60, 62], [0.0, 0.5])
+    cmp = compare_reports(a, b)
+    assert [(p.a_index, p.b_index) for p in cmp.paired] == [(0, 0), (1, 1)]
+    assert cmp.missing == [] and cmp.added == []
+    assert [p.reason for p in cmp.paired] == ["shifted", "shifted"]
+    # the same inputs through the greedy baseline: one association is
+    # SPENT on A0's nearest neighbour and A1 reads as not re-sung
+    greedy_pairs, greedy_missing = _greedy_reference([0.4, 0.7], [0.0, 0.5], 0.5)
+    assert len(greedy_pairs) == 1 and greedy_missing == [1]
+    assert len(cmp.paired) > len(greedy_pairs)
 
 
 def test_tempo_difference_does_not_read_as_shifts():
@@ -118,6 +169,26 @@ def test_tempo_difference_does_not_read_as_shifts():
     cmp = compare_reports(a, b)
     assert abs(cmp.tempo_ratio - 1.0) <= TEMPO_TOLERANCE
     assert [p.reason for p in cmp.paired] == ["same"] * 4
+
+
+@pytest.mark.parametrize("bpm_b", [115.2, 124.8])
+def test_long_phrase_compensates_tempo_in_both_directions(bpm_b):
+    starts = [0.0, 2.0, 4.0, 6.0, 8.0]
+    a = _report([60, 62, 64, 65, 67], starts)
+    b = _report([60, 62, 64, 65, 67], [s * 120 / bpm_b for s in starts], bpm_b)
+    for first, second in [(a, b), (b, a)]:
+        result = compare_reports(first, second)
+        assert result.stable
+        assert len(result.paired) == 5
+        assert all(p.shift_s == 0.0 for p in result.paired)
+
+
+def test_tempo_compensation_keeps_an_initial_delay():
+    a = _report([60, 62, 64], [0.0, 4.0, 8.0])
+    b = _report([60, 62, 64], [s * 120 / 124.8 + 0.3 for s in [0.0, 4.0, 8.0]], 124.8)
+    result = compare_reports(a, b)
+    assert [p.reason for p in result.paired] == ["shifted"] * 3
+    assert all(p.shift_s == 0.3 for p in result.paired)
 
 
 def test_take_files_helper_reads_and_names_stems(tmp_path):

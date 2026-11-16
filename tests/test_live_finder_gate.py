@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from typing import Any, cast
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -71,7 +72,9 @@ def test_the_level_meter_names_a_saturated_input(qapp, monkeypatch):
     """A block at the rail turns the fill red, a healthy level back to
     the normal color: saturation is a decision the singer must see."""
     from v2m.gui.finder_page import (
-        LEVEL_GATE_COLOR, LEVEL_FULL_SCALE, LevelMeter,
+        LEVEL_FULL_SCALE,
+        LEVEL_GATE_COLOR,
+        LevelMeter,
     )
     from v2m.gui.widgets import NOTE_TEXT_COLOR
 
@@ -120,17 +123,71 @@ def test_finder_history_uses_the_confirmation_captured_with_the_frame(qapp):
         clear_error=lambda: None,
         audition_note=lambda _midi: None,
     )
-    setattr(page, "_thread", QueuedThread())
+    page._thread = cast(Any, QueuedThread())
     try:
         # The audio thread confirmed C4 for this block; by the time Qt
         # handles its queued event, the mutable segmenter has moved to idle.
         page._on_note((60.0, 261.6), (60.0, 261.6), (60.0, 261.6))
+        assert page.label_heard.text() == tr("ui finder note heard")
         assert page.session.history == [60]
         assert page.keys._active == {60}
+        assert page.label_heard.text() == tr("ui finder note heard")
 
         # Another frame in the same held note updates nothing in history.
         page._on_note((60.0, 261.6), (60.0, 261.6), (60.0, 261.6))
         assert page.session.history == [60]
+    finally:
+        page.deleteLater()
+
+
+def test_finder_micro_status_moves_from_waiting_to_silence_to_sound(qapp):
+    """The idle label tracks mic evidence without turning it into a note."""
+    from v2m.gui.finder_page import FinderPage
+
+    class RunningThread:
+        def isRunning(self):  # noqa: N802 (Qt naming)
+            return True
+
+    page = FinderPage(
+        thread_factory=cast(Any, lambda: None),
+        go_home=lambda: None,
+        show_error=lambda _msg: None,
+        clear_error=lambda: None,
+        audition_note=lambda _midi: None,
+    )
+    page._thread = cast(Any, RunningThread())
+    try:
+        page._refresh_input_state()
+        assert page.label_heard.text() == tr("ui finder waiting")
+
+        page._on_block(0.1, page._gate_rms * 0.5)
+        assert page.label_heard.text() == tr("ui finder silence")
+
+        page._on_block(0.2, page._gate_rms * 2)
+        assert page.label_heard.text() == tr("ui finder no note")
+
+        page._note_heard = True
+        page._refresh_input_state()
+        assert page.label_heard.text() == tr("ui finder note heard")
+
+        page._on_block(0.3, page._gate_rms * 0.5)
+        assert page.label_heard.text() == tr("ui finder silence")
+
+        page.set_input_device_status("USB mic")
+        assert page.label_input_device.text() == tr("ui input device active").format(
+            device="USB mic"
+        )
+        page.set_input_device_status("USB mic", fell_back=True)
+        assert page.label_input_device.text() == tr("ui input device fallback").format(
+            device="USB mic"
+        )
+
+        page._thread = None
+        page._refresh_state()
+        assert page.label_heard.text() == ""
+        assert page.label_input_device.text() == tr("ui input device fallback next").format(
+            device="USB mic"
+        )
     finally:
         page.deleteLater()
 
@@ -229,11 +286,9 @@ def _pump_until(app, predicate, timeout: float) -> bool:
 def test_the_finder_stays_dark_on_a_mic_rumble(qapp, monkeypatch):
     """Handling noise must light NO Finder key.
 
-    The train lasts 1.5 s: plenty to see 19 blocks of `current()` (the
-    defect's measurement) — and zero confirmed notes. Before the fix,
-    the last lit key appeared here. The BIG NAME, meanwhile, follows the
-    immediate feedback (`current()`): on noise it shows nothing stable,
-    but it must never enter a pitch into the history.
+    The 1.5 s rumble supplies many `current()` readings but must confirm
+    no notes, light no key and add no pitch to the history. Immediate
+    feedback and confirmed notes remain separate display facts.
     """
     import sounddevice as sd
 

@@ -25,11 +25,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 
-from v2m.core import audio_io, coherence as coh
-from v2m.core import take_export as te
-from v2m.core.replay import replay_take
 from tests.test_live_gui import FakeMic
 from tests.test_pipeline import _melody
+from v2m.core import audio_io
+from v2m.core import coherence as coh
+from v2m.core import take_export as te
+from v2m.core.replay import replay_take
 
 
 @pytest.fixture(scope="module")
@@ -67,10 +68,7 @@ def _fake_mic_module():
     audio_io.sd = saved
 
 
-# ONE take, analyzed ONCE: the module's first replay pays pYIN and seeds
-# the evidence cache; both cache-path tests read that same take. Before
-# this fixture, EACH cache-path test seeded a FRESH take (the same pYIN
-# analysis paid twice for the same assertion).
+# A single take seeds the evidence cache; both cache-path checks reuse it.
 @pytest.fixture(scope="module", name="sung_wav")
 def _sung_wav_module(tmp_path_factory):
     return _save_sung_wav(tmp_path_factory.mktemp("error_paths"))
@@ -90,14 +88,11 @@ def cached_replay_row(sung_wav, fresh_replay_row):
 
 
 @pytest.mark.slow  # two full real-time replays of the take
-def test_a_cached_observation_gives_the_same_reading_as_finalize(
-    fresh_replay_row, cached_replay_row
-):
-    # the offline reading is the SAME: the cache only ever saves time
+def test_cached_reading_and_breakdown_match_finalize(fresh_replay_row, cached_replay_row):
     assert cached_replay_row["final_notes"] == fresh_replay_row["final_notes"]
-    assert cached_replay_row["tempo_bpm"] == pytest.approx(
-        fresh_replay_row["tempo_bpm"], abs=1.0
-    )
+    assert cached_replay_row["tempo_bpm"] == pytest.approx(fresh_replay_row["tempo_bpm"], abs=1.0)
+    assert 0.0 <= cached_replay_row["rate"] <= 1.0
+    assert cached_replay_row["moved"] + cached_replay_row["off1"] == cached_replay_row["contours"]
 
 
 def test_a_corrupt_observation_cache_falls_back_without_error(tmp_path):
@@ -111,18 +106,6 @@ def test_a_corrupt_observation_cache_falls_back_without_error(tmp_path):
     assert wav.with_suffix(".observation.npz").stat().st_size > 100
 
 
-# `slow` like its sibling: it reads the SAME module fixtures (fresh
-# replay + pYIN + cached replay — the real-time chain IS the evidence),
-# so leaving it in the quick loop made that loop pay the whole chain for
-# one test while its sibling was deselected.
-@pytest.mark.slow
-def test_interpret_only_path_agrees_with_the_grid_reading(cached_replay_row):
-    """The cache path produces notes aligned on the grid."""
-    row = cached_replay_row
-    assert 0.0 <= row["rate"] <= 1.0
-    assert row["moved"] + row["off1"] == row["contours"]
-
-
 # --------------------------------------------------------------------------- #
 # 2. The GUI error paths: never the take
 # --------------------------------------------------------------------------- #
@@ -131,8 +114,15 @@ def test_interpret_only_path_agrees_with_the_grid_reading(cached_replay_row):
 def _fake_live_result() -> SimpleNamespace:
     return SimpleNamespace(
         source="live",
-        live_vs_final={"live": 5, "final": 4, "contours": 1, "off1": 1,
-                      "moved": 0, "absorbed": 0, "rate": 0.2},
+        live_vs_final={
+            "live": 5,
+            "final": 4,
+            "contours": 1,
+            "off1": 1,
+            "moved": 0,
+            "absorbed": 0,
+            "rate": 0.2,
+        },
         quantize_step=lambda _d: 0.1,
     )
 
@@ -227,16 +217,3 @@ def test_a_corrupt_coherence_journal_is_reinitialized(qapp, tmp_path):
     data = coh.update_journal(tmp_path, takes)
     assert data[stem]["checked"] == 5  # rebuilt from the folder
     assert json.loads((tmp_path / coh.JOURNAL_NAME).read_text(encoding="utf-8")) == data
-
-
-def test_the_replay_worker_with_a_stem_that_has_no_folder_is_silent(qapp, tmp_path):
-    from v2m.gui.replay_worker import ReplayWorker
-
-    worker = ReplayWorker(tmp_path / "live_20260927_120000")
-    rows: list[dict] = []
-    errors: list[str] = []
-    worker.done.connect(rows.append)
-    worker.failed.connect(errors.append)
-    worker.start()
-    worker.wait(5_000)
-    assert not rows and not errors

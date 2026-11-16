@@ -18,15 +18,21 @@ testable without an event loop, a banner or a status bar.
 
 The ordering rules, each with its measured reason:
 
-- **The take's WAV is written FIRST**, before `export_result`, and OUTSIDE the
-  artifact try: it is the rawest form of the user's data, and a later failure
-  (a full disk mid-artifact) must not cost it. Its own failure is a WARNING —
-  the singer keeps the transcription even when the disk refuses the WAV.
+- **The take's original WAV is written FIRST**, before `export_result`, and
+  OUTSIDE the artifact try: it is the rawest form of the user's data, and a
+  later failure (a full disk mid-artifact) must not cost it. The first
+  successful write is immutable; later exports must not replace the recording
+  with audio associated with edited notes. Its own failure is a WARNING — the
+  singer keeps the transcription even when the disk refuses the WAV.
+
 - **The PDF is LAST and separate** (`report.engrave_pdf`): it needs an
   external tool, so a missing or broken tool must never cost the data
   artifacts. Missing tool and conversion failure are DIFFERENT outcomes on
   the receipt, so the CLI can exit 0 on one and 2 on the other while the GUI
   shows one message for both.
+- **The automatic interpretation is saved once**, separately from the
+  current export bundle; every accepted corrected export gets a numbered,
+  immutable bundle under `readings/corrected/`.
 - **The announcement reads the DISK**: `takes.has_artifacts` decides the
   suffixes, so a half-written export can never be announced as complete.
 """
@@ -46,7 +52,15 @@ if TYPE_CHECKING:
 from . import audio_io
 from .pdf_export import PdfExportError, PdfToolMissing
 from .report import engrave_pdf, export_result
-from .takes import SIDECAR_SUFFIX, has_artifacts, sidecar_path
+from .takes import (
+    AUTOMATIC_READING_DIRNAME,
+    CORRECTED_READINGS_DIRNAME,
+    READINGS_DIRNAME,
+    SIDECAR_SUFFIX,
+    corrected_reading_dir,
+    has_artifacts,
+    sidecar_path,
+)
 
 # The PDF outcome, a value on the receipt (never a printed string here).
 PDF_SKIPPED = "skipped"          # no PDF was requested
@@ -68,15 +82,19 @@ class ExportOptions:
 
     - `quantize_s` / `transpose` / `pitch_curve`: `export_result`'s knobs.
     - `record_audio`: the live "record the take's audio" box, read at the
-      take's start (a file analysis owns its audio at the input path and
-      writes no copy, box or no box — the module enforces that, not the
-      caller).
+      take's start (a mid-take toggle does not change what this take writes).
+      The first successful WAV write is preserved across later exports. A
+      file analysis owns its audio at the input path and writes no copy.
     - `pdf`: whether the optional engraving was requested.
     - `live_notes`: the take's confirmed live notes, for the report's
       live/final breakdown (a live export only; a file analysis has none).
     - `manual_corrections`: a manual pitch edit means the recorded audio no
       longer describes the notes — no live/final block is archived and any
       stale sidecar is removed.
+    - `automatic_result`: the first final reading for this live take. It is
+      archived once under `readings/automatic/` and never replaced.
+    - `archive_corrected_reading`: save a numbered immutable snapshot of the
+      current corrected reading after its ordinary export succeeds.
     - `archive_sidecar`: whether the take's live/final decomposition is due,
       decided by the single owner of the take's stem (the live session
       controller, ADR 0010) and handed over as a fact.
@@ -92,6 +110,8 @@ class ExportOptions:
     pdf: bool = False
     live_notes: list | None = None
     manual_corrections: bool = False
+    automatic_result: AnalysisResult | None = None
+    archive_corrected_reading: bool = False
     archive_sidecar: bool = False
     save_path: Path | None = None
     format_suffix: str | None = None
@@ -160,6 +180,106 @@ def _archive_sidecar(stem: Path, block: dict) -> bool:
     from .compare import write_sidecar
 
     return bool(write_sidecar(stem, block))
+
+
+def _reading_root(stem: Path) -> Path:
+    """The history directory is a sibling of the root artifact bundle."""
+    return stem.parent / READINGS_DIRNAME
+
+
+def _archive_automatic_reading(result: AnalysisResult, stem: Path, options: ExportOptions) -> None:
+    """Write an earlier engine reading once, before a corrected root export."""
+    target = _reading_root(stem) / AUTOMATIC_READING_DIRNAME
+    if target.is_dir():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".automatic-", dir=target.parent))
+    try:
+        export_result(
+            result,
+            stage / stem.name,
+            quantize_s=options.quantize_s,
+            transpose=options.transpose,
+            with_pitch_curve=options.pitch_curve,
+            live_notes=options.live_notes,
+        )
+        if not any(stage.iterdir()):
+            raise OSError("The automatic reading produced no export artifacts")
+        os.replace(stage, target)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+
+
+def _archive_current_as_automatic(stem: Path, *, pdf_written: bool) -> None:
+    """Install the first successful root export as the automatic snapshot."""
+    from .report import ARTIFACT_EXTENSIONS
+
+    target = _reading_root(stem) / AUTOMATIC_READING_DIRNAME
+    if target.is_dir():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".automatic-", dir=target.parent))
+    try:
+        copied = False
+        for suffix in ARTIFACT_EXTENSIONS:
+            source = Path(f"{stem}{suffix}")
+            if source.is_file():
+                shutil.copy2(source, stage / source.name)
+                copied = True
+        if not copied:
+            raise OSError("The current reading has no export artifacts")
+        if pdf_written:
+            source = Path(f"{stem}.pdf")
+            if source.is_file():
+                shutil.copy2(source, stage / source.name)
+        os.replace(stage, target)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+
+
+def _next_corrected_version(stem: Path) -> int:
+    """Return the next unused numbered correction archive."""
+    parent = _reading_root(stem) / CORRECTED_READINGS_DIRNAME
+    versions = (
+        [
+            int(path.name[1:])
+            for path in parent.glob("v*")
+            if path.is_dir() and path.name[1:].isdigit()
+        ]
+        if parent.is_dir()
+        else []
+    )
+    return max(versions, default=0) + 1
+
+
+def _archive_corrected_reading(stem: Path, *, pdf_written: bool) -> Path:
+    """Copy the successful current artifact bundle into a new immutable version."""
+    from .report import ARTIFACT_EXTENSIONS
+
+    version = _next_corrected_version(stem)
+    target = corrected_reading_dir(_reading_root(stem).parent, version)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".corrected-", dir=target.parent))
+    try:
+        copied = False
+        for suffix in ARTIFACT_EXTENSIONS:
+            source = Path(f"{stem}{suffix}")
+            if source.is_file():
+                shutil.copy2(source, stage / source.name)
+                copied = True
+        if pdf_written:
+            source = Path(f"{stem}.pdf")
+            if source.is_file():
+                shutil.copy2(source, stage / source.name)
+        if not copied:
+            raise OSError("The current reading has no export artifacts")
+        os.replace(stage, target)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return target
 
 
 def _delete_sidecar(stem: Path) -> None:
@@ -287,16 +407,34 @@ def write_take(
                 failed=True,
             )
 
-    # 1. The take's own audio FIRST, when asked for and only for a live take.
-    wav_written = False
-    if live and options.record_audio and signal is not None and len(signal):
+    # 1. Preserve the first recorded audio as the take's raw reference.
+    #    Corrected notes may be exported repeatedly, but they never replace it.
+    wav_path = Path(f"{stem}.wav")
+    wav_written = live and wav_path.is_file()
+    has_signal = signal is not None and len(signal) > 0
+    if live and options.record_audio and has_signal and not wav_written:
         try:
-            audio_io.save_file(signal, str(stem) + ".wav", audio_io.SR)
+            audio_io.save_file(signal, str(wav_path), audio_io.SR)
             wav_written = True
         except Exception as e:
+            # A failed encoder can leave a partial destination behind. Do not
+            # let its existence masquerade as a successful immutable capture.
+            try:
+                wav_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             warnings.append(ExportWarning("wav", str(e)))
 
-    # 2. The artifacts, then the optional PDF (an external tool, always last).
+    # 2. Preserve the first automatic interpretation before the mutable
+    #    root export can be updated by a manually corrected reading.
+    automatic_result = options.automatic_result
+    if live and automatic_result is not None:
+        try:
+            _archive_automatic_reading(automatic_result, stem, options)
+        except Exception as error:
+            warnings.append(ExportWarning("export", str(error)))
+
+    # 3. The artifacts, then the optional PDF (an external tool, always last).
     pdf_status = PDF_SKIPPED
     try:
         report = export_result(
@@ -332,7 +470,24 @@ def write_take(
             failed=True,
         )
 
-    # 3. The live/final sidecar: archived when due, removed when a manual
+    # 4. The first uncorrected bundle becomes the immutable automatic reading.
+    #    A previously captured automatic result was written before the root
+    #    bundle above, so a later correction cannot replace it.
+    if live and automatic_result is None and not options.manual_corrections:
+        try:
+            _archive_current_as_automatic(stem, pdf_written=pdf_status == PDF_WRITTEN)
+        except Exception as error:
+            warnings.append(ExportWarning("export", str(error)))
+
+    # 5. A corrected transcription is a separate immutable version; the
+    #    root bundle remains the latest export for existing tools.
+    if live and options.archive_corrected_reading:
+        try:
+            _archive_corrected_reading(stem, pdf_written=pdf_status == PDF_WRITTEN)
+        except Exception as error:
+            warnings.append(ExportWarning("export", str(error)))
+
+    # 6. The live/final sidecar: archived when due, removed when a manual
     #    correction made the recorded audio stale.
     sidecar_written = False
     if live:
@@ -342,7 +497,7 @@ def write_take(
         elif options.manual_corrections:
             _delete_sidecar(stem)
 
-    # 4. The announcement reads the DISK: only what exists is listed.
+    # 7. The announcement reads the DISK: only what exists is listed.
     extras: list[str] = []
     if wav_written:
         extras.append(".wav")
@@ -352,7 +507,7 @@ def write_take(
         extras.append(SIDECAR_SUFFIX)
     suffixes = tuple(has_artifacts(stem, tuple(extras)))
 
-    # 5. The retention trim runs at export time (a live take was just
+    # 8. The retention trim runs at export time (a live take was just
     #    written): the oldest folders go whole under the documented budget.
     pruned = _prune_takes() if live else ()
 

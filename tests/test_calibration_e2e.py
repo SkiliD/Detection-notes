@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import threading
 import time
+import types
 
 import numpy as np
 import pytest
+
+from v2m.core import audio_io
+from v2m.core.i18n import tr
 
 pytestmark = pytest.mark.slow
 
@@ -83,6 +87,30 @@ def _fake_sd(monkeypatch) -> None:
 
     HeldMic.instances = []
     monkeypatch.setattr(sd, "InputStream", HeldMic)
+
+
+class DeafMic:
+    """A fake `sd.InputStream` whose start() fails (no device, busy...)."""
+
+    def __init__(self, samplerate, channels, blocksize, callback, **kwargs):  # noqa: ANN001
+        self.callback = callback
+
+    def start(self) -> None:
+        raise RuntimeError("device unavailable")
+
+    def stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _note_of(hz: float) -> str:
+    """The asked note the way the card names it."""
+    from v2m.core.i18n import note_display
+    from v2m.core.music import hz_to_midi
+
+    return note_display(int(round(hz_to_midi(hz))))
 
 
 def _mic_of(win):
@@ -155,12 +183,12 @@ def test_calibration_flow_names_the_offset_and_persists(qapp, monkeypatch, isola
         card = win.page_home.calibration_card
         targets: list[float] = []
         for round_index in range(mic_cal.ROUNDS):
-            assert card.prompt.text() == tr("ui calibrate target").format(
-                n=round_index + 1, total=mic_cal.ROUNDS
-            ), f"round {round_index + 1} does not name itself"
-            # the test sings the card's own target
+            # the test sings the card's own target, which the card READS OUT
             target = card._targets[-1]
             targets.append(target)
+            assert card.prompt.text() == tr("ui calibrate target").format(
+                n=round_index + 1, total=mic_cal.ROUNDS, note=_note_of(target)
+            ), f"round {round_index + 1} does not name its note"
             mic.sing(target, cents=OFFSET)
             assert _pump_until(
                 qapp,
@@ -195,6 +223,245 @@ def test_calibration_flow_names_the_offset_and_persists(qapp, monkeypatch, isola
             win.live_thread.stop()
             win.live_thread.wait(3000)
     assert not exported, "a calibration run must leave nothing exported"
+
+
+def test_the_card_opens_its_own_mic_without_a_take(qapp, monkeypatch, isolated_cal):
+    """The card opens the microphone ITSELF, and releases it on close.
+
+    Only the record action started a capture, so a home-screen user who
+    opened the card WITHOUT recording got a frozen prompt and read it as
+    "the app cannot find my mic": the rounds advanced only while a live
+    take happened to run, and nothing on screen said which of the two was
+    missing. Opening the card must open a capture; closing it (the card's
+    own Fermer) must give the device back.
+    """
+    import sounddevice  # noqa: F401  (the patch target must be importable)
+
+    from v2m.core import mic_cal
+    from v2m.core.i18n import tr
+    from v2m.gui import main_window as mw
+
+    OFFSET = -18.0
+    _fake_sd(monkeypatch)
+
+    win = mw.MainWindow()
+    try:
+        win.show()
+        win.stack.setCurrentWidget(win.page_home)
+        # NO live take: the card is the only thing asking for the mic
+        win.page_home.btn_calibrate.click()
+        card = win.page_home.calibration_card
+        assert card.isVisible()
+
+        assert _pump_until(
+            qapp,
+            lambda: bool(HeldMic.instances) and win._calibration_thread is not None,
+            timeout=30,
+        ), "the card never opened a capture of its own"
+        live = win._calibration_thread
+        assert live is not None and live.isRunning()
+        assert _pump_until(qapp, lambda: live.elapsed() >= 0.4, timeout=30), (
+            "the card's capture delivered nothing"
+        )
+        mic = _mic_of(win)
+
+        for round_index in range(mic_cal.ROUNDS):
+            mic.sing(card._targets[-1], cents=OFFSET)
+            assert _pump_until(qapp, lambda r=round_index: card._round == r + 1, timeout=30), (
+                f"round {round_index + 1} did not advance without a take"
+            )
+
+        assert card.prompt.text() == tr("ui calibrate found").format(cents=OFFSET)
+        assert card.btn_save.isVisible()
+        # the card SHOWED what it heard (a dead mic and a wrong note must
+        # not look the same)
+        assert card.heard_line.isVisible()
+
+        # closing the card releases the device and stops the tick
+        card.btn_stop.click()
+        assert not card.isVisible()
+        assert win._calibration_thread is None, "the card's capture must be dropped"
+        assert not win._calibration_timer.isActive()
+        assert not live.isRunning()
+    finally:
+        if win._calibration_thread is not None and win._calibration_thread.isRunning():
+            win._calibration_thread.stop()
+            win._calibration_thread.wait(3000)
+        if win.live_thread is not None and win.live_thread.isRunning():
+            win.live_thread.stop()
+            win.live_thread.wait(3000)
+
+
+def test_saved_input_selection_is_shared_by_capture_flows(qapp, monkeypatch, tmp_path):
+    """Finder, calibration and live takes resolve the same persisted endpoint."""
+    from v2m.core import i18n
+    from v2m.gui import main_window as mw
+
+    preference = tmp_path / "input-device.json"
+    monkeypatch.setattr(mw, "INPUT_DEVICE_FILE", preference)
+    monkeypatch.setattr(i18n, "LANG_FILE", tmp_path / "lang")
+    monkeypatch.setattr(
+        audio_io,
+        "input_devices",
+        lambda: [
+            audio_io.InputDevice(4, "WASAPI\x1fUSB Mic", "USB Mic", "WASAPI"),
+            audio_io.InputDevice(5, "WASAPI\x1fBuilt-in", "Built-in", "WASAPI"),
+        ],
+    )
+    HeldMic.instances = []
+    monkeypatch.setattr(
+        audio_io,
+        "sd",
+        types.SimpleNamespace(
+            InputStream=HeldMic,
+            default=types.SimpleNamespace(device=(0, -1)),
+        ),
+    )
+
+    win = mw.MainWindow()
+    try:
+        win.show()
+        win.page_home._on_input_device_selected(
+            win.page_home.input_device.findData("WASAPI\x1fUSB Mic")
+        )
+        assert preference.read_text(encoding="utf-8") == '"WASAPI\\u001fUSB Mic"'
+        thread = win._new_input_thread()
+        assert thread.device == 4
+        assert thread.device_name == "USB Mic — WASAPI"
+
+        win.page_home.btn_calibrate.click()
+        assert win._calibration_thread is not None
+        assert win._calibration_thread.device == 4
+        assert win._calibration_timer.isActive()
+        assert "USB Mic" not in win.page_live.label_input_device.text()
+        assert win.page_home.calibration_card.prompt.text().startswith("Ronde 1/")
+        from v2m.core.i18n import set_language
+
+        set_language("en")
+        win.retranslate()
+        assert win.page_home.calibration_card.prompt.text().startswith("Round 1/")
+        assert "Next capture: USB Mic — WASAPI" in win.page_home.input_device_status.text()
+        assert "USB Mic" not in win.page_live.label_input_device.text()
+        set_language("fr")
+        win.retranslate()
+        win.on_start_live()
+        assert win.page_live.label_input_device.text() == tr("ui input device active").format(
+            device="USB Mic — WASAPI"
+        )
+        assert win._calibration_thread is None
+        assert not win._calibration_timer.isActive()
+        assert win.page_home.calibration_card.isHidden()
+        assert win.live_thread is not None and win.live_thread.device == 4
+
+        # The active take keeps naming its open endpoint; a changed choice is
+        # shown on Home as the endpoint that the next capture will open.
+        win.page_home._on_input_device_selected(
+            win.page_home.input_device.findData("WASAPI\x1fBuilt-in")
+        )
+        assert win.page_live.label_input_device.text() == tr("ui input device active").format(
+            device="USB Mic — WASAPI"
+        )
+        assert win.page_home.input_device_status.text() == tr("ui input device next").format(
+            device="Built-in — WASAPI"
+        )
+        win.live_thread.stop()
+        win.live_thread.wait(3000)
+
+        win.on_open_finder()
+        assert win.page_finder.thread is not None
+        assert win.page_finder.thread.device == 5
+        win.on_close_finder()
+
+        win.page_home.btn_calibrate.click()
+        assert win._calibration_thread is not None
+        assert win._calibration_thread.device == 5
+        win.page_home.calibration_card.reset()
+        assert win._calibration_thread is None
+    finally:
+        if win._calibration_thread is not None and win._calibration_thread.isRunning():
+            win._calibration_thread.stop()
+            win._calibration_thread.wait(3000)
+        if win.page_finder.thread is not None and win.page_finder.thread.isRunning():
+            win.page_finder.thread.stop()
+            win.page_finder.thread.wait(3000)
+        if win.live_thread is not None and win.live_thread.isRunning():
+            win.live_thread.stop()
+            win.live_thread.wait(3000)
+        win.close()
+
+
+def test_a_dead_mic_is_said_on_the_card(qapp, monkeypatch, isolated_cal):
+    """A capture that never opens must SAY so (never a frozen prompt)."""
+    import sounddevice as sd
+
+    from v2m.core import mic_cal
+    from v2m.core.i18n import tr
+    from v2m.gui import main_window as mw
+
+    monkeypatch.setattr(sd, "InputStream", DeafMic)
+
+    win = mw.MainWindow()
+    try:
+        win.show()
+        win.stack.setCurrentWidget(win.page_home)
+        win.page_home.btn_calibrate.click()
+        card = win.page_home.calibration_card
+
+        assert _pump_until(qapp, lambda: card.error_line.isVisible(), timeout=30), (
+            "a microphone that never opened stayed invisible"
+        )
+        assert "device unavailable" in card.error_line.text()
+        assert card.prompt.text() == tr("ui calibrate target").format(
+            n=1, total=mic_cal.ROUNDS, note=_note_of(card._targets[-1])
+        )
+    finally:
+        if win._calibration_thread is not None and win._calibration_thread.isRunning():
+            win._calibration_thread.stop()
+            win._calibration_thread.wait(3000)
+
+
+def test_a_stale_hold_never_advances_a_round(qapp, monkeypatch, isolated_cal):
+    """A round counts a pitch only while the note still sounds.
+
+    The collector's 400 ms tick used the LAST pitch seen: a note the
+    singer had already released (or a passing glide) stayed in the slot
+    and could be graded — "a sustained pitch only" was a comment, not a
+    rule. The pitch now carries its arrival time.
+    """
+    import time
+
+    from v2m.core.i18n import tr
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        win.show()
+        win.stack.setCurrentWidget(win.page_home)
+        win.page_home.btn_calibrate.click()
+        card = win.page_home.calibration_card
+        assert card._round == 0
+
+        # a pitch the singer holds: it arrives fresh
+        win._calibration_hz = card._targets[-1]
+        win._calibration_at = time.monotonic()
+        win._calibration_feed_tick()
+        assert card._round == 1, "a held note must advance its round"
+
+        # ...and one that ARRIVED long ago: the note is over, no round
+        win._calibration_hz = card._targets[-1]
+        win._calibration_at = time.monotonic() - (mw.MainWindow.CALIBRATION_FRESH_S + 1.0)
+        win._calibration_feed_tick()
+        assert card._round == 1, "a released note must not be graded"
+        assert card.heard_line.text() == tr("ui calibrate silent"), (
+            "a released note must not be reported as heard"
+        )
+    finally:
+        if win._calibration_thread is not None and win._calibration_thread.isRunning():
+            win._calibration_thread.stop()
+            win._calibration_thread.wait(3000)
+        if win.live_thread is not None and win.live_thread.isRunning():
+            win.live_thread.stop()
+            win.live_thread.wait(3000)
 
 
 def test_calibration_never_measures_the_singer(qapp, monkeypatch, isolated_cal):

@@ -31,7 +31,7 @@ def test_note_confirmed_and_closed():
 def test_two_separate_notes():
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.30)
-    _feed(seg, float("nan"), 0.30, 0.20)   # silence
+    _feed(seg, float("nan"), 0.30, 0.20)  # silence
     _feed(seg, _hz(72), 0.50, 0.30)
     seg.flush(0.85)
     assert len(seg.notes) == 2
@@ -77,7 +77,7 @@ def test_staged_attack_keeps_its_strength():
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(64), 0.0, 0.40)
     seg.push(0.41, float("nan"), attack=True, strength=1.0)  # consonant, mute
-    _feed(seg, _hz(64), 0.45, 0.40)                          # the re-attacked note
+    _feed(seg, _hz(64), 0.45, 0.40)  # the re-attacked note
     seg.flush(0.90)
     assert len(seg.notes) == 2
     assert seg.notes[1].articulated
@@ -104,7 +104,7 @@ def test_repetition_same_pitch_stays_two_notes():
     """
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(69), 0.0, 0.30)
-    _feed(seg, float("nan"), 0.30, 0.06)   # same note taken again
+    _feed(seg, float("nan"), 0.30, 0.06)  # same note taken again
     _feed(seg, _hz(69), 0.36, 0.30)
     seg.flush(0.70)
     assert len(seg.notes) == 2
@@ -128,11 +128,11 @@ def test_out_of_piano_notes_are_never_kept():
     from v2m.core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI
 
     seg = LiveNoteSegmenter()
-    _feed(seg, _hz(PIANO_MIN_MIDI - 3), 0.0, 0.30)   # below A0
+    _feed(seg, _hz(PIANO_MIN_MIDI - 3), 0.0, 0.30)  # below A0
     _feed(seg, float("nan"), 0.30, 0.10)
     _feed(seg, _hz(PIANO_MAX_MIDI + 5), 0.40, 0.30)  # above C8
     _feed(seg, float("nan"), 0.70, 0.10)
-    _feed(seg, _hz(PIANO_MIN_MIDI), 0.80, 0.30)      # A0, the extreme key
+    _feed(seg, _hz(PIANO_MIN_MIDI), 0.80, 0.30)  # A0, the extreme key
     seg.flush(1.15)
     assert [n.midi for n in seg.notes] == [PIANO_MIN_MIDI]
 
@@ -268,10 +268,15 @@ def test_repeated_same_pitch_through_the_full_chain():
     then glued everything into one 1.1 s note. Full chain (1024-sample
     blocks, like the mic)."""
     from voicetruth import SungNote, synthesize
+
     from v2m.core.liveseg import LivePitchStream
 
-    truth = [SungNote(64, 0.2, 0.25), SungNote(64, 0.5, 0.25),
-             SungNote(64, 0.8, 0.25), SungNote(64, 1.1, 0.25)]
+    truth = [
+        SungNote(64, 0.2, 0.25),
+        SungNote(64, 0.5, 0.25),
+        SungNote(64, 0.8, 0.25),
+        SungNote(64, 1.1, 0.25),
+    ]
     y = synthesize(truth, consonant_s=0.05, glide_s=0.03)
     stream = LivePitchStream(22_050, gate_rms=0.008)
     for i in range(0, len(y) - 1024, 1024):
@@ -293,13 +298,13 @@ def test_split_attack_survives_a_pending_mute_run():
     and with no articulation evidence, so the flush merge could glue it.
     """
     seg = LiveNoteSegmenter()
-    _feed(seg, _hz(64), 0.0, 0.40)              # held note (confirmed ~0.10)
-    seg.push(0.41, float("nan"), attack=True)   # burst: the hold is broken
-    seg.push(0.42, float("nan"))                # (silence < MIN_GAP_HOLD_S)
-    seg.push(0.43, _hz(64), attack=True)        # voiced frame: the split cuts here
-    seg.push(0.44, float("nan"))                # the burst's tail: PENDING mute
+    _feed(seg, _hz(64), 0.0, 0.40)  # held note (confirmed ~0.10)
+    seg.push(0.41, float("nan"), attack=True)  # burst: the hold is broken
+    seg.push(0.42, float("nan"))  # (silence < MIN_GAP_HOLD_S)
+    seg.push(0.43, _hz(64), attack=True)  # voiced frame: the split cuts here
+    seg.push(0.44, float("nan"))  # the burst's tail: PENDING mute
     seg.push(0.45, float("nan"))
-    _feed(seg, _hz(64), 0.46, 0.40)             # the repetition's vowel
+    _feed(seg, _hz(64), 0.46, 0.40)  # the repetition's vowel
     seg.flush(0.90)
     assert [n.midi for n in seg.notes] == [64, 64]
     assert seg.notes[1].articulated
@@ -312,8 +317,8 @@ def test_staged_attack_dates_the_new_note():
     the next note: otherwise `flush` merges the repetition as a blip."""
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(64), 0.0, 0.40)
-    seg.push(0.41, float("nan"), attack=True)   # consonant on a mute frame
-    _feed(seg, _hz(64), 0.45, 0.40)      # the re-attacked note
+    seg.push(0.41, float("nan"), attack=True)  # consonant on a mute frame
+    _feed(seg, _hz(64), 0.45, 0.40)  # the re-attacked note
     seg.flush(0.90)
     assert len(seg.notes) == 2
     assert seg.notes[1].articulated
@@ -360,8 +365,8 @@ def test_weak_frames_do_not_open_a_note_and_their_level_witness_marks_breaks():
     # a WEAK frame inside an ACTIVE note marks a break: the next frame at
     # the SAME pitch re-opens the pending (the split's first half)
     _feed(seg, _hz(64), 0.03, 0.40)
-    seg.push(0.44, _hz(64), weak=True)   # the seam dip, same pitch
-    _feed(seg, _hz(64), 0.45, 0.40)      # the strong return: split
+    seg.push(0.44, _hz(64), weak=True)  # the seam dip, same pitch
+    _feed(seg, _hz(64), 0.45, 0.40)  # the strong return: split
     seg.flush(0.90)
     assert [n.midi for n in seg.notes] == [64, 64], (
         "the weak-marked seam did not split the same-pitch re-attack"
@@ -398,8 +403,8 @@ def test_split_frames_ceiling_and_reartic_band_guard_the_same_pitch_cut():
     # note's onset, not a re-attack: no same-pitch split may fire
     seg = LiveNoteSegmenter()
     _feed(seg, _hz(64), 0.0, 0.40)
-    seg.push(0.41, float("nan"), attack=True)          # the hand-over burst
-    _feed(seg, _hz(67), 0.43, 0.40)                    # 3 st away >> REARTIC_ST
+    seg.push(0.41, float("nan"), attack=True)  # the hand-over burst
+    _feed(seg, _hz(67), 0.43, 0.40)  # 3 st away >> REARTIC_ST
     seg.flush(0.90)
     assert [n.midi for n in seg.notes] == [64, 67]
     assert REARTIC_ST < 0.5  # a hand-over's glide tail reaches ~0.5 st
@@ -434,11 +439,73 @@ def test_memory_and_attack_log_stay_bounded():
     is pinned in test_pitch; these are the segmenter's)."""
     seg = LiveNoteSegmenter()
     t = 0.0
-    for i in range(2000):  # ~20 s of frames, more than any window keeps
+    for _ in range(2000):  # ~20 s of frames, more than any window keeps
         seg.push(t, _hz(64))
         t += 0.01
-    assert len(seg.recent_midis) <= 6   # CLEAN_FRAMES
-    assert len(seg.recent_raw) <= 6     # HOLD_RAW_FRAMES
-    assert len(seg.attacks) <= 64       # MAX_ATTACKS
+    assert len(seg.recent_midis) <= 6  # CLEAN_FRAMES
+    assert len(seg.recent_raw) <= 6  # HOLD_RAW_FRAMES
+    assert len(seg.attacks) <= 64  # MAX_ATTACKS
     # one long note is running (flush will close it): nothing leaked
     assert len(seg.notes) == 0
+
+
+# --------------------------------------------------------------------- #
+# The silence gate is ONE policy for the displayed level and the voice
+# evidence (audio_io.GATE_RMS): below it, no pitch enters the segmenter.
+# --------------------------------------------------------------------- #
+
+
+def _block_chain(x, sr: int = 22_050, gate_rms: float = 0.008):
+    """Run a signal through the full live chain in 1024-sample blocks."""
+    from v2m.core.liveseg import LivePitchStream
+
+    stream = LivePitchStream(sr, gate_rms=gate_rms)
+    y = np.asarray(x, dtype=np.float32)
+    for i in range(0, len(y) - 1024, 1024):
+        stream.feed(y[i : i + 1024], (i + 1024) / sr)
+    stream.seg.flush(len(y) / sr)
+    return stream.seg.notes
+
+
+def _max_block_rms(x, sr: int = 22_050) -> float:
+    y = np.asarray(x, dtype=np.float64)
+    return max(float(np.sqrt(np.mean(y[i : i + 1024] ** 2))) for i in range(0, len(y) - 1024, 1024))
+
+
+def test_a_periodic_tone_below_the_gate_reads_no_note():
+    """A sub-gate rumble is silence for the pitch evidence too.
+
+    YIN is amplitude-blind (its difference function is normalized), so a
+    periodic E4 at 0.0015 amplitude — ~0.0011 per block, seven times under
+    `audio_io.GATE_RMS` — is pitched perfectly while the level meter draws
+    the block as silence. The gate must therefore mask the frame, not only
+    arm the weak-frame witness, or the segmenter confirms a whole Mi4 on
+    what the user is shown as a silent input.
+    """
+    from v2m.core.audio_io import GATE_RMS
+
+    sr = 22_050
+    t = np.arange(int(sr * 1.2)) / sr
+    rumble = (0.0015 * np.sin(2 * np.pi * 329.63 * t)).astype(np.float32)
+    assert _max_block_rms(rumble) < GATE_RMS, "the case must sit under the gate"
+    assert _block_chain(rumble, gate_rms=GATE_RMS) == []
+
+
+def test_a_quiet_voice_straddling_the_gate_is_still_transcribed_live():
+    """The gate must not eat the soft singer (the `voix douce` contract).
+
+    At amp 0.05 the voice peaks near 0.010 per block — just ABOVE the
+    0.008 gate — while its softest voiced blocks dip to ~0.0049, under it.
+    Those frames turn into mute runs, so the chain has to keep reading the
+    six notes WITHOUT splitting a hold on a sub-gate dip: a mask that
+    loses notes or fragments them would trade one defect for another.
+    """
+    from voicetruth import sequence, synthesize
+
+    from v2m.core.audio_io import GATE_RMS
+
+    truth = sequence([60, 62, 64, 65, 67, 72], dur_s=0.6, start_s=0.2)
+    y = synthesize(truth, glide_s=0.09, consonant_s=0.05, amp=0.05)
+    assert 0.0049 < _max_block_rms(y) < 0.02, "the case must straddle the gate"
+    notes = _block_chain(y, gate_rms=GATE_RMS)
+    assert [n.midi for n in notes] == [60, 62, 64, 65, 67, 72]

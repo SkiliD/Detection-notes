@@ -18,30 +18,47 @@ from __future__ import annotations
 import math
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
 
-from ..core.i18n import tr, tr_figure, tr_key_label
 from ..core.grid import BeatGrid
+from ..core.i18n import tr, tr_figure, tr_key_label
 from ..core.music import sane_bpm
 from ..core.notation import STAFF_LINES, StaffLayout, layout_staff
 
-# Dark-theme palette, shared with the plot views.
-BG = QColor("#12161c")
-INK = QColor("#e6ebf2")          # noteheads, stems, barlines
-STAFF_INK = QColor("#8f9aa6")    # staff lines, clef, ledger lines
-SOFT_INK = QColor("#9fb3c8")     # header text, measure numbers
-REST_INK = QColor("#c9d3dd")     # rests: readable, but dimmer than notes
-BREATH_INK = QColor("#7fd4a0")   # the heard-breath "B" annotation
-PREVIEW_INK = QColor("#ffc86e")  # the note being sung (piano roll amber)
-CURSOR_INK = QColor("#ff9642")
+# The staff shares the plot's active application theme.
+BG = QColor("#111827")
+INK = QColor("#F4EFE6")  # noteheads, stems, barlines
+STAFF_INK = QColor("#B9C2CF")  # staff lines, clef, ledger lines
+SOFT_INK = QColor("#B9C2CF")  # header text, measure numbers
+REST_INK = QColor("#DCD6CA")  # rests: readable, but dimmer than notes
+BREATH_INK = QColor("#D9A76C")  # the heard-breath "B" annotation
+PREVIEW_INK = QColor("#F0C486")  # the note being sung (piano roll amber)
+CURSOR_INK = QColor("#D9A76C")
 
-S = 9.0            # staff line spacing, px
+
+def set_theme(name: str) -> None:
+    """Update the shared staff inks when the application theme changes."""
+    global BG, INK, STAFF_INK, SOFT_INK, REST_INK, BREATH_INK, PREVIEW_INK, CURSOR_INK
+    light = name == "light"
+    BG = QColor("#F5F1E8" if light else "#111827")
+    INK = QColor("#241E17" if light else "#F4EFE6")
+    STAFF_INK = QColor("#544B40" if light else "#C9C2B3")
+    SOFT_INK = QColor("#544B40" if light else "#C9C2B3")
+    REST_INK = QColor("#544B40" if light else "#DCD6CA")
+    BREATH_INK = QColor("#8A5A24" if light else "#D9A76C")
+    # The sung note is a glyph on paper too: #9B6410 read 4.41:1 there, under
+    # the 4.5:1 the page holds every mark to.
+    PREVIEW_INK = QColor("#96600C" if light else "#F0C486")
+    CURSOR_INK = QColor("#8A5A24" if light else "#D9A76C")
+
+
+S = 9.0  # staff line spacing, px
 PX_PER_BEAT = 3.6  # horizontal room per quarter beat, in staff spacings
 TOP_LINE_STEP = 38  # F5 sits on the top line
 CLEF_X = 12.0
 # G-clef geometry, in staff spaces from the top staff line (G line at 3.0).
-CLEF_CENTER = (0.10, 3.05)   # centre of the belly spiral
+CLEF_CENTER = (0.10, 3.05)  # centre of the belly spiral
 CLEF_R0, CLEF_R1 = 1.05, 0.28
 CLEF_TURNS = 1.9
 LEFT_PAD = 8.0
@@ -69,7 +86,12 @@ class StaffView(QWidget):
     # Model
     # ------------------------------------------------------------------
     def set_score(
-        self, notes, *, grid: BeatGrid | None = None, key=None, positions=None,
+        self,
+        notes,
+        *,
+        grid: BeatGrid | None = None,
+        key=None,
+        positions=None,
         rests=None,
     ) -> None:
         """Show a finished analysis (audio file, or a closed live take)."""
@@ -189,35 +211,59 @@ class StaffView(QWidget):
         if self._live:
             start, end = self.visible_window()
             self._paint_window(
-                p, layout, HEADER_H, x_notes, px_beat, start, end,
+                p,
+                layout,
+                HEADER_H,
+                x_notes,
+                px_beat,
+                start,
+                end,
                 first_system=False,
             )
             self._paint_cursor(p, layout, HEADER_H, x_notes, px_beat, start)
             p.end()
             return
 
-        measure_px = layout.beats_per_measure * px_beat
-        per_system = max(1, int(usable // measure_px))
-        systems = max(1, -(-layout.measures // per_system))
-        system_h = 4 * S + 4.2 * S
+        systems, per_system, system_h, first_top = self._score_geometry()
         for i in range(systems):
             first = i * per_system + 1
             last = min(layout.measures, first + per_system - 1)
             self._paint_window(
-                p, layout, HEADER_H + i * system_h, x_notes, px_beat,
+                p,
+                layout,
+                first_top + i * system_h,
+                x_notes,
+                px_beat,
                 (first - 1) * layout.beats_per_measure,
                 last * layout.beats_per_measure,
                 first_system=(i == 0),
             )
         p.end()
 
+    def _score_geometry(self) -> tuple[int, int, float, float]:
+        """(systems, measures per system, system height, first top) in units.
+
+        The music sits in the MIDDLE of the paper it is given: four measures
+        pinned under the header left two thirds of the view empty, which
+        reads as an unfinished screen rather than a score.
+        """
+        layout = self._prepare()
+        px_beat, _, usable = self._metrics(layout)
+        measure_px = layout.beats_per_measure * px_beat
+        per_system = max(1, int(usable // measure_px))
+        systems = max(1, -(-layout.measures // per_system))
+        system_h = 4 * S + 4.2 * S
+        drawn_h = HEADER_H + systems * system_h
+        offset = max(0.0, (self.height() / self._k - drawn_h) / 2.0)
+        return systems, per_system, system_h, HEADER_H + offset
+
     def _notes_x(self, layout: StaffLayout) -> float:
         """Left edge of the first note slot (after clef + key + meter)."""
         return (
             CLEF_X
-            + 2.6 * S                                   # clef
-            + 0.95 * S * len(layout.signature)          # key signature
-            + 2.4 * S                                   # time signature
+            + 2.6 * S  # clef
+            + 0.95 * S * len(layout.signature)  # key signature
+            + 2.4 * S  # time signature
         )
 
     def _paint_header(self, p: QPainter, layout: StaffLayout) -> None:
@@ -229,10 +275,21 @@ class StaffView(QWidget):
         parts = [f"{int(round(sane_bpm(self._grid.bpm)))} {tr('key bpm unit')}", layout.meter_label]
         if layout.key_tonic:
             parts.append(tr_key_label(f"{layout.key_tonic} {layout.key_mode or 'major'}"))
-        p.drawText(QPointF(LEFT_PAD + 2.0, 14.0), "   ·   ".join(parts))
+        # right-aligned over the STAFF's right edge: at the left the treble
+        # clef's curl rose into the text and swallowed the tempo
+        text = "   ·   ".join(parts)
+        width = QFontMetricsF(font).horizontalAdvance(text)
+        p.drawText(QPointF(max(LEFT_PAD, self.unit_width - 6.0 - width), 14.0), text)
 
     def _paint_window(
-        self, p, layout, staff_top, x_notes, px_beat, beat_from, beat_to,
+        self,
+        p,
+        layout,
+        staff_top,
+        x_notes,
+        px_beat,
+        beat_from,
+        beat_to,
         first_system: bool,
     ) -> None:
         """Draw one visible beat window: staff, clef, signature, bars, notes.
@@ -299,9 +356,7 @@ class StaffView(QWidget):
     def _paint_cursor(self, p, layout, staff_top, x_notes, px_beat, scroll) -> None:
         x = x_notes + (layout.total_beats - scroll) * px_beat
         p.setPen(QPen(CURSOR_INK, 1.4))
-        p.drawLine(
-            QPointF(x, staff_top - 1.3 * S), QPointF(x, staff_top + 5.3 * S)
-        )
+        p.drawLine(QPointF(x, staff_top - 1.3 * S), QPointF(x, staff_top + 5.3 * S))
 
 
 _EMPTY = "—"
@@ -374,11 +429,9 @@ def _clef_path() -> QPainterPath:
 def _paint_accidental(p: QPainter, alter: int, x: float, y: float) -> None:
     """Sharp (+), natural (0) or flat (-) drawn with strokes; no music font.
 
-    The natural must be its OWN glyph: alter==0 used to fall into the flat
-    branch (the only else), so a key-signature letter sung natural was
-    engraved with a FLAT — a wrong pitch on paper (F natural in G major
-    printed as Fe). The two verticals + two slanted strokes of the natural
-    borrow the sharp's geometry, narrowed to the same height as the flat.
+    The natural has its own glyph so a key-signature letter sung natural
+    cannot be confused with a flat. Its two verticals and two slanted
+    strokes borrow the sharp's geometry, narrowed to the flat's height.
     """
     p.save()
     p.setPen(QPen(INK, max(1.0, S * 0.13)))
@@ -408,7 +461,14 @@ def _paint_accidental(p: QPainter, alter: int, x: float, y: float) -> None:
         p.drawLine(QPointF(x - 0.06 * S, y - 1.25 * S), QPointF(x - 0.06 * S, y + 0.50 * S))
         path = QPainterPath()
         path.moveTo(x - 0.06 * S, y + 0.05 * S)
-        path.cubicTo(x + 0.72 * S, y - 0.40 * S, x + 0.72 * S, y + 0.60 * S, x - 0.06 * S, y + 0.50 * S)
+        path.cubicTo(
+            x + 0.72 * S,
+            y - 0.40 * S,
+            x + 0.72 * S,
+            y + 0.60 * S,
+            x - 0.06 * S,
+            y + 0.50 * S,
+        )
         p.drawPath(path)
     p.restore()
 
@@ -451,9 +511,7 @@ def _paint_note(p: QPainter, x: float, y: float, staff_top: float, note) -> None
         raised = S / 2.0 if note.step % 2 == 0 else 0.0
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(color)
-        p.drawEllipse(
-            QRectF(x + 0.92 * S, y - raised - 0.20 * S, 0.38 * S, 0.38 * S)
-        )
+        p.drawEllipse(QRectF(x + 0.92 * S, y - raised - 0.20 * S, 0.38 * S, 0.38 * S))
 
     if written.tuplet:
         font = QFont()
@@ -480,20 +538,18 @@ def _paint_rest(p: QPainter, x: float, staff_top: float, rest) -> None:
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
     if shape == "pause":
-        y = staff_top + (TOP_LINE_STEP - 36) * (S / 2.0)   # hangs from D5
+        y = staff_top + (TOP_LINE_STEP - 36) * (S / 2.0)  # hangs from D5
         p.setBrush(REST_INK)
         p.drawRect(QRectF(x, y, 1.5 * S, 0.45 * S))
     elif shape == "demi-pause":
-        y = staff_top + (TOP_LINE_STEP - 34) * (S / 2.0)   # sits on B4
+        y = staff_top + (TOP_LINE_STEP - 34) * (S / 2.0)  # sits on B4
         p.setBrush(REST_INK)
         p.drawRect(QRectF(x, y - 0.45 * S, 1.5 * S, 0.45 * S))
     elif shape == "demi-soupir":
-        y = staff_top + 2.0 * S                            # middle line
+        y = staff_top + 2.0 * S  # middle line
         p.setBrush(REST_INK)
         p.drawEllipse(QRectF(x + 0.10 * S, y - 2.0 * S, 0.55 * S, 0.42 * S))
-        p.drawLine(
-            QPointF(x + 0.30 * S, y - 1.85 * S), QPointF(x - 0.38 * S, y + 0.75 * S)
-        )
+        p.drawLine(QPointF(x + 0.30 * S, y - 1.85 * S), QPointF(x - 0.38 * S, y + 0.75 * S))
     else:  # "soupir" and every fallback (unknown figure, 16th): zigzag
         y = staff_top + 2.0 * S
         path = QPainterPath()
@@ -502,9 +558,12 @@ def _paint_rest(p: QPainter, x: float, staff_top: float, rest) -> None:
         path.lineTo(x - 0.16 * S, y - 0.45 * S)
         path.lineTo(x + 0.46 * S, y + 0.35 * S)
         path.cubicTo(
-            x + 0.46 * S, y + 1.05 * S,
-            x - 0.28 * S, y + 1.30 * S,
-            x - 0.28 * S, y + 0.80 * S,
+            x + 0.46 * S,
+            y + 1.05 * S,
+            x - 0.28 * S,
+            y + 1.30 * S,
+            x - 0.28 * S,
+            y + 0.80 * S,
         )
         p.drawPath(path)
     if rest.shape:
@@ -527,9 +586,7 @@ def _paint_rest(p: QPainter, x: float, staff_top: float, rest) -> None:
         p.setBrush(REST_INK)
         y_dot = staff_top + 1.8 * S
         for i in range(dots):
-            p.drawEllipse(
-                QRectF(x + 1.7 * S + i * 0.35 * S, y_dot, 0.30 * S, 0.30 * S)
-            )
+            p.drawEllipse(QRectF(x + 1.7 * S + i * 0.35 * S, y_dot, 0.30 * S, 0.30 * S))
     p.restore()
 
 
@@ -554,13 +611,19 @@ def _flag_path(x: float, tip: float, up: bool, index: int) -> QPainterPath:
     off = index * 0.60 * S * sign
     path.moveTo(x, tip + off)
     path.cubicTo(
-        x + 0.90 * S, tip + (0.25 * S) * sign + off,
-        x + 1.05 * S, tip + (0.95 * S) * sign + off,
-        x + 0.30 * S, tip + (1.70 * S) * sign + off,
+        x + 0.90 * S,
+        tip + (0.25 * S) * sign + off,
+        x + 1.05 * S,
+        tip + (0.95 * S) * sign + off,
+        x + 0.30 * S,
+        tip + (1.70 * S) * sign + off,
     )
     path.cubicTo(
-        x + 0.70 * S, tip + (1.05 * S) * sign + off,
-        x + 0.55 * S, tip + (0.60 * S) * sign + off,
-        x, tip + (0.40 * S) * sign + off,
+        x + 0.70 * S,
+        tip + (1.05 * S) * sign + off,
+        x + 0.55 * S,
+        tip + (0.60 * S) * sign + off,
+        x,
+        tip + (0.40 * S) * sign + off,
     )
     return path

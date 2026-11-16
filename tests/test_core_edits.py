@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
 
+from v2m.core import edits as edits_module
 from v2m.core.edits import (
     CURRENT_ACTION,
     EditHistory,
@@ -23,10 +24,7 @@ from v2m.core.tempo import TempoResult
 
 def _result(*midis: int) -> AnalysisResult:
     """A small analyzed take, one note per semitone argument."""
-    notes = [
-        Note(0.5 * i + 0.1, 0.5 * i + 0.5, midi, 0.9)
-        for i, midi in enumerate(midis)
-    ]
+    notes = [Note(0.5 * i + 0.1, 0.5 * i + 0.5, midi, 0.9) for i, midi in enumerate(midis)]
     return AnalysisResult(
         source="take.wav",
         duration_s=0.5 * len(notes) + 0.2,
@@ -47,9 +45,7 @@ def test_phrase_splice_trims_silence_and_moves_later_notes():
     sung = np.arange(70, dtype=np.float32)
     replacement = [Note(1.0, 6.0, 67, 0.9)]
 
-    edited, audio, delta = splice_phrase(
-        notes, source, replacement, sung, 1, 1, sr=10
-    )
+    edited, audio, delta = splice_phrase(notes, source, replacement, sung, 1, 1, sr=10)
 
     assert len(audio) == 145
     assert audio[15:65].tolist() == sung[10:60].tolist()
@@ -145,7 +141,9 @@ def test_move_note_refuses_overlaps_and_absurd_edges():
         move_note(result, 9, start_s=0.5, end_s=0.9)
     # nothing above changed the take
     assert [(n.start, n.end, n.midi) for n in result.notes] == [
-        (0.1, 0.5, 60), (0.6, 1.0, 64), (1.1, 1.5, 67),
+        (0.1, 0.5, 60),
+        (0.6, 1.0, 64),
+        (1.1, 1.5, 67),
     ]
 
 
@@ -183,7 +181,7 @@ def test_delete_notes_refuses_to_empty_the_take_or_read_outside_it():
 
 
 def test_a_deletion_snapshot_carries_its_own_history_label():
-    """"deletion" is a first-class EDIT_ACTIONS member: the timeline row
+    """ "deletion" is a first-class EDIT_ACTIONS member: the timeline row
     of a state archived by a deletion says so."""
     history = EditHistory()
     history.record(snapshot_state(_result(60), None, action="deletion"))
@@ -340,7 +338,9 @@ def test_redo_timeline_rows_are_oldest_to_newest():
     rows = history.entries(snapshot_state(_result(62), None))
 
     assert [state.result.notes[0].midi for state, _ in rows if state is not None] == [
-        60, 64, 66,
+        60,
+        64,
+        66,
     ]
     assert rows[1] == (None, CURRENT_ACTION)
     # The UI's farthest-future row is valid and jumps through each redo step.
@@ -369,10 +369,10 @@ def test_history_lays_out_the_whole_timeline_for_the_state_browser():
     contract). Jumping stays undo/redo's bookkeeping: the browser reads
     rows, the window walks steps."""
     history = EditHistory()
-    first = snapshot_state(_result(60), None)          # before correction 1
-    history.record(first)                              # ...applied, kept
-    second = snapshot_state(_result(62), None)         # before correction 2
-    history.record(second)                             # ...applied, kept
+    first = snapshot_state(_result(60), None)  # before correction 1
+    history.record(first)  # ...applied, kept
+    second = snapshot_state(_result(62), None)  # before correction 2
+    history.record(second)  # ...applied, kept
     current = snapshot_state(_result(64), None)
 
     rows = history.entries(current)
@@ -388,10 +388,11 @@ def test_history_lays_out_the_whole_timeline_for_the_state_browser():
     # by the state redo would restore (66, the second correction's result)
     history.undo(snapshot_state(_result(66), None))
     rows = history.entries(snapshot_state(_result(62), None))
-    assert [(state.result.notes[0].midi, action) for state, action in rows
-            if state is not None] == [
-        (60, "correction"),   # undo row, before the current row
-        (66, "correction"),   # redo row, after the current row
+    assert [
+        (state.result.notes[0].midi, action) for state, action in rows if state is not None
+    ] == [
+        (60, "correction"),  # undo row, before the current row
+        (66, "correction"),  # redo row, after the current row
     ]
     assert rows[1] == (None, CURRENT_ACTION)
 
@@ -400,8 +401,9 @@ def test_history_lays_out_the_whole_timeline_for_the_state_browser():
     # the caller sits on, now labelled by the NEW edit's kind
     history.record(snapshot_state(_result(62), None, action="replacement"))
     rows = history.entries(snapshot_state(_result(70), None))
-    assert [(state.result.notes[0].midi, action) for state, action in rows
-            if state is not None] == [
+    assert [
+        (state.result.notes[0].midi, action) for state, action in rows if state is not None
+    ] == [
         (60, "correction"),
         (62, "replacement"),
     ]
@@ -470,3 +472,142 @@ def test_history_depth_bound_shows_in_the_timeline():
 
     assert [state.result.notes[0].midi for state, _ in rows if state is not None] == [62, 64]
     assert history.undo_depth == 2
+
+
+def _edit_timeline_identity(history, result, signal, live_notes):
+    """Describe history branch identities without comparing NumPy arrays."""
+    rows = history.entries(snapshot_state(result, signal, live_notes))
+    return [(id(state) if state is not None else None, action) for state, action in rows]
+
+
+@pytest.mark.parametrize(
+    ("intent_kind", "action", "midis"),
+    [
+        ("correct", "correction", [60, 65, 67]),
+        ("move", "move", [60, 62, 67]),
+        ("delete", "deletion", [60, 67]),
+    ],
+)
+def test_note_edit_transaction_commits_one_whole_before_state(intent_kind, action, midis):
+    """Each direct edit publishes a candidate and archives one take state."""
+    result = _result(60, 64, 67)
+    signal = np.arange(64, dtype=np.float32)
+    live_notes = (object(), object())
+    history = EditHistory()
+    before_result = result
+
+    intent = {
+        "correct": edits_module.CorrectPitchIntent(index=1, midi=65),
+        "move": edits_module.MoveNoteIntent(index=1, start_s=0.7, end_s=1.1, midi=62),
+        "delete": edits_module.DeleteNotesIntent(indices=(1,)),
+    }[intent_kind]
+    outcome = edits_module.apply_note_edit(
+        result,
+        history,
+        signal=signal,
+        live_notes=live_notes,
+        intent=intent,
+    )
+
+    assert outcome.result is not before_result
+    assert [note.midi for note in outcome.result.notes] == midis
+    assert outcome.before.result.notes[1].midi == 64
+    assert outcome.before.action == action
+    assert outcome.before.signal is signal
+    assert outcome.before.live_notes == live_notes
+    assert history.undo_depth == 1
+    assert history.can_undo and not history.can_redo
+    rows = history.entries(snapshot_state(outcome.result, signal, live_notes))
+    assert len(rows) == 2
+    assert rows[0][0] is outcome.before
+    assert rows[0][1] == action
+    assert rows[1] == (None, CURRENT_ACTION)
+
+
+def test_note_edit_transaction_failure_preserves_original_and_both_history_branches(
+    monkeypatch,
+):
+    """A late derived-fact failure never partially publishes the candidate."""
+    result = _result(60, 64, 67)
+    result.pitch = cast(Any, object())
+    result.observation = cast(Any, object())
+    result.live_vs_final = {"live": 3, "final": 3}
+    signal = np.arange(64, dtype=np.float32)
+    live_notes = (object(),)
+    history = EditHistory()
+    older = snapshot_state(_result(55, 57), signal, live_notes, action="move")
+    history.record(older)
+    history.record(snapshot_state(_result(58, 59), signal, live_notes))
+    undone = history.undo(snapshot_state(result, signal, live_notes))
+    assert undone is not None
+    assert history.can_undo and history.can_redo
+    timeline_before = _edit_timeline_identity(history, result, signal, live_notes)
+
+    original_notes = result.notes
+    original_note_facts = [
+        (note.start, note.end, note.midi, note.deviation) for note in result.notes
+    ]
+    original_pitch = result.pitch
+    original_observation = result.observation
+    original_live_vs_final = result.live_vs_final
+
+    def fail_after_candidate_mutation(candidate, notes, **_kwargs):
+        candidate.notes = notes
+        candidate.key = "partial candidate update"
+        raise RuntimeError("derived facts failed")
+
+    monkeypatch.setattr(edits_module, "refresh_result_facts", fail_after_candidate_mutation)
+    with pytest.raises(RuntimeError, match="derived facts failed"):
+        edits_module.apply_note_edit(
+            result,
+            history,
+            signal=signal,
+            live_notes=live_notes,
+            intent=edits_module.CorrectPitchIntent(index=1, midi=65),
+        )
+
+    assert result.notes is original_notes
+    assert [
+        (note.start, note.end, note.midi, note.deviation) for note in result.notes
+    ] == original_note_facts
+    assert result.pitch is original_pitch
+    assert result.observation is original_observation
+    assert result.live_vs_final is original_live_vs_final
+    assert history.can_undo and history.can_redo
+    assert _edit_timeline_identity(history, result, signal, live_notes) == timeline_before
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        edits_module.CorrectPitchIntent(index=99, midi=62),
+        edits_module.MoveNoteIntent(index=99, start_s=0.7, end_s=1.1, midi=62),
+        edits_module.DeleteNotesIntent(indices=(99,)),
+    ],
+)
+def test_note_edit_transaction_validation_failure_preserves_redo_branch(intent):
+    """Rejected intents leave the current take and linear history untouched."""
+    result = _result(60, 64, 67)
+    signal = np.arange(32, dtype=np.float32)
+    live_notes = (object(),)
+    history = EditHistory()
+    history.record(snapshot_state(_result(55, 57), signal, live_notes, action="move"))
+    history.record(snapshot_state(_result(56, 58), signal, live_notes))
+    history.undo(snapshot_state(_result(58, 59), signal, live_notes))
+    timeline_before = _edit_timeline_identity(history, result, signal, live_notes)
+    notes_before = result.notes
+    facts_before = [(note.start, note.end, note.midi) for note in result.notes]
+
+    with pytest.raises((IndexError, ValueError)):
+        edits_module.apply_note_edit(
+            result,
+            history,
+            signal=signal,
+            live_notes=live_notes,
+            intent=intent,
+        )
+
+    assert result.notes is notes_before
+    assert [(note.start, note.end, note.midi) for note in result.notes] == facts_before
+    assert history.can_undo and history.can_redo
+    assert _edit_timeline_identity(history, result, signal, live_notes) == timeline_before

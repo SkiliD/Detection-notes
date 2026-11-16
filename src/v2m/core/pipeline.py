@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from . import audio_io
+from . import audio_io, takes
 from .chords import (
     ChordResult,
     detect_chord_progression,
@@ -22,7 +22,6 @@ from .keys import KeyResult, detect_key, snap_to_key
 from .meter import detect_meter, dotted_pulse_tempo
 from .notes import DEFAULT_MIN_NOTE_S, DEFAULT_SEMITONES, Note, interpret
 from .observation import FORMAT_VERSION, VoiceObservation
-from . import takes
 from .onsets import compute_onset_strengths
 from .pitch import PitchTrack
 from .rests import Rest, detect_rests
@@ -125,9 +124,7 @@ def analyze_signal(
     observation = VoiceObservation.from_signal(
         y, sr, min_conf=opts.min_conf, use_attacks=opts.use_attacks
     )
-    return interpret_observation(
-        observation, tempo=tempo, source=source, opts=opts, report=report
-    )
+    return interpret_observation(observation, tempo=tempo, source=source, opts=opts, report=report)
 
 
 def interpret_observation(
@@ -159,7 +156,7 @@ def interpret_observation(
 
     report(0.90, tr("progress key"))
     key = detect_key(notes)
-    # context-aware pitch snap (AGENTS.md b): a note that sits almost
+    # context-aware pitch snap: a note that sits almost
     # exactly between two semitones resolves toward whichever neighbour IS
     # a degree of the detected key — the global tuning offset (notes.py)
     # cannot see a mistuned degree, the scale can. No-op without a key.
@@ -171,18 +168,14 @@ def interpret_observation(
     chord_segments = detect_chord_segments(notes) if chord else []
 
     report(0.92, tr("progress refine"))
-    # the onset strengths feed BOTH the dotted-pulse tempo correction below
-    # and the meter detection: compute them once, before the tempo is
-    # finalized (they used to be filled after the refine — the correction
-    # then read all-zero strengths and never fired on a real take)
+    # Onset strengths feed both dotted-pulse tempo correction and meter
+    # detection, so compute them before refining tempo or detecting meter.
     compute_onset_strengths(observation, notes)
     if tempo and tempo.bpm > 0 and len(notes) >= 3:
         # beat_track returns a rounded BPM (e.g. 117.5 for a true 120):
         # refine it against note onsets to rebuild an exact grid, required
         # by figure labeling and the score.
-        refined = refine_bpm_with_onsets(
-            np.array([n.start for n in notes], dtype=float), tempo.bpm
-        )
+        refined = refine_bpm_with_onsets(np.array([n.start for n in notes], dtype=float), tempo.bpm)
         # AFTER the refine, not before: beat_track lands on an INTEGER
         # multiple of the dotted pulse (the onsets live on its grid), so the
         # refine stays exact on that grid. The correction is the one the
@@ -325,11 +318,7 @@ def cached_observation(
         # must stay able to read evidence one version old, while the cache
         # cannot afford to guess what the arrays mean
         with np.load(cache, allow_pickle=False) as data:
-            version = (
-                int(data["format_version"])
-                if "format_version" in set(data.files)
-                else 0
-            )
+            version = int(data["format_version"]) if "format_version" in set(data.files) else 0
         if version != FORMAT_VERSION:
             return None
         observation = VoiceObservation.load(cache)

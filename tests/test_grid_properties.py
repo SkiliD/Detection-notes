@@ -1,11 +1,6 @@
-"""Grid properties, written BEFORE the Grid existed.
-
-The metric frame — seconds ↔ beats conversion, measure position, snapping
-onto the grid — used to be copy-pasted across seven modules. These tests
-do not describe that dispersion: they pin what every consumer must keep
-doing once it is one module (`grid.BeatGrid`, see CONTEXT.md "Grille").
-It is the refactor's non-regression contract: each property can then be
-re-read through the grid without changing its statement.
+"""The metric frame's seconds ↔ beats conversion, measure position and
+snapping contracts, exercised through public consumers and `grid.BeatGrid`.
+These properties pin what consumers must preserve while using the shared grid.
 
 Two commitments:
 
@@ -16,10 +11,9 @@ Two commitments:
   result at 120 BPM. A `171.02 BPM` shows up everywhere here because
   that is the tempo actually detected on `chant.wav`.
 
-A take's snapping is a member of the Grid (`BeatGrid.snap_notes`): the
-snapping properties below query it directly, whereas they used to go
-through a private function of the export. What the export makes of it
-remains held by the net, `test_reference_artifacts.py`. The last
+A take's snapping is a member of the Grid (`BeatGrid.snap_notes`): these
+properties query it directly, while `test_reference_artifacts.py` checks
+what the export writes. The last
 property does the same for `BeatGrid.written`, the choice of the
 written value of a figure-less duration: it queries the Grid AND the
 Staff, which must use it instead of re-rounding at home.
@@ -29,6 +23,7 @@ import io
 
 import numpy as np
 import pytest
+
 from v2m.core.figures import label_notes
 from v2m.core.grid import CATALOGUE, BeatGrid, Meter
 from v2m.core.midi_export import build_midi

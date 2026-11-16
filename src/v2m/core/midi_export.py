@@ -9,6 +9,7 @@ import mido
 
 from .grid import BeatGrid
 from .keys import KeyResult
+from .music import NOTE_NAMES
 from .notes import Note
 from .playback import HELD_MIN_S, PEDAL_TAIL_FACTOR, PEDAL_TAIL_MAX_S
 
@@ -29,13 +30,24 @@ class _MidiEvent:
 # Key names accepted by mido for the Key Signature meta event (FF 59).
 # All minor keys exist as sharps; three major keys are written with flats.
 _MAJOR_MIDO = {
-    "C": "C", "C#": "C#", "D": "D", "D#": "Eb", "E": "E", "F": "F",
-    "F#": "F#", "G": "G", "G#": "Ab", "A": "A", "A#": "Bb", "B": "B",
+    "C": "C",
+    "C#": "C#",
+    "D": "D",
+    "D#": "Eb",
+    "E": "E",
+    "F": "F",
+    "F#": "F#",
+    "G": "G",
+    "G#": "Ab",
+    "A": "A",
+    "A#": "Bb",
+    "B": "B",
 }
 
 
-def _mido_key(tonic: str, mode: str) -> str:
+def _mido_key(tonic: str, mode: str, transpose: int = 0) -> str:
     """Encode (tonic, mode) as a mido key string: e.g. ('A','minor') -> 'Am'."""
+    tonic = NOTE_NAMES[(NOTE_NAMES.index(tonic) + transpose) % 12]
     if mode == "minor":
         return f"{tonic}m"
     return _MAJOR_MIDO.get(tonic, "C")
@@ -71,7 +83,7 @@ def build_midi(
         # one signature only: alternative candidates live in the JSON report
         meta.append(
             mido.MetaMessage(
-                "key_signature", key=_mido_key(key.best.tonic, key.best.mode), time=0
+                "key_signature", key=_mido_key(key.best.tonic, key.best.mode, transpose), time=0
             )
         )
     meta.append(mido.MetaMessage("end_of_track", time=0))
@@ -89,8 +101,8 @@ def build_midi(
             end = max(start + quantize_s, round(end / quantize_s) * quantize_s)
         pitch = max(0, min(127, int(n.midi) + transpose))
         velocity = max(1, min(127, int(round(40 + 80 * n.confidence))))
-        events.append(_MidiEvent(start, order=1, kind="note_on", pitch=pitch, value=velocity))
-        events.append(_MidiEvent(end, order=2, kind="note_off", pitch=pitch))
+        events.append(_MidiEvent(start, order=2, kind="note_on", pitch=pitch, value=velocity))
+        events.append(_MidiEvent(end, order=1, kind="note_off", pitch=pitch))
 
         # Quantization changes the written note duration, so its sustain
         # window must be derived from these same written event times.
@@ -120,7 +132,9 @@ def build_midi(
                 continue
             voice.append(
                 mido.Message(
-                    "control_change", control=64, value=127,
+                    "control_change",
+                    control=64,
+                    value=127,
                     time=ticks + pending_ticks,
                 )
             )
@@ -134,7 +148,9 @@ def build_midi(
                 continue
             voice.append(
                 mido.Message(
-                    "control_change", control=64, value=0,
+                    "control_change",
+                    control=64,
+                    value=0,
                     time=ticks + pending_ticks,
                 )
             )

@@ -47,8 +47,12 @@ def _hand_built_observation(notes_spec, sr=22_050, frame_s=0.02):
         transition=np.zeros(len(times), dtype=bool),
     )
     return VoiceObservation(
-        pitch=track, attacks=None, duration_s=t, sample_rate=sr,
-        frame_dt=frame_s, accent_envelope=None,
+        pitch=track,
+        attacks=None,
+        duration_s=t,
+        sample_rate=sr,
+        frame_dt=frame_s,
+        accent_envelope=None,
     )
 
 
@@ -84,6 +88,49 @@ def test_a_swallowed_phrase_is_reported():
     assert s["secondary_plateau_midi"] == 67
     assert s["secondary_plateau_s"] >= 0.3
     assert s["inner_range_st"] >= PLATEAU_ST
+
+
+def test_secondary_plateau_keeps_its_time_after_missing_pitch():
+    from v2m.core.notes import Note
+
+    obs = _hand_built_observation([(60, 0.4), (64, 0.2), (60, 0.2)])
+    obs.pitch.hz[:10] = np.nan
+    note = Note(start=0.0, end=0.8, midi=60, confidence=0.9)
+    suspects = coherence_report(obs, [note])["suspects"]
+    assert len(suspects) == 1
+    assert suspects[0]["secondary_plateau_start_s"] == 0.4
+    assert suspects[0]["secondary_plateau_frames"] == 10
+    assert suspects[0]["secondary_plateau_s"] == 0.2
+    assert suspects[0]["secondary_plateau_midi"] == 64
+
+
+def test_missing_pitch_separates_short_secondary_fragments():
+    from v2m.core.notes import Note
+
+    obs = _hand_built_observation([(60, 0.8)])
+    obs.pitch.hz[10:14] = 440.0 * 2.0 ** ((64 - 69) / 12.0)
+    obs.pitch.hz[14:17] = np.nan
+    obs.pitch.hz[17:21] = 440.0 * 2.0 ** ((64 - 69) / 12.0)
+    note = Note(start=0.0, end=0.8, midi=60, confidence=0.9)
+    assert coherence_report(obs, [note])["suspects"] == []
+
+
+def test_longest_plateau_after_several_holes_uses_original_clock():
+    from v2m.core.notes import Note
+
+    obs = _hand_built_observation([(60, 1.0)])
+    high = 440.0 * 2.0 ** ((64 - 69) / 12.0)
+    obs.pitch.hz[5:7] = np.nan
+    obs.pitch.hz[10:14] = high
+    obs.pitch.hz[14:17] = np.nan
+    obs.pitch.hz[17:27] = high
+    note = Note(start=0.0, end=1.0, midi=60, confidence=0.9)
+    suspects = coherence_report(obs, [note])["suspects"]
+    assert len(suspects) == 1
+    assert suspects[0]["secondary_plateau_start_s"] == 0.34
+    assert suspects[0]["secondary_plateau_frames"] == 10
+    assert suspects[0]["secondary_plateau_s"] == 0.2
+    assert suspects[0]["inner_range_st"] == 4.0
 
 
 # --------------------------------------------------------------------------- #

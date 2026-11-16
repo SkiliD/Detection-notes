@@ -30,8 +30,9 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-def _traverse(qapp, page, limit: int = 100) -> list:
+def _traverse(qapp, page, limit: int = 100, extra=()) -> list:
     """Tab round the page from its first stop: the chain's reached widgets."""
+    stops = (*page._focus_order, *extra)
     first = page._focus_order[0]
     first.setFocus()
     qapp.processEvents()
@@ -41,7 +42,7 @@ def _traverse(qapp, page, limit: int = 100) -> list:
         current = qapp.focusWidget()
         if current is first and traversed:
             break
-        if current in page._focus_order and current not in traversed:
+        if current in stops and current not in traversed:
             traversed.append(current)
         page.focusNextPrevChild(True)
         qapp.processEvents()
@@ -56,6 +57,7 @@ def _missing(traversed, required: dict) -> list[str]:
 # The live page: control the take, set what it records, read the notes
 # --------------------------------------------------------------------------- #
 
+
 def test_the_live_pages_tab_chain_reaches_every_take_action(qapp):
     """Tab walks the take's actions in task order, hidden ones skipped."""
     from v2m.gui import main_window as mw
@@ -68,6 +70,17 @@ def test_the_live_pages_tab_chain_reaches_every_take_action(qapp):
         page = win.page_live
         assert page.btn_review_back.isHidden()  # review-only, Qt skips it
 
+        assert page.details_panel.isHidden()
+        traversed = _traverse(qapp, page)
+        assert page.details_toggle in traversed
+        assert page.chk_metronome not in traversed
+        # the roll that draws the take belongs to the SINGING view: it is
+        # reachable by Tab without unfolding anything
+        assert page.piano_live in traversed
+        page.details_toggle.setFocus()
+        QTest.keyClick(page.details_toggle, Qt.Key.Key_Space)
+        qapp.processEvents()
+        assert not page.details_panel.isHidden()
         traversed = _traverse(qapp, page)
         required = {
             "stop take": page.btn_stop_live,
@@ -90,6 +103,51 @@ def test_the_live_pages_tab_chain_reaches_every_take_action(qapp):
         win.close()
 
 
+@pytest.mark.parametrize("language", ["fr", "en"])
+def test_live_details_keep_values_and_translation_when_collapsed(qapp, language):
+    from v2m.core.i18n import set_language, tr
+    from v2m.gui.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        win.show()
+        page = win.page_live
+        win.stack.setCurrentWidget(page)
+        page.details_toggle.click()
+        page.spin_bpm.setValue(123)
+        page.chk_record_audio.setChecked(False)
+        page.details_toggle.click()
+        set_language(language)
+        page.retranslate()
+        assert page.details_panel.isHidden()
+        assert not page.details_toggle.isChecked()
+        assert page.details_toggle.text() == tr("ui show live details")
+        assert page.details_toggle.accessibleName() == tr("ui live details")
+        page.details_toggle.click()
+        assert page.spin_bpm.value() == 123
+        assert not page.chk_record_audio.isChecked()
+        assert page.box_monitor.y() < page.piano_live.y() < page.details_toggle.y()
+        assert page.details_panel.y() > page.details_toggle.y()
+        # the roll is part of the singing view, not a child of the disclosure
+        assert page.piano_live.parentWidget() is page.scroll.widget()
+        assert not page.piano_live.isAncestorOf(page.details_panel)
+        page._set_input_state("ui mic waiting")
+        assert page.live_indicator.label_input_state.text() == tr("ui mic waiting")
+        assert page.details_toggle.text() == tr("ui hide live details")
+
+        page.begin_take()
+        page.on_block(0.0, 0.02)
+        assert page.live_indicator.label_input_state.text() == tr("ui mic received")
+        page.on_block(0.01, 0.0)
+        page.on_block(2.1, 0.0)
+        assert page.live_indicator.label_input_state.text() == tr("ui mic silence").format(s=2)
+        page.on_block(2.2, 0.02)
+        assert page.live_indicator.label_input_state.text() == tr("ui mic received")
+    finally:
+        win.close()
+        set_language("fr")
+
+
 def test_the_live_mirror_keyboard_is_not_a_tab_stop(qapp):
     """The mirror keyboard only draws what is sounding: a Tab stop with no
     action would be a place the keyboard gets stuck."""
@@ -110,6 +168,7 @@ def test_the_live_mirror_keyboard_is_not_a_tab_stop(qapp):
 # The finder: leave, listen, read the history, audition a key
 # --------------------------------------------------------------------------- #
 
+
 def test_the_finders_tab_chain_reaches_every_action(qapp):
     from v2m.gui import main_window as mw
 
@@ -119,12 +178,17 @@ def test_the_finders_tab_chain_reaches_every_action(qapp):
         win.stack.setCurrentWidget(win.page_finder)
         win.activateWindow()
         page = win.page_finder
+        # one confirmed note: the history is a row of chips, and Tab must
+        # reach the chip as well as the page's fixed actions
+        page._on_note((60.0, 261.6), confirmed=(60.0, 261.6), heard=(60.0, 261.6))
+        chips = page.history_chips
+        assert len(chips) == 1
 
-        traversed = _traverse(qapp, page)
+        traversed = _traverse(qapp, page, extra=chips)
         required = {
             "back home": page.btn_back,
             "listen": page.btn_toggle,
-            "history": page.history,
+            "history chip": chips[0],
             "piano": page.keys,
         }
         missing = _missing(traversed, required)

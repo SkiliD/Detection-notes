@@ -15,6 +15,9 @@ threshold decides confidence — pYIN's confidence stays a measurement.
 Reuse over re-derivation:
 - the match tolerance is `compare.match_window` (top of the grid
   sixteenth or 0.10 s), the SAME bound the live/final comparison uses;
+- the pairing is `compare.chronological_pairs` (the chronological
+  dynamic program shared with the phrase comparison), so two readings of
+  one take and two takes of one phrase never grow a second matching rule;
 - the coherence suspects come from `continuity.coherence_report` for BOTH
   readings (this module never re-detects plateaus nor picks thresholds).
 
@@ -28,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .compare import match_window
+from .compare import chronological_pairs, match_window
 from .continuity import coherence_report
 
 # Pair statuses. "near" is the visible rounding divergence (an off-one
@@ -37,8 +40,8 @@ from .continuity import coherence_report
 STABLE = "stable"
 NEAR = "near"
 CHANGED = "changed"
-MISSING = "missing"   # a before note with no after counterpart
-ADDED = "added"       # an after note with no before counterpart
+MISSING = "missing"  # a before note with no after counterpart
+ADDED = "added"  # an after note with no before counterpart
 
 # Pair change reasons (they can coexist on one pair; deltas are signed).
 REASON_PITCH = "pitch"
@@ -73,9 +76,9 @@ class NotePair:
     after: NoteSnapshot
     status: str
     reasons: tuple[str, ...]
-    pitch_delta: int       # after.midi - before.midi (st)
-    onset_delta_s: float   # after.start - before.start
-    end_delta_s: float     # after.end - before.end
+    pitch_delta: int  # after.midi - before.midi (st)
+    onset_delta_s: float  # after.start - before.start
+    end_delta_s: float  # after.end - before.end
 
 
 @dataclass(frozen=True)
@@ -154,38 +157,33 @@ def _suspect_note_index(notes, suspect: dict) -> int | None:
     return None
 
 
-def _pairs(before: list[NoteSnapshot], after: list[NoteSnapshot], tol: float, beat_s: float) -> tuple:
-    """One-to-one nearest-by-onset pairing inside ONE BEAT; ties are stable.
+def _pairs(
+    before: list[NoteSnapshot], after: list[NoteSnapshot], tol: float, beat_s: float
+) -> tuple:
+    """One-to-one chronological pairing inside ONE BEAT; ties are decided.
+
+    The pairing itself is `compare.chronological_pairs` (the shared
+    chronological dynamic program): it minimises the whole alignment with
+    an explicit cost per association, missing note and added note, so a
+    nearest-first choice cannot leave a note unpaired while a complete
+    pairing exists (the annotated case: before 0.4/0.7 s, after 0/0.5 s
+    at a 0.5 s beat — greedy pairs 0.4 -> 0.5 and loses 0.7; the program
+    pairs both).
 
     The ASSOCIATION threshold (one beat of the take's grid, per the
-    design spec) is deliberately wider
-    than the CHANGE threshold `tol` (the visible window): a note can pair
-    with a counterpart whose attack was re-dated by much more than the
-    visible-comparison bound, and the pair then reports that shift as its
-    REASON instead of calling the note missing. `min` keeps the first best
-    on an exact tie, so the same two readings always produce the same
-    pairing (a property a test pins — no nondeterministic tie-breaks).
+    design spec) is deliberately wider than the CHANGE threshold `tol`
+    (the visible window): a note can pair with a counterpart whose attack
+    was re-dated by much more than the visible-comparison bound, and the
+    pair then reports that shift as its REASON instead of calling the
+    note missing. Equal costs are settled toward the oldest note (see the
+    aligner's candidate order), so the same two readings always produce
+    the same pairing — a property a test pins.
     """
-    used: set[int] = set()
-    pairs: list[NotePair] = []
-    missing: list[NoteSnapshot] = []
-    for b in before:
-        best_i: int | None = None
-        best_shift = 0.0
-        for i, a in enumerate(after):
-            if i in used:
-                continue
-            shift = abs(a.start - b.start)
-            if shift > beat_s:
-                continue
-            if best_i is None or shift < best_shift:
-                best_i, best_shift = i, shift
-        if best_i is None:
-            missing.append(b)
-            continue
-        used.add(best_i)
-        pairs.append(_pair(b, after[best_i], tol))
-    return tuple(pairs), tuple(missing)
+    matches, missing, _added = chronological_pairs(
+        [b.start for b in before], [a.start for a in after], beat_s
+    )
+    pairs = tuple(_pair(before[i], after[j], tol) for i, j in matches)
+    return pairs, tuple(before[i] for i in missing)
 
 
 def _pair(b: NoteSnapshot, a: NoteSnapshot, tol: float) -> NotePair:
@@ -207,9 +205,7 @@ def _pair(b: NoteSnapshot, a: NoteSnapshot, tol: float) -> NotePair:
         reasons.append(REASON_ATTACK)
     if abs(end_delta) > tol:
         reasons.append(REASON_DURATION)
-    return NotePair(
-        b, a, CHANGED, tuple(reasons), pitch_delta, onset_delta, end_delta
-    )
+    return NotePair(b, a, CHANGED, tuple(reasons), pitch_delta, onset_delta, end_delta)
 
 
 def _suspect_row(notes, suspect: dict, index: int | None, status: str | None) -> SuspectRow:
@@ -283,9 +279,7 @@ def _suspects(
                 break
         if after_index is not None and after_index in after_seen:
             continue
-        resolved.append(
-            _suspect_row(before_notes, suspect, before_index, "resolved")
-        )
+        resolved.append(_suspect_row(before_notes, suspect, before_index, "resolved"))
     return tuple(after_rows), tuple(resolved)
 
 

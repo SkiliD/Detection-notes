@@ -17,8 +17,8 @@ try:
 except Exception:  # pragma: no cover - no audio device in CI
     sd = None
 
-SR = 22_050        # analysis sample rate
-GATE_RMS = 0.008   # below this level a live block counts as silence
+SR = 22_050  # analysis sample rate
+GATE_RMS = 0.008  # below this level a live block counts as silence
 
 # How long a stop waits for the drain to finish the backlog before it
 # counts the rest as dropped (a constant, so the honesty test can shrink
@@ -31,6 +31,166 @@ DRAIN_JOIN_TIMEOUT_S = 5.0
 # whole point: a GUI replaying a take must not swap `sd.InputStream` on
 # the module (a global) while the user's real microphone capture reads it.
 StreamFactory = Callable[..., Any]
+
+# The separator `InputDevice.label` appends before the host API. One spelling:
+# `core.driver_fx` strips it to match a displayed label back to the OS's own
+# endpoint record.
+INPUT_LABEL_SEPARATOR = " — "
+
+
+@dataclass(frozen=True)
+class InputDevice:
+    """One available input endpoint with a stable preference key."""
+
+    index: int
+    key: str
+    name: str
+    host_api: str
+
+    @property
+    def label(self) -> str:
+        """A user-facing name that distinguishes backend duplicates."""
+        return f"{self.name}{INPUT_LABEL_SEPARATOR}{self.host_api}"
+
+
+@dataclass(frozen=True)
+class ResolvedInputDevice:
+    """The endpoint a capture should open and the name shown to the user."""
+
+    index: int | None
+    name: str
+    fell_back: bool = False
+
+
+def input_devices() -> list[InputDevice]:
+    """List input-capable endpoints; device indexes are runtime-only."""
+    if sd is None:
+        return []
+    try:
+        devices = sd.query_devices()
+        host_apis = sd.query_hostapis()
+    except Exception:
+        return []
+    occurrences: dict[tuple[str, str], int] = {}
+    result: list[InputDevice] = []
+    for index, info in enumerate(devices):
+        if int(info.get("max_input_channels", 0)) < 1:
+            continue
+        host_index = int(info.get("hostapi", -1))
+        host_api = (
+            str(host_apis[host_index]["name"]) if 0 <= host_index < len(host_apis) else "Audio"
+        )
+        name = str(info["name"])
+        identity = (host_api, name)
+        occurrence = occurrences.get(identity, 0)
+        occurrences[identity] = occurrence + 1
+        key = f"{host_api}\x1f{name}"
+        if occurrence:
+            key = f"{key}\x1f{occurrence}"
+        result.append(InputDevice(index, key, name, host_api))
+    return result
+
+
+def _portaudio_default_input(available: list[InputDevice]) -> InputDevice | None:
+    """The endpoint PortAudio would open by default, as a LISTED device.
+
+    Matching is on the (name, host API) pair, never the name alone: the same
+    microphone is listed once per backend, and a name-only match could name
+    another backend's endpoint — a different stream than the one opened. None
+    when the answer cannot be recovered, so the caller keeps its unnamed
+    default instead of guessing.
+    """
+    if sd is None:
+        return None
+    try:
+        info = sd.query_devices(kind="input")
+        host_apis = sd.query_hostapis()
+    except Exception:
+        return None
+    name = str(info.get("name", ""))
+    host_index = int(info.get("hostapi", -1))
+    if not (0 <= host_index < len(host_apis)):
+        return None
+    host_api = str(host_apis[host_index]["name"])
+    return next(
+        (device for device in available if device.name == name and device.host_api == host_api),
+        None,
+    )
+
+
+WASAPI_HOST_API = "Windows WASAPI"
+
+
+def _prefer_wasapi_twin(default: InputDevice, available: list[InputDevice]) -> InputDevice:
+    """The same microphone on WASAPI, when exactly one candidate exists.
+
+    PortAudio's default input is the system mapper: an MME endpoint, whose
+    names Windows truncates to 31 characters and which has no exclusive mode.
+    The registry reader matches a full friendly name and the raw capture needs
+    WASAPI, so the default is taken on the WASAPI twin of the SAME
+    microphone. Never a guess: one candidate whose name extends the mapper's
+    truncated one is required, and anything else keeps the mapped default.
+    """
+    if default.host_api == WASAPI_HOST_API:
+        return default
+    twins = [
+        device
+        for device in available
+        if device.host_api == WASAPI_HOST_API and device.name.startswith(default.name)
+    ]
+    return twins[0] if len(twins) == 1 else default
+
+
+def resolve_input_device(device_key: str | None) -> ResolvedInputDevice:
+    """Resolve a saved choice, falling back to the current system default."""
+    available = input_devices()
+    if device_key is not None:
+        selected = next((device for device in available if device.key == device_key), None)
+        if selected is not None:
+            return ResolvedInputDevice(selected.index, selected.label)
+
+    default_index: int | None = None
+    default_name = "System default"
+    if sd is not None:
+        try:
+            default_devices = sd.default.device
+            if default_devices is not None:
+                index = (
+                    default_devices[0]
+                    if isinstance(default_devices, (tuple, list))
+                    else default_devices
+                )
+                if index is not None and int(index) >= 0:
+                    default_index = int(index)
+        except Exception:
+            default_index = None
+        default = next((device for device in available if device.index == default_index), None)
+        if default is None:
+            # `sd.default.device` is (-1, -1) when the user never chose one, so
+            # the pair's index says nothing; PortAudio's default lives behind
+            # `query_devices(kind="input")`. Naming THAT endpoint is what lets
+            # the driver-effects reader identify it (and the raw mode engage)
+            # instead of stopping at an anonymous "System default".
+            default = _portaudio_default_input(available)
+        if default is not None:
+            default = _prefer_wasapi_twin(default, available)
+        if default is not None:
+            default_index = default.index
+            default_name = default.label
+        elif default_index is not None:
+            try:
+                info = sd.query_devices(default_index)
+            except Exception:
+                info = None
+            if info is not None:
+                default_name = str(info.get("name", default_name))
+
+    return ResolvedInputDevice(
+        index=default_index,
+        name=default_name,
+        fell_back=device_key is not None,
+    )
+
 
 # An audio OUTPUT stream opener for a replayed take (`core.replay`): same
 # contract as `sd.OutputStream`. Optional — a replay without a speaker
@@ -103,15 +263,23 @@ class LiveCapture:
     offline analysis of the same WAV reads it fine.
     """
 
-    samplerate: int = 44_100          # device sample rate
-    blocksize: int = 1024             # ~23 ms per block
-    sr: int = SR                      # analysis sample rate
-    gate_rms: float = GATE_RMS        # the silence gate (blocks below it are mute)
+    samplerate: int = 44_100  # device sample rate
+    blocksize: int = 1024  # ~23 ms per block
+    sr: int = SR  # analysis sample rate
+    gate_rms: float = GATE_RMS  # the silence gate (blocks below it are mute)
     on_block: Optional[Callable[[np.ndarray, float], None]] = None
     # The InputStream opener (same contract as `sd.InputStream`). None = the
     # real device; a replay or a test injects its own fake — never by
     # patching `audio_io.sd` while a GUI capture might read it.
     stream_factory: Optional[StreamFactory] = None
+    device: int | None = None  # None delegates to PortAudio's current default
+    # Open the endpoint in RAW (WASAPI exclusive) mode: shared mode is where
+    # the driver's audio effects chain runs, so exclusive is the only way past
+    # it. A refusal is not an error — the capture reopens shared — and
+    # `exclusive_opened` reports what was actually opened, never what was
+    # asked for.
+    exclusive: bool = False
+    exclusive_opened: bool = field(default=False, repr=False)
     chunks: list = field(default_factory=list, repr=False)
     # `Any` because sounddevice may be absent (the module-level guard), and a
     # closed stream is set back to None; both call sites re-guard.
@@ -134,10 +302,13 @@ class LiveCapture:
         if status:
             print(f"[mic] {status}")
         mono = np.asarray(indata[:, 0], dtype=np.float32)
-        self.chunks.append(mono.copy())
-        self._n_samples += len(mono)
+        owned = mono.copy()
+        self.chunks.append(owned)
+        self._n_samples += len(owned)
         if self.on_block is not None:
-            self._queue.put((mono, self.elapsed()))
+            # PortAudio may reuse `indata` as soon as this callback returns;
+            # the drain owns its block until `on_block` finishes with it.
+            self._queue.put((owned, self.elapsed()))
 
     def _drain(self) -> None:
         """Hand the queued blocks to `on_block` (its own thread)."""
@@ -196,20 +367,82 @@ class LiveCapture:
     def start(self) -> None:
         if sd is None:  # pragma: no cover - needs a real audio device
             raise RuntimeError(tr("err sounddevice missing"))
-        self._stream = (
-            self.stream_factory or sd.InputStream
-        )(
-            samplerate=self.samplerate,
-            channels=1,
-            blocksize=self.blocksize,
-            callback=self._callback,
-        )
-        self._stream.start()
+        stream_options = {
+            "samplerate": self.samplerate,
+            "channels": 1,
+            "blocksize": self.blocksize,
+            "callback": self._callback,
+        }
+        if self.device is not None:
+            stream_options["device"] = self.device
+        self._stream = self._open(stream_options)
+        try:
+            self._stream.start()
+        except Exception:
+            if not self.exclusive_opened:
+                raise
+            # the endpoint accepted the raw open and refused the clock: one
+            # take is worth more than the mode, so reopen shared and report it
+            self._stream.close()
+            self.exclusive_opened = False
+            self._stream = (self.stream_factory or sd.InputStream)(**stream_options)
+            self._stream.start()
+        opened_rate = getattr(self._stream, "samplerate", None)
+        if opened_rate:
+            # the STREAM's rate is the take's clock: an exclusive open takes
+            # the device's own format, so `signal()` and `elapsed()` must read
+            # the rate that was really opened, not the one requested
+            self.samplerate = int(opened_rate)
         if self.on_block is not None:
-            self._worker = threading.Thread(
-                target=self._drain, daemon=True, name="v2m-live-dsp"
-            )
+            self._worker = threading.Thread(target=self._drain, daemon=True, name="v2m-live-dsp")
             self._worker.start()
+
+    def _open(self, options: dict) -> Any:
+        """Open the capture: raw first when asked, else as configured.
+
+        WASAPI's exclusive mode takes only the device's OWN format, so the raw
+        attempt asks for that rate instead of the shared-mode one. Every way a
+        driver can refuse (a busy endpoint, no exclusive mode in the backend,
+        a format it will not take) ends in the shared stream: the take still
+        happens, and only `exclusive_opened` remembers the refusal.
+        """
+        factory = self.stream_factory
+        if factory is None:
+            if sd is None:  # pragma: no cover - start() already refused this
+                raise RuntimeError(tr("err sounddevice missing"))
+            factory = sd.InputStream
+        if self.exclusive:
+            settings = getattr(sd, "WasapiSettings", None)
+            if settings is not None:
+                raw = {**options, "samplerate": self._device_rate()}
+                try:
+                    stream = factory(**raw, extra_settings=settings(exclusive=True))
+                except Exception:
+                    self.exclusive_opened = False
+                else:
+                    self.exclusive_opened = True
+                    return stream
+        try:
+            return factory(**options)
+        except Exception:
+            # A refused raw open can leave a SHARED endpoint that rejects the
+            # requested rate too (measured: a virtual device listed at 48 kHz
+            # refuses 44.1 kHz outright). Asking once more at the endpoint's
+            # own rate keeps the take; only a device that refuses BOTH fails.
+            rate = self._device_rate()
+            if rate == options["samplerate"]:
+                raise
+            return factory(**{**options, "samplerate": rate})
+
+    def _device_rate(self) -> int:
+        """The endpoint's own sample rate — what an exclusive open accepts."""
+        if self.device is None or sd is None:
+            return self.samplerate
+        try:
+            info = sd.query_devices(self.device)
+            return int(round(float(info["default_samplerate"]))) or self.samplerate
+        except Exception:
+            return self.samplerate
 
     def stop(self) -> None:
         if self._stream is not None:
@@ -232,16 +465,31 @@ class LiveCapture:
             self._worker = None
 
     def signal(self) -> np.ndarray:
-        """Full recorded signal, resampled to `sr` (for the final analysis)."""
+        """Full recorded signal, resampled to `sr` (for the final analysis).
+
+        The rate cut is FILTERED: linear interpolation between the device
+        samples folds everything above the target Nyquist back into the
+        audible band (measured: a 20 kHz tone at 44.1 kHz reads back as a
+        2.05 kHz tone at 0.208 RMS, ready for pYIN), while the final
+        analysis must hear only what was sung. `resample_poly` lowpasses
+        before the decimation and keeps the clock: the output length is
+        the same rate ratio (±1 sample) and a passband tone keeps its
+        frequency and level at 44.1 and 48 kHz.
+        """
         if not self.chunks:
             return np.zeros(0, dtype=np.float32)
         y = np.concatenate(self.chunks).astype(np.float32)
         if self.samplerate == self.sr:
             return y
-        ratio = self.sr / self.samplerate
-        n_out = int(len(y) * ratio)
-        idx = np.linspace(0, len(y) - 1, n_out)
-        return np.interp(idx, np.arange(len(y)), y).astype(np.float32)
+        # local import: the module stays import-light (librosa and
+        # soundfile are read the same way, at their call site)
+        from fractions import Fraction
+
+        from scipy.signal import resample_poly
+
+        ratio = Fraction(self.sr, self.samplerate).limit_denominator(1_000)
+        out = resample_poly(y, ratio.numerator, ratio.denominator)
+        return np.asarray(out, dtype=np.float32)
 
     @property
     def duration(self) -> float:

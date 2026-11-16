@@ -16,11 +16,11 @@ from .music import NOTE_NAMES
 
 # Interval structure (semitones above the root) of every supported chord type.
 CHORD_TEMPLATES: dict[str, tuple[int, ...]] = {
-    "": (0, 4, 7),        # major
-    "m": (0, 3, 7),       # minor
-    "dim": (0, 3, 6),     # diminished
-    "aug": (0, 4, 8),     # augmented
-    "7": (0, 4, 7, 10),   # dominant seventh
+    "": (0, 4, 7),  # major
+    "m": (0, 3, 7),  # minor
+    "dim": (0, 3, 6),  # diminished
+    "aug": (0, 4, 8),  # augmented
+    "7": (0, 4, 7, 10),  # dominant seventh
     "maj7": (0, 4, 7, 11),
     "m7": (0, 3, 7, 10),
 }
@@ -72,6 +72,7 @@ def detect_chord_segments(
     no overlap, so a given moment is never reported twice — and each window
     holding enough notes gets its own classification. A note crossing a
     window boundary belongs to both windows: it does sound in both.
+    Its histogram weight is only the intersection with each window.
     """
     if len(notes) < min_notes:
         return []
@@ -79,7 +80,16 @@ def detect_chord_segments(
     out: list[tuple[float, float, ChordCandidate]] = []
     t = 0.0
     while t < t_end:
-        window = [n for n in notes if n.start < t + segment_s and n.end > t]
+        window = [
+            type(n)(
+                start=max(n.start, t),
+                end=min(n.end, t + segment_s),
+                midi=n.midi,
+                confidence=n.confidence,
+            )
+            for n in notes
+            if n.start < t + segment_s and n.end > t
+        ]
         res = _classify(_histogram(window), window, top_k) if len(window) >= min_notes else None
         if res is not None:
             out.append((t, min(t + segment_s, t_end), res.best))

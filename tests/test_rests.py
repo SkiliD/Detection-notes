@@ -19,8 +19,7 @@ GRID = BeatGrid(120.0)
 
 
 def _note(midi, start, dur_s, figure=None):
-    return Note(start=start, end=start + dur_s, midi=midi, confidence=0.9,
-                figure=figure)
+    return Note(start=start, end=start + dur_s, midi=midi, confidence=0.9, figure=figure)
 
 
 # ------------------------------------------------------------------- figures
@@ -64,9 +63,7 @@ def test_rest_figures_are_translatable():
 def test_lead_in_and_breaths_both_become_rests():
     notes = [_note(60, 0.41, 0.2), _note(62, 1.0, 0.2)]
     rests = detect_rests(notes, GRID)
-    assert [(round(r.start, 2), round(r.end, 2)) for r in rests] == [
-        (0.0, 0.41), (0.61, 1.0)
-    ]
+    assert [(round(r.start, 2), round(r.end, 2)) for r in rests] == [(0.0, 0.41), (0.61, 1.0)]
 
 
 def test_the_tail_of_the_take_is_not_a_rest():
@@ -92,7 +89,7 @@ def test_a_seam_is_not_a_breath():
 def test_unordered_and_overlapping_notes_never_go_backwards():
     notes = [
         _note(62, 1.0, 0.5),
-        _note(60, 0.0, 0.8),   # overlaps the next one
+        _note(60, 0.0, 0.8),  # overlaps the next one
         _note(64, 0.4, 0.4),
         _note(65, 2.0, 0.4),
     ]
@@ -102,11 +99,11 @@ def test_unordered_and_overlapping_notes_never_go_backwards():
 
 
 def test_figure_follows_the_grid_tempo():
-    notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]   # 1 s of breath
+    notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]  # 1 s of breath
     at_120 = detect_rests(notes, GRID, include_lead_in=False)[0]
     at_60 = detect_rests(notes, BeatGrid(60.0), include_lead_in=False)[0]
-    assert at_120.figure == "demi-pause"   # 2 beats at 120
-    assert at_60.figure == "soupir"        # 1 beat at 60
+    assert at_120.figure == "demi-pause"  # 2 beats at 120
+    assert at_60.figure == "soupir"  # 1 beat at 60
 
 
 def test_without_a_grid_the_rests_stay_unlabeled():
@@ -173,12 +170,31 @@ def test_a_heard_air_intake_is_marked_on_its_rest():
     from v2m.core.rests import detect_breaths
 
     hop_s = 0.01
-    env = np.full(600, 0.01, dtype=np.float32)   # a quiet floor everywhere
-    env[195:200] = 0.05                          # a SHORT bump leading gap 1
+    env = np.full(600, 0.01, dtype=np.float32)  # a quiet floor everywhere
+    env[195:200] = 0.05  # a SHORT bump leading gap 1
     rests = [Rest(start=1.9, end=2.4), Rest(start=4.0, end=4.5)]
     detect_breaths(rests, env, hop_s)
-    assert rests[0].breath is True   # the bump sits inside [1.9, 2.4]
+    assert rests[0].breath is True  # the bump sits inside [1.9, 2.4]
     assert rests[1].breath is False  # only the floor behind it
+
+
+def test_zero_floor_accepts_only_audible_local_breath_bumps():
+    import numpy as np
+
+    from v2m.core.audio_io import GATE_RMS
+    from v2m.core.rests import detect_breaths
+
+    for height, expected in [(GATE_RMS * 2, True), (GATE_RMS / 100, False), (0, False)]:
+        env = np.zeros(600)
+        env[195:200] = height
+        rests = [Rest(start=1.9, end=2.4)]
+        detect_breaths(rests, env, 0.01)
+        assert rests[0].breath is expected
+    env = np.zeros(600)
+    env[190:240] = GATE_RMS * 2
+    rests = [Rest(start=1.9, end=2.4)]
+    detect_breaths(rests, env, 0.01)
+    assert rests[0].breath is False
 
 
 def test_breath_marking_degrades_to_silence_without_evidence():
@@ -216,11 +232,15 @@ def test_detect_rests_annotates_from_the_observation():
 
     notes = [_note(60, 0.0, 0.2), _note(62, 1.2, 0.2)]
     env = np.full(200, 0.01, dtype=np.float32)
-    env[60:85] = 0.06                       # the intake inside the gap
+    env[60:85] = 0.06  # the intake inside the gap
     obs = VoiceObservation(
-        pitch=None, attacks=None, duration_s=2.0,
-        sample_rate=22050, frame_dt=0.02,
-        accent_envelope=env, accent_hop=220,
+        pitch=None,
+        attacks=None,
+        duration_s=2.0,
+        sample_rate=22050,
+        frame_dt=0.02,
+        accent_envelope=env,
+        accent_hop=220,
     )
     rests = detect_rests(notes, GRID, include_lead_in=False, observation=obs)
     assert len(rests) == 1 and rests[0].breath is True

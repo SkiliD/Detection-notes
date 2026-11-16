@@ -22,8 +22,10 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pyqtgraph as pg
 import pytest
 
+from v2m.gui import widgets
 from v2m.gui.widgets import ACCENT, STYLESHEET
 
 
@@ -45,13 +47,250 @@ def qt_messages():
     qInstallMessageHandler(None)
 
 
+def _luminance(value: str) -> float:
+    """WCAG relative luminance of one `#rrggbb` colour."""
+    from PyQt6.QtGui import QColor
+
+    rgb = QColor(value).getRgbF()[:3]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return sum(c * weight for c, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
+
+
+def _contrast(foreground: str, background: str) -> float:
+    first, second = _luminance(foreground), _luminance(background)
+    return (max(first, second) + 0.05) / (min(first, second) + 0.05)
+
+
+# (foreground token, background token) pairs the shell ACTUALLY paints: the
+# stylesheet's labels, buttons and their hover/checked/pressed fills, list and
+# table rows (including alternates and selection), headers, tooltip, status bar
+# and progress bar — plus the action/link/quiet button styles and the hint
+# card. The accent appears both as a foreground (titles, link hover, checked
+# link rows) and as a background (the primary plate, which carries the page
+# ink).
+TEXT_PAIRS = (
+    ("text", "bg_app"),
+    ("text", "bg_card"),
+    ("text", "bg_sunken"),
+    ("text", "accent_soft"),
+    ("text_dim", "bg_app"),
+    ("text_dim", "bg_card"),
+    ("text_dim", "bg_sunken"),
+    ("text_dim", "accent_soft"),
+    ("text_faint", "bg_app"),
+    ("text_faint", "bg_card"),
+    ("text_faint", "bg_sunken"),
+    ("accent", "bg_app"),
+    ("accent", "bg_card"),
+    ("accent", "accent_soft"),
+    ("bg_app", "accent"),
+)
+
+
+def test_both_palettes_keep_every_text_pair_readable():
+    """Every text/background pair of BOTH palettes clears 4.5:1.
+
+    Only the night palette was measured, so the light theme's hovered copper
+    plate carried its own label at 3.58:1 — the one button the singer is asked
+    to press went dim exactly while the pointer was on it. A colour picked by
+    eye passes in one palette and fails in the other.
+    """
+    from v2m.gui import widgets
+
+    dark = widgets.theme_colors("dark")
+    assert (dark["bg_app"], dark["bg_card"], dark["text"], dark["accent"]) == (
+        "#111827",
+        "#202B3A",
+        "#F4EFE6",
+        "#D9A76C",
+    )
+    for theme in widgets.THEMES:
+        colors = widgets.theme_colors(theme)
+        for foreground, background in TEXT_PAIRS:
+            ratio = _contrast(colors[foreground], colors[background])
+            assert ratio >= 4.5, f"{theme}: {foreground} on {background} reads {ratio:.2f}:1"
+        for state, plate in widgets.PLATE_STATES[theme].items():
+            ratio = _contrast(colors["bg_app"], plate)
+            assert ratio >= 4.5, f"{theme}: the primary plate's {state} reads {ratio:.2f}:1"
+    # the error banner keeps its own two colours in both palettes
+    assert _contrast(widgets.ERROR_TEXT, widgets.ERROR_BG) >= 4.5
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_theme_palettes_rebuild_valid_stylesheets_and_staff_colors(theme, qapp):
+    from v2m.gui import staff
+
+    original = widgets.current_theme()
+    try:
+        widgets.set_theme(theme)
+        colors = widgets.theme_colors(theme)
+        assert widgets.current_theme() == theme
+        assert widgets.BG_APP == colors["bg_app"]
+        assert widgets.TEXT == colors["text"]
+        assert widgets.ACCENT == colors["accent"]
+        assert colors["bg_app"] in widgets.theme_stylesheet()
+        assert widgets.theme_stylesheet() != ""
+        assert widgets.theme_stylesheet() == widgets._stylesheet()
+        assert staff.BG.name().lower() == colors["bg_app"].lower()
+        assert staff.INK.name().lower() == colors["text"].lower()
+        app = qapp
+        previous = app.styleSheet()
+        app.setStyleSheet(widgets.theme_stylesheet())
+        app.processEvents()
+        assert app.styleSheet() == widgets.theme_stylesheet()
+        app.setStyleSheet(previous)
+    finally:
+        widgets.set_theme(original)
+
+
+def test_view_tabs_follow_the_active_theme():
+    """A palette switch must reach styles built from shared tokens.
+
+    Copying a token with `from .widgets import ACCENT` freezes the value
+    the module was imported with, so the chosen surface kept the previous
+    theme's underline until a restart.
+    """
+    from v2m.gui import results_page
+
+    original = widgets.current_theme()
+    try:
+        widgets.set_theme("light")
+        light = results_page._view_chip_style()
+        assert widgets.ACCENT in light
+        assert widgets.theme_colors("dark")["accent"] not in light
+        widgets.set_theme("dark")
+        assert widgets.theme_colors("dark")["accent"] in results_page._view_chip_style()
+    finally:
+        widgets.set_theme(original)
+
+
+def test_the_shell_is_flat_and_titled_in_the_serif_face():
+    """The look is editorial: no gradients, no card around every section.
+
+    A gradient on every button plus a rounded bordered box around each block
+    is what made the window read as a dashboard; the identity now comes from
+    one serif face on hairlines, and one flat copper plate for the action the
+    singer must press.
+    """
+    sheet = widgets.theme_stylesheet()
+    assert "qlineargradient" not in sheet
+    assert f'font-family: "{widgets.display_font_family()}"' in sheet
+    assert f'font-family: "{widgets.ui_font_family()}"' in sheet
+    assert "QGroupBox::title" in sheet
+    assert "border: none" in sheet  # sections carry no rounded card
+    # the primary action is one solid plate, the disclosure rows are links
+    primary = widgets.action_button_style(primary=True)
+    assert "qlineargradient" not in primary
+    assert f"background: {widgets.ACCENT}" in primary  # one solid plate
+    assert "border: none" in widgets.link_button_style()
+
+
+def test_controls_are_tactile_without_gradients():
+    """A press must be FELT: a lit top edge, a grounded bottom edge.
+
+    The shell refuses gradients, so the depth of a control comes from that
+    two-tone bevel — and it must INVERT when pressed, or the button only
+    changes colour and the click reads as a flicker instead of a movement.
+    """
+    import re
+
+    sheet = widgets.theme_stylesheet()
+    assert "qlineargradient" not in sheet
+
+    def block(pattern: str) -> str:
+        match = re.search(pattern, sheet, re.S)
+        assert match, f"missing rule: {pattern}"
+        return match.group(1)
+
+    def edge(rule: str, side: str) -> str:
+        return rule.split(f"border-{side}-color: ", 1)[1].split(";", 1)[0].strip()
+
+    base = block(r"\nQPushButton \{\n(.*?)\n\}")
+    pressed = block(r"\nQPushButton:pressed \{\n(.*?)\n\}")
+    assert edge(base, "top") == edge(pressed, "bottom")
+    assert edge(base, "bottom") == edge(pressed, "top")
+    assert edge(base, "top") != edge(base, "bottom")
+    # the hover is the warm copper wash, never a second accent colour
+    assert f"QPushButton:hover {{ background: {widgets.ACCENT_SOFT};" in sheet
+    assert f"border-color: {widgets.ACCENT};" in sheet
+
+    primary = widgets.action_button_style(primary=True)
+    assert "qlineargradient" not in primary
+    assert "border-top-color" in primary and "border-bottom-color" in primary
+    assert "border-top-color" in widgets.action_button_style(primary=False)
+
+
+def test_piano_keys_are_ivory_and_ebony_in_both_themes(qapp):
+    """A keyboard keeps ivory whites and ebony sharps in BOTH palettes.
+
+    Painting the keys from the theme's text and sunken tokens inverted the
+    light theme (dark whites, pale sharps) and let the ebony keys dissolve
+    into the dark page, so the keyboard read as a band of stripes.
+    """
+    from PyQt6.QtGui import QColor
+
+    original = widgets.current_theme()
+    try:
+        for theme in ("dark", "light"):
+            widgets.set_theme(theme)
+            white = QColor(widgets.KEY_WHITE).lightness()
+            black = QColor(widgets.KEY_BLACK).lightness()
+            # ivory against ebony, in BOTH palettes (the inverted light theme
+            # read 30 against 220)
+            assert white - black > 120, theme
+            view = widgets.PianoView()
+            view.resize(300, 90)
+            assert not view.grab().isNull()
+    finally:
+        widgets.set_theme(original)
+
+
+def test_invalid_theme_does_not_replace_active_palette():
+    original = widgets.current_theme()
+    original_stylesheet = widgets.theme_stylesheet()
+    with pytest.raises(ValueError, match="unknown theme"):
+        widgets.set_theme("sepia")
+    assert widgets.current_theme() == original
+    assert widgets.theme_stylesheet() == original_stylesheet
+
+
+def test_selection_has_an_outline_independent_of_its_fill(qapp):
+    from v2m.core.notes import Note
+    from v2m.gui.widgets import TEXT, PianoRoll
+
+    roll = PianoRoll(selectable=True)
+    roll.set_notes([Note(0, 1, 60, 0.9), Note(1, 2, 62, 0.9)])
+    roll.set_selection([0])
+    selected, other = roll._bar_items
+    assert selected.opts["pen"].widthF() == 3
+    assert selected.opts["pen"].color().name().lower() == TEXT.lower()
+    assert other.opts["pen"].style() == pg.QtCore.Qt.PenStyle.NoPen
+    roll.close()
+
+
+def test_live_tuning_has_words_and_clears_on_silence(qapp):
+    from v2m.core.i18n import tr
+    from v2m.gui.widgets import LiveIndicator, tuning_advice
+
+    indicator = LiveIndicator()
+    indicator.update_note(60, 261.6)
+    assert indicator.label_tuning.text() == tr("ui tuning ok")
+    indicator.update_note(60.4, 267.7)
+    assert indicator.label_tuning.text() == tuning_advice(40)
+    indicator.retranslate()
+    assert indicator.label_tuning.text() == tuning_advice(40)
+    indicator.update_note(None, 0)
+    assert indicator.label_tuning.text() == ""
+    indicator.close()
+
+
 def test_stylesheet_parses_without_qt_warnings(qapp, qt_messages):
     """The full stylesheet must parse; no parse error, no font warning."""
     from PyQt6.QtWidgets import QLabel, QMainWindow
 
     app = qapp
     previous = app.styleSheet()
-    app.setStyleSheet(STYLESHEET)
+    app.setStyleSheet(widgets.theme_stylesheet())
     try:
         win = QMainWindow()
         # a rich-text label: the exact path that hit setPointSize(-1) on px fonts
@@ -83,7 +322,7 @@ def test_stylesheet_actually_applies(qapp):
 
     app = qapp
     previous = app.styleSheet()
-    app.setStyleSheet(STYLESHEET)
+    app.setStyleSheet(widgets.theme_stylesheet())
     try:
         widget = QWidget()
         widget.resize(40, 40)
@@ -94,20 +333,14 @@ def test_stylesheet_actually_applies(qapp):
     finally:
         app.setStyleSheet(previous)
         widget.close()
-    expected = BG_APP.lstrip("#")
+    expected = widgets.BG_APP.lstrip("#").lower()
     actual = f"{pixel.red():02x}{pixel.green():02x}{pixel.blue():02x}"
-    assert actual == expected, (
-        f"stylesheet not applied: background {actual} != palette {BG_APP}"
-    )
+    assert actual == expected, f"stylesheet not applied: background {actual} != palette {BG_APP}"
 
 
 def test_no_hash_line_comment_in_the_qss():
     """`#` opens an id selector in QSS — a '#' comment drops the whole sheet."""
-    offenders = [
-        line
-        for line in STYLESHEET.splitlines()
-        if line.lstrip().startswith("# ")
-    ]
+    offenders = [line for line in STYLESHEET.splitlines() if line.lstrip().startswith("# ")]
     assert not offenders, "invalid '#' comment inside the QSS:\n" + "\n".join(offenders)
 
 
@@ -115,7 +348,7 @@ def test_no_double_hash_and_no_placeholder_left(qapp):
     """`##` can only come from the accent substitution going wrong."""
     assert "##" not in STYLESHEET
     assert "@ACCENT@" not in STYLESHEET  # placeholder fully substituted
-    assert ACCENT in STYLESHEET          # accent color actually injected
+    assert ACCENT in STYLESHEET  # accent color actually injected
 
 
 def test_font_sizes_are_in_points_not_pixels():

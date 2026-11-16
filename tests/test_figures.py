@@ -16,6 +16,7 @@ def _fig(beats: float) -> str:
     assert figure is not None, f"duration {beats} unclassified"
     return figure.name
 
+
 BPM = 120.0
 GRID = BeatGrid(BPM)  # labeling goes through the Grid, not a bare bpm
 
@@ -53,7 +54,7 @@ def test_double_dotted_figures_win_only_on_a_deliberate_length():
     """
     assert _fig(0.875) == "croche double-pointée"
     assert _fig(0.88) == "croche double-pointée"
-    assert _fig(0.86) == "noire"        # human noise: the simple wins
+    assert _fig(0.86) == "noire"  # human noise: the simple wins
     assert _fig(0.8) == "croche pointée"
     assert _fig(1.75) == "noire double-pointée"
     assert _fig(1.74) == "noire double-pointée"
@@ -63,11 +64,10 @@ def test_double_dotted_figures_win_only_on_a_deliberate_length():
 def test_every_catalogue_value_converts_exactly_at_24_divisions():
     """Every catalogue value writes as whole divisions at 24/beat.
 
-    AGENTS.md (pinned invariant): the MusicXML export's `<type>` table is
+    The MusicXML export's `<type>` table is
     DERIVED from the catalogue — a value that does not convert exactly
     (double-dotted sixteenth = 5.25 divisions, dotted 32nd = 4.5) would
-    engrave a `<type>` contradicting its `<duration>`. Refused at the
-    door: two candidate values had been removed for that.
+    engrave a `<type>` contradicting its `<duration>`.
     """
     from v2m.core.grid import MUSICXML_DIVISIONS
 
@@ -94,7 +94,7 @@ def test_tolerance_rejects_offgrid():
 def test_imperfect_human_timing_classified():
     """A human note at ±15% keeps its label (not demoted to a triplet)."""
     assert _fig(0.86) == "noire"
-    assert _fig(1.15) == "noire"   # triplet penalty: the quarter wins
+    assert _fig(1.15) == "noire"  # triplet penalty: the quarter wins
     assert _fig(0.53) == "croche"  # same for the eighth vs quarter triplet
 
 
@@ -107,15 +107,20 @@ def test_triplet_wins_when_clearly_triplet():
 
 def test_label_notes_on_analysis_like_notes():
     notes = [
-        Note(start=0.0, end=_beats(1), midi=60, confidence=0.9),      # quarter
-        Note(start=_beats(1), end=_beats(1) + _beats(1.5), midi=62, confidence=0.9),  # dotted quarter
-        Note(start=_beats(2.5), end=_beats(2.5) + _beats(2 / 3), midi=64, confidence=0.9),  # quarter triplet
+        Note(start=0.0, end=_beats(1), midi=60, confidence=0.9),  # quarter
+        # Dotted quarter, then quarter triplet.
+        Note(start=_beats(1), end=_beats(1) + _beats(1.5), midi=62, confidence=0.9),
+        Note(start=_beats(2.5), end=_beats(2.5) + _beats(2 / 3), midi=64, confidence=0.9),
         Note(start=_beats(3.2), end=_beats(3.2) + _beats(0.5), midi=65, confidence=0.9),  # eighth
         Note(start=_beats(4), end=_beats(4) + 0.13, midi=67, confidence=0.9),  # sixteenth
     ]
     label_notes(notes, GRID)
     assert [n.figure for n in notes] == [
-        "noire", "noire pointée", "triolet de noire", "croche", "double-croche",
+        "noire",
+        "noire pointée",
+        "triolet de noire",
+        "croche",
+        "double-croche",
     ]
 
 
@@ -125,6 +130,12 @@ def test_label_notes_falls_back_on_a_sane_tempo():
     notes = [Note(start=0.0, end=_beats(1), midi=60, confidence=0.9)]
     label_notes(notes, BeatGrid(0.0))
     assert notes[0].figure == "noire"
+
+
+def test_double_dotted_short_labels_write_the_name_once():
+    assert short_label("noire double-pointée") == "N.."
+    assert short_label("croche double-pointée") == "C.."
+    assert short_label("blanche double-pointée") == "B.."
 
 
 def test_summary_and_short_labels():
@@ -137,5 +148,8 @@ def test_summary_and_short_labels():
     label_notes(notes, GRID)
     assert figures_summary(notes) == {"noire": 4}
     assert [short_label(f) for f in ("noire", "croche pointée", "triolet de noire", None)] == [
-        "N", "C.", "3N", "",
+        "N",
+        "C.",
+        "3N",
+        "",
     ]

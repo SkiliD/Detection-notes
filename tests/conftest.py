@@ -1,4 +1,4 @@
-"""Fixtures: synthetic audio signals, sandboxed language, suite budget."""
+"""Fixtures: synthetic audio signals, sandboxed preferences, suite budget."""
 
 import json
 import time
@@ -7,13 +7,14 @@ import numpy as np
 import pytest
 
 from v2m.core import i18n
+from v2m.gui import main_window, widgets
 
 SR = 22_050
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _sandbox_language_file(tmp_path_factory):
-    """The suite neither reads nor writes the user's ~/.v2m_lang.
+    """The suite never reads or writes the user's language/theme preferences.
 
     Without the sandbox a manual `--lang en` (or an anglophone user's
     persisted choice) makes the suite NON-reproducible — `cli.main`
@@ -26,28 +27,34 @@ def _sandbox_language_file(tmp_path_factory):
     on every run.
     """
     original = i18n.LANG_FILE
+    original_theme_file = main_window.THEME_FILE
+    theme_directory = tmp_path_factory.mktemp("theme")
     i18n.LANG_FILE = tmp_path_factory.mktemp("lang") / "lang"
+    main_window.THEME_FILE = theme_directory / "theme"
+    widgets.set_theme("dark")
     i18n.set_language("fr")
     yield
     i18n.LANG_FILE = original
+    main_window.THEME_FILE = original_theme_file
+    widgets.set_theme("dark")
 
 
-# Cost contract (AGENTS.md): the full suite must stay under this
+# Cost contract: the full suite must stay under this
 # budget — a slow test added beyond it must be an EXPLICIT decision
 # (measure, lower the budget with a reason, or mark the test slow).
 #
-# Calibration history (procedure in AGENTS.md; budget = measured × 1.85
+# Calibration history (budget = measured × 1.85
 # on two concordant runs):
 #   2026-09-24  51.3 s   483 tests  →  95 s
 #   2026-09-27  62.0 s   633 tests  → 115 s
 #   2026-09-27  88.6 s   658 tests  → 165 s (3 real-time replays added)
 #   2026-09-27 101.7 s   677 tests  → 190 s (5 real-time replays total)
 #   2026-09-27 106.5 s   696 tests  → 197 s (weekly/retention features)
-#   2026-09-28 109.3 s   721 tests  → 205 s (comments EN sweep, no
-#                                     runtime effect)#   2026-09-28  81.0 s   727 tests  →  150 s (both diagnostic scripts
+#   2026-09-28 109.3 s   721 tests  → 205 s (comment edits, no runtime
+#                                     effect)
+#   2026-09-28  81.0 s   727 tests  →  150 s (both diagnostic scripts
 #                                     run in-process, the error_paths
-#                                     take analyzed once — see AGENTS.md
-#                                     Diagnostics)
+#                                     take analyzed once — see diagnostics)
 #   2026-10-02 131.9 s   853 tests — GREEN but a LOADED machine, not an
 #                                     idle calibration: the 31 s replay
 #                                     deadline wait was removed this day
@@ -62,8 +69,24 @@ def _sandbox_language_file(tmp_path_factory):
 # at ~60 % of 8 cores, 90.4 s at ~87 %, but 197.2 s at ~half of ONE
 # core (×2.43) — the factor covers load and ~1.8x uniform slowdown,
 # not a 2x slower machine class (the budget is a tripwire, not a
-# comfort margin; see AGENTS.md calibration procedure).
+# comfort margin; see the calibration procedure).
 SUITE_BUDGET_S = 150.0
+
+#   2026-10-12  34.6 s  1058 tests  →  150 s (KEPT: the run is now the
+#                                     `-n 2` one pyproject's addopts
+#                                     pins — pytest-xdist, a dev extra;
+#                                     the same files cost ~62 s on one
+#                                     process. -n 4 is NOT an option:
+#                                     the two real-take goldens
+#                                     (test_voice_accuracy drift,
+#                                     test_score_accuracy fingerprint)
+#                                     then race the shared
+#                                     <take>.observation.npz and read
+#                                     0.474/0.522 strengths where the
+#                                     sequential run reads 0.473/0.523.)
+#   2026-10-19  40.5 s  1111 tests  →  150 s (test consolidation kept
+#                                     transferred assertions; no cost
+#                                     recalibration)
 
 # The start of the cost: this module loads during COLLECTION, before the
 # first test (a pytest_sessionstart hook here would not be registered
@@ -140,6 +163,22 @@ def _sandbox_live_takes_dir(tmp_path, monkeypatch):
     root = tmp_path / "prises_live"
     monkeypatch.setattr(coh, "LIVE_TAKES_DIR", root)
     monkeypatch.setattr(takes_mod, "LIVE_TAKES_DIR", root)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_driver_endpoints(monkeypatch):
+    """The suite never reads this machine's audio-endpoint registry.
+
+    `driver_fx.enhancement_note` reads what Windows records for the selected
+    microphone, and the note it returns sits on the home page: a developer's
+    motherboard endpoint publishes an effects chain, so the sentence would
+    exist in GUI tests on one machine and nowhere else. Sandboxed to "no
+    endpoint"; the note's own tests pass their endpoints explicitly.
+    """
+    from v2m.core import driver_fx
+
+    monkeypatch.setattr(driver_fx, "_read_endpoints", lambda: [])
     yield
 
 

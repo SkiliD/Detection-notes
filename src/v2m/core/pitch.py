@@ -12,7 +12,7 @@ from scipy import stats
 
 from .audio_io import GATE_RMS
 
-FMIN = 65.0    # ~ C2
+FMIN = 65.0  # ~ C2
 # C7, not C6: the old 1050 Hz ceiling sat EXACTLY on the sung C6 boundary —
 # pYIN had no room above to lock a soprano's top notes and folded them an
 # octave down (measured: a sung 84 read 72, a 79-88 line read 67-76 — the
@@ -38,7 +38,7 @@ MIN_PITCH_QUALITY = 0.35
 # The rumble, at 0.003, stays an order of magnitude under it.
 HF_ENERGY_HZ = 500.0
 HF_SHARE_MIN = 0.03
-LOW_RUMBLE_MAX_HZ = 200.0   # the HF gate only judges LOW reads (G3 and below)
+LOW_RUMBLE_MAX_HZ = 200.0  # the HF gate only judges LOW reads (G3 and below)
 
 # The swallow-rescue sweep (the block-wise second reading). pYIN's 2048
 # window (~93 ms) collapses through SHORT voiced bursts — a voiced
@@ -53,10 +53,10 @@ LOW_RUMBLE_MAX_HZ = 200.0   # the HF gate only judges LOW reads (G3 and below)
 # unvoiced (the consonant corpus pins that). The level gate is ABSOLUTE
 # (the same bar the live path draws), not a relative floor (ADR 0003):
 # a quiet voice is re-read like a loud one.
-RESCUE_WINDOW = 512        # samples: the live engine's short window
-RESCUE_MIN_SPAN_S = 0.05   # a shorter unvoiced span is not a swallowed note
-RESCUE_COVER = 0.6         # share of the span the short window must voice
-RESCUE_MAX_SPAN_S = 4.0    # longer spans are silence/breath passages: skip
+RESCUE_WINDOW = 512  # samples: the live engine's short window
+RESCUE_MIN_SPAN_S = 0.05  # a shorter unvoiced span is not a swallowed note
+RESCUE_COVER = 0.6  # share of the span the short window must voice
+RESCUE_MAX_SPAN_S = 4.0  # longer spans are silence/breath passages: skip
 # A swallowed note is a PLATEAU at the short window; a legato ramp is a
 # MOVING reading (measured: the ramp's frames trace neighbour -> neighbour
 # and grafting their median sprouted an intruder note between the two).
@@ -65,9 +65,9 @@ RESCUE_MAX_SPAN_S = 4.0    # longer spans are silence/breath passages: skip
 # burst), so the share of readings within the band decides — a ramp's
 # readings spread along the slide and fail it, a bimodal pair of notes
 # fails it, one plateau with folded edges passes.
-RESCUE_SPREAD_ST = 1.0     # "one plateau" band around the median (st)
+RESCUE_SPREAD_ST = 1.0  # "one plateau" band around the median (st)
 RESCUE_INLIER_SHARE = 0.7  # share of readings that must sit in the band
-RESCUE_BRIDGE_ST = 1.0     # "on a neighbour's plateau" tolerance (st)
+RESCUE_BRIDGE_ST = 1.0  # "on a neighbour's plateau" tolerance (st)
 
 # Where the rescue's time went, per reading: the seconds grafted by the
 # LAST `track_pitch_offline` call and its measured cost. One reader (the
@@ -90,8 +90,8 @@ def pitch_stage_cost() -> dict:
 class PitchTrack:
     """Pitch curve: Hz + confidence per frame."""
 
-    times: np.ndarray   # (n,) times in seconds (frame center)
-    hz: np.ndarray      # (n,) frequency (NaN when unvoiced)
+    times: np.ndarray  # (n,) times in seconds (frame center)
+    hz: np.ndarray  # (n,) frequency (NaN when unvoiced)
     confidence: np.ndarray  # (n,) voicing probability
     # True where |df0/dt| exceeds the transition threshold (vibrato peaks
     # aside, these are portamento ramps and note hand-overs). None until
@@ -100,8 +100,9 @@ class PitchTrack:
     transition: np.ndarray | None = None
 
 
-def _rescue_swallowed_spans(y: np.ndarray, sr: int, hop: int, f0: np.ndarray,
-                            vprob: np.ndarray) -> float:
+def _rescue_swallowed_spans(
+    y: np.ndarray, sr: int, hop: int, f0: np.ndarray, vprob: np.ndarray
+) -> float:
     """Re-read unvoiced spans at the live geometry, IN PLACE on f0/vprob.
 
     pYIN's 2048 window reads vprob ~0.01 through a voiced burst whose note
@@ -127,6 +128,11 @@ def _rescue_swallowed_spans(y: np.ndarray, sr: int, hop: int, f0: np.ndarray,
     # swallow shape is a note the long window read NOWHERE: f0 is NaN
     # across the whole span.
     unvoiced = np.isnan(f0)
+    # Silence splits the candidate into independent islands before any vote.
+    for i in np.flatnonzero(unvoiced):
+        frame = y[i * hop : min(len(y), (i + 1) * hop)]
+        if not len(frame) or np.sqrt(np.mean(frame.astype(np.float64) ** 2)) < GATE_RMS:
+            unvoiced[i] = False
     spans: list[tuple[int, int]] = []
     start: int | None = None
     for i, flag in enumerate(unvoiced):
@@ -169,7 +175,7 @@ def _rescue_swallowed_spans(y: np.ndarray, sr: int, hop: int, f0: np.ndarray,
         pos = 0
         read_hz: list[float] = []
         while pos + w <= len(seg):
-            frame = seg[pos:pos + w]
+            frame = seg[pos : pos + w]
             frms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
             if frms >= GATE_RMS:
                 eligible += 1
@@ -189,9 +195,7 @@ def _rescue_swallowed_spans(y: np.ndarray, sr: int, hop: int, f0: np.ndarray,
         # notes). Subharmonic folds (a reading 2x/3x/4x under another one)
         # are estimator artifacts at a burst's edges, dropped before the
         # vote — a ramp's readings spread along the slide and fail it.
-        kept = [h for h in read_hz if not any(
-            1.97 <= g / h <= 4.06 for g in read_hz if g > h
-        )]
+        kept = [h for h in read_hz if not any(1.97 <= g / h <= 4.06 for g in read_hz if g > h)]
         if len(kept) < 3:
             continue
         read_midi = np.array([69.0 + 12.0 * np.log2(h / 440.0) for h in kept])
@@ -219,8 +223,7 @@ def _rescue_swallowed_spans(y: np.ndarray, sr: int, hop: int, f0: np.ndarray,
     return rescued_s
 
 
-def _neighbour_plateau(f0: np.ndarray, vprob: np.ndarray, edge: int,
-                       step: int) -> float | None:
+def _neighbour_plateau(f0: np.ndarray, vprob: np.ndarray, edge: int, step: int) -> float | None:
     """The pitch plateau bordering a span on one side (median of ~100 ms).
 
     `edge` is the span's first (step=-1) or last (step=+1) frame index;
@@ -233,8 +236,7 @@ def _neighbour_plateau(f0: np.ndarray, vprob: np.ndarray, edge: int,
         lo, hi = max(0, edge - window), edge
     else:
         lo, hi = edge, min(n, edge + window)
-    idx = [i for i in range(lo, hi)
-           if f0[i] == f0[i] and vprob[i] >= MIN_PITCH_QUALITY]
+    idx = [i for i in range(lo, hi) if f0[i] == f0[i] and vprob[i] >= MIN_PITCH_QUALITY]
     if not idx:
         return None
     return float(np.median([f0[i] for i in idx]))
@@ -325,11 +327,7 @@ def _pyin_observation_kernel(
             period_row = trough_rows[candidate]
             period = min_period + period_row + batch_shifts[period_row, frame]
             frequency = sr / period
-            pitch_bin = int(
-                np.floor(
-                    12.0 * bins_per_semitone * np.log2(frequency / fmin) + 0.5
-                )
-            )
+            pitch_bin = int(np.floor(12.0 * bins_per_semitone * np.log2(frequency / fmin) + 0.5))
             pitch_bin = min(n_pitch_bins, max(0, pitch_bin))
             observation[pitch_bin, frame] = probability
 
@@ -343,7 +341,6 @@ def _pyin_observation_kernel(
             observation[pitch_bin, frame] = unvoiced_probability
 
     return observation, voiced
-
 
 
 def _pyin_batched(
@@ -367,9 +364,7 @@ def _pyin_batched(
     min_period = int(np.floor(sr / FMAX))
     max_period = min(int(np.ceil(sr / FMIN)), frame_length - 1)
     padded = np.pad(y, (frame_length // 2, frame_length // 2), mode="constant")
-    frames = librosa.util.frame(
-        padded, frame_length=frame_length, hop_length=hop
-    )
+    frames = librosa.util.frame(padded, frame_length=frame_length, hop_length=hop)
     librosa.util.valid_audio(y)
     from librosa import sequence
     from librosa.core.pitch import (
@@ -383,12 +378,8 @@ def _pyin_batched(
     thresholds = np.linspace(0.0, 1.0, n_thresholds + 1)
     beta_probs = np.diff(stats.beta.cdf(thresholds, 2, 18))
     bins_per_semitone = 10
-    n_pitch_bins = int(
-        np.floor(12 * bins_per_semitone * np.log2(FMAX / FMIN))
-    ) + 1
-    observation_probs = np.zeros(
-        (2 * n_pitch_bins, yin.shape[1]), dtype=np.float64
-    )
+    n_pitch_bins = int(np.floor(12 * bins_per_semitone * np.log2(FMAX / FMIN))) + 1
+    observation_probs = np.zeros((2 * n_pitch_bins, yin.shape[1]), dtype=np.float64)
     voiced_prob = np.zeros(yin.shape[1], dtype=np.float64)
 
     for first in range(0, yin.shape[1], batch_size):
@@ -422,9 +413,7 @@ def _pyin_batched(
         p_init=initial,
         transition_min_prob=1e-4,
     )[0]
-    frequencies = FMIN * 2 ** (
-        np.arange(n_pitch_bins) / (12 * bins_per_semitone)
-    )
+    frequencies = FMIN * 2 ** (np.arange(n_pitch_bins) / (12 * bins_per_semitone))
     f0 = frequencies[states % n_pitch_bins]
     voiced_flag = states < n_pitch_bins
     f0[~voiced_flag] = np.nan
@@ -493,8 +482,18 @@ class YinBlock:
 
     def push(self, block: np.ndarray) -> list[tuple[float, float]]:
         """Push a sample block and return newly available absolute-time pitches."""
+        return [(t, hz) for t, hz, _quality in self.push_with_quality(block)]
+
+    def push_with_quality(self, block: np.ndarray) -> list[tuple[float, float, float]]:
+        """Same frames, WITH YIN's own periodicity score (0 = perfect period).
+
+        The score is the evidence a live note rests on: without it every note
+        carries the same certainty (`LiveNote.confidence` is a default). It
+        never gates a frame — `push` keeps its own contract and every decision
+        still reads the pitch alone.
+        """
         self.buffer = np.concatenate([self.buffer, np.asarray(block, dtype=np.float32)])
-        out: list[tuple[float, float]] = []
+        out: list[tuple[float, float, float]] = []
         while self.pos + self.window <= len(self.buffer):
             frame = self.buffer[self.pos : self.pos + self.window]
             t = (self.offset + self.pos + self.window / 2) / self.sr
@@ -504,7 +503,7 @@ class YinBlock:
             if np.isfinite(hz) and not (periodic or self._prev_periodic):
                 hz = float("nan")
             self._prev_periodic = bool(periodic)
-            out.append((t, hz))
+            out.append((t, hz, float(quality.get("quality", 1.0))))
             self.pos += self.hop
 
         # The overlap remains in the buffer, but its sample origin moves too.
@@ -547,9 +546,7 @@ def yin_pitch(
     difference = np.empty(tau_max + 1)
     difference[0] = 0.0
     difference[1:] = (
-        cumulative[width - taus]
-        + (total - cumulative[taus])
-        - 2.0 * correlation[taus]
+        cumulative[width - taus] + (total - cumulative[taus]) - 2.0 * correlation[taus]
     ) / (width - taus)
     running_mean = np.cumsum(difference[1:]) / taus
     d_prime = difference[1:] / np.where(running_mean == 0.0, 1e-12, running_mean)

@@ -99,32 +99,108 @@ def test_the_render_table_carries_a_trend_column_per_session_row(tmp_path):
 
 
 def _journal_with(root, entries):
-    (root / coh.JOURNAL_NAME).write_text(
-        json.dumps(entries), encoding="utf-8"
+    (root / coh.JOURNAL_NAME).write_text(json.dumps(entries), encoding="utf-8")
+
+
+def test_empty_final_sidecar_is_not_replaced_by_old_report_rate(tmp_path):
+    stem = "live_20260927_090000"
+    folder = tmp_path / stem
+    folder.mkdir()
+    (folder / f"{stem}.coherence.csv").write_text("h\n", encoding="utf-8")
+    (folder / f"{stem}.json").write_text(
+        json.dumps(
+            {
+                "coherence": {"checked": 3, "suspects": []},
+                "live_vs_final": {"live": 3, "final": 3, "rate": 0.5},
+            }
+        ),
+        encoding="utf-8",
     )
+    (folder / f"{stem}.live_vs_final.json").write_text(
+        json.dumps(
+            {
+                "live": 3,
+                "final": 0,
+                "rate": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit = coh.takes_under(tmp_path)[0]
+    assert audit.contour_rate is None
+    assert audit.live_notes == 3 and audit.final_notes == 0
+
+
+def test_empty_final_does_not_dilute_weekly_rate():
+    entries = {
+        "valid": {
+            "date": "20260921",
+            "contour_rate": 0.5,
+            "live_notes": 10,
+            "final_notes": 10,
+            "final_notes_source": "live_vs_final",
+        },
+        "empty": {
+            "date": "20260922",
+            "contour_rate": 0.0,
+            "live_notes": 10,
+            "final_notes": 0,
+            "final_notes_source": "live_vs_final",
+        },
+    }
+    week = coh.contour_trend_entries(entries)[0]
+    assert week["contour_rate"] == 0.5
+    assert week["takes"] == 2
+    assert week["final_notes"] == 10
+    assert week["live_notes"] == 20
+    assert coh.contour_trend_entries({"empty": entries["empty"]}) == []
+    # A final count without provenance cannot establish an empty final reading.
+    entries["empty"].pop("final_notes_source")
+    assert coh.contour_trend_entries(entries)[0]["contour_rate"] == 0.25
 
 
 def test_contour_trend_groups_by_iso_week_and_means_the_rates(tmp_path):
-    _journal_with(tmp_path, {
-        "live_20260921_090000": {
-            "date": "20260921", "clock": "090000", "epoch_s": 1000.0,
-            "checked": 10, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.50, "live_notes": 20,
-            "final_notes": 40,
+    _journal_with(
+        tmp_path,
+        {
+            "live_20260921_090000": {
+                "date": "20260921",
+                "clock": "090000",
+                "epoch_s": 1000.0,
+                "checked": 10,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": 0.50,
+                "live_notes": 20,
+                "final_notes": 40,
+            },
+            "live_20260922_090000": {
+                "date": "20260922",
+                "clock": "090000",
+                "epoch_s": 2000.0,
+                "checked": 10,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": 0.30,
+                "live_notes": 10,
+                "final_notes": 20,
+            },
+            "live_20260928_090000": {  # next ISO week
+                "date": "20260928",
+                "clock": "090000",
+                "epoch_s": 8000.0,
+                "checked": 10,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": 0.10,
+                "live_notes": 15,
+                "final_notes": 30,
+            },
         },
-        "live_20260922_090000": {
-            "date": "20260922", "clock": "090000", "epoch_s": 2000.0,
-            "checked": 10, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.30, "live_notes": 10,
-            "final_notes": 20,
-        },
-        "live_20260928_090000": {  # next ISO week
-            "date": "20260928", "clock": "090000", "epoch_s": 8000.0,
-            "checked": 10, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.10, "live_notes": 15,
-            "final_notes": 30,
-        },
-    })
+    )
     trend = coh.contour_trend(tmp_path)
     assert [w["week"] for w in trend] == ["2026-S39", "2026-S40"]
     assert trend[0]["contour_rate"] == pytest.approx(0.40)
@@ -134,62 +210,120 @@ def test_contour_trend_groups_by_iso_week_and_means_the_rates(tmp_path):
 
 
 def test_a_take_without_contour_data_never_dilutes_its_week(tmp_path):
-    _journal_with(tmp_path, {
-        "live_20260921_090000": {
-            "date": "20260921", "clock": "090000", "epoch_s": 1000.0,
-            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.50, "live_notes": 10,
-            "final_notes": 20,
+    _journal_with(
+        tmp_path,
+        {
+            "live_20260921_090000": {
+                "date": "20260921",
+                "clock": "090000",
+                "epoch_s": 1000.0,
+                "checked": 5,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": 0.50,
+                "live_notes": 10,
+                "final_notes": 20,
+            },
+            "live_20260922_090000": {
+                "date": "20260922",
+                "clock": "090000",
+                "epoch_s": 2000.0,
+                "checked": 5,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": None,
+                "live_notes": None,
+                "final_notes": None,
+            },
         },
-        "live_20260922_090000": {
-            "date": "20260922", "clock": "090000", "epoch_s": 2000.0,
-            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True,
-            "contour_rate": None, "live_notes": None, "final_notes": None,
-        },
-    })
+    )
     trend = coh.contour_trend(tmp_path)
     assert len(trend) == 1 and trend[0]["contour_rate"] == pytest.approx(0.50)
 
 
 def test_the_trend_survives_a_deleted_take_via_the_journal(tmp_path):
     """The journal's point: tidying the folder does not rewrite history."""
-    _journal_with(tmp_path, {
-        "live_20260921_090000": {
-            "date": "20260921", "clock": "090000", "epoch_s": 1000.0,
-            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.50, "live_notes": 10,
-            "final_notes": 20,
+    _journal_with(
+        tmp_path,
+        {
+            "live_20260921_090000": {
+                "date": "20260921",
+                "clock": "090000",
+                "epoch_s": 1000.0,
+                "checked": 5,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": 0.50,
+                "live_notes": 10,
+                "final_notes": 20,
+            },
         },
-    })
+    )
     # NO take folder on disk at all: the journal alone answers
     trend = coh.contour_trend(tmp_path)
     assert len(trend) == 1
     assert trend[0]["week"] == "2026-S39"
 
 
-def test_update_journal_persists_the_contour_rate(tmp_path):
-    """The journal stores what the weekly trend will re-read later."""
+def test_update_journal_persists_exact_live_final_counts(tmp_path):
+    """Weekly counts come from the exact block, not an inferred rate."""
     stem = "live_20260921_090000"
     d = tmp_path / stem
     d.mkdir()
     (d / f"{stem}.json").write_text(
-        json.dumps({
-            "coherence": {"checked": 10, "suspects": []},
-            "live_vs_final": {"live": 20, "final": 31, "contours": 18,
-                              "off1": 11, "moved": 6, "absorbed": 1,
-                              "rate": 0.9},
-        }),
+        json.dumps(
+            {
+                "coherence": {"checked": 10, "suspects": []},
+                "live_vs_final": {
+                    "live": 20,
+                    "final": 31,
+                    "contours": 18,
+                    "off1": 11,
+                    "moved": 6,
+                    "absorbed": 1,
+                    "rate": 0.6,
+                },
+            }
+        ),
         encoding="utf-8",
     )
     (d / f"{stem}.coherence.csv").write_text("h\n", encoding="utf-8")
     takes = coh.takes_under(tmp_path)
-    assert takes[0].contour_rate == 0.9  # read from the JSON's own block
+    assert takes[0].contour_rate == 0.6  # read from the JSON's own block
+    assert takes[0].final_notes == 31
     data = coh.update_journal(tmp_path, takes)
-    assert data[stem]["contour_rate"] == 0.9
+    assert data[stem]["contour_rate"] == 0.6
     assert data[stem]["live_notes"] == 20
-    # final_notes is DERIVED (live / rate), never guessed from nowhere
-    assert data[stem]["final_notes"] == 22
+    assert data[stem]["final_notes"] == 31
+    assert data[stem]["final_notes_source"] == "live_vs_final"
+    trend = coh.contour_trend_entries(data)
+    assert trend[0]["live_notes"] == 20
+    assert trend[0]["final_notes"] == 31
+
+
+def test_old_rate_derived_journal_counts_are_not_reported_as_exact(tmp_path):
+    """Legacy rows have no count provenance, so their final total is unknown."""
+    stem = "live_20260921_090000"
+    _journal_with(
+        tmp_path,
+        {
+            stem: {
+                "date": "20260921",
+                "clock": "090000",
+                "epoch_s": 1000.0,
+                "contour_rate": 0.6,
+                "live_notes": 20,
+                "final_notes": 33,
+            },
+        },
+    )
+
+    trend = coh.contour_trend(tmp_path)
+    assert trend[0]["live_notes"] == 20
+    assert trend[0]["final_notes"] is None
 
 
 def test_week_keys_hit_the_iso_year_boundaries():
@@ -213,11 +347,12 @@ def _take(tmp_path: Path, stem: str, checked: int, rate: float | None) -> None:
     d = tmp_path / stem
     d.mkdir(exist_ok=True)
     (d / f"{stem}.json").write_text(
-        json.dumps({
-            "coherence": {"checked": checked, "suspects": []},
-            **({"live_vs_final": {"rate": rate, "live": 10}}
-               if rate is not None else {}),
-        }),
+        json.dumps(
+            {
+                "coherence": {"checked": checked, "suspects": []},
+                **({"live_vs_final": {"rate": rate, "live": 10}} if rate is not None else {}),
+            }
+        ),
         encoding="utf-8",
     )
     (d / f"{stem}.coherence.csv").write_text("h\n", encoding="utf-8")
@@ -282,10 +417,16 @@ def _seed_weeks(tmp_path, weeks):
             n += 1
             stem = f"live_202609{n:02d}_090000"
             entries[stem] = {
-                "date": date, "clock": "090000", "epoch_s": float(n),
-                "checked": 10, "suspects": 0, "rate_per_100": 0.0,
-                "verify_ok": True, "contour_rate": rate,
-                "live_notes": 10, "final_notes": 20,
+                "date": date,
+                "clock": "090000",
+                "epoch_s": float(n),
+                "checked": 10,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+                "verify_ok": True,
+                "contour_rate": rate,
+                "live_notes": 10,
+                "final_notes": 20,
             }
     _journal_with(tmp_path, entries)
 
@@ -324,16 +465,28 @@ def test_clicking_a_week_shows_that_weeks_takes(qapp, monkeypatch, tmp_path):
     _take(tmp_path, second, checked=5, rate=0.4)
     journal = {
         first: {
-            "date": "20260921", "clock": "090000", "epoch_s": 1.0,
-            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.5,
-            "live_notes": 10, "final_notes": 20,
+            "date": "20260921",
+            "clock": "090000",
+            "epoch_s": 1.0,
+            "checked": 5,
+            "suspects": 0,
+            "rate_per_100": 0.0,
+            "verify_ok": True,
+            "contour_rate": 0.5,
+            "live_notes": 10,
+            "final_notes": 20,
         },
         second: {
-            "date": "20260928", "clock": "090000", "epoch_s": 2.0,
-            "checked": 5, "suspects": 0, "rate_per_100": 0.0,
-            "verify_ok": True, "contour_rate": 0.4,
-            "live_notes": 10, "final_notes": 20,
+            "date": "20260928",
+            "clock": "090000",
+            "epoch_s": 2.0,
+            "checked": 5,
+            "suspects": 0,
+            "rate_per_100": 0.0,
+            "verify_ok": True,
+            "contour_rate": 0.4,
+            "live_notes": 10,
+            "final_notes": 20,
         },
     }
     _journal_with(tmp_path, journal)
@@ -363,8 +516,14 @@ def test_clicking_a_week_shows_that_weeks_takes(qapp, monkeypatch, tmp_path):
 
 def _rows(*rates):
     return [
-        {"week": f"2026-S{40 + i}", "takes": 2, "contour_rate": r,
-         "live_notes": 10, "final_notes": 20, "stems": ["a", "b"]}
+        {
+            "week": f"2026-S{40 + i}",
+            "takes": 2,
+            "contour_rate": r,
+            "live_notes": 10,
+            "final_notes": 20,
+            "stems": ["a", "b"],
+        }
         for i, r in enumerate(rates)
     ]
 
@@ -380,8 +539,10 @@ def test_small_moves_and_missing_data_are_never_a_regression():
     assert coh.regression_report(_rows(0.30, 0.36)) is None  # within ±10 pts
     assert coh.regression_report(_rows(0.60, 0.30)) is None  # improving
     # a missing rate is NOT a zero: no data, no bell
-    rows = [{"week": "2026-S40", "takes": 2, "contour_rate": None},
-            {"week": "2026-S41", "takes": 2, "contour_rate": 0.7}]
+    rows = [
+        {"week": "2026-S40", "takes": 2, "contour_rate": None},
+        {"week": "2026-S41", "takes": 2, "contour_rate": 0.7},
+    ]
     assert coh.regression_report(rows) is None
     assert coh.regression_report(_rows(0.3)) is None  # no previous week
 
@@ -469,8 +630,17 @@ def test_the_replay_sidecar_fills_the_trend_when_the_report_has_no_block(tmp_pat
     assert coh.takes_under(tmp_path)[0].contour_rate is None
     # the replay archives its audit: the trend reads it (same vocabulary)
     (d / f"{stem}.live_vs_final.json").write_text(
-        json.dumps({"live": 12, "final": 20, "contours": 5, "off1": 4,
-                    "moved": 1, "absorbed": 0, "rate": 0.417}),
+        json.dumps(
+            {
+                "live": 12,
+                "final": 20,
+                "contours": 5,
+                "off1": 4,
+                "moved": 1,
+                "absorbed": 0,
+                "rate": 0.417,
+            }
+        ),
         encoding="utf-8",
     )
     audit = coh.takes_under(tmp_path)[0]

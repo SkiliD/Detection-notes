@@ -22,7 +22,7 @@ MIN_CENTS = 12.0
 # the same scale (it reads THIS constant), so the report and the live feedback
 # can never disagree about what "in tune" means.
 IN_TUNE_CENTS = 10.0
-# The three pitch bands a register habit is read on (equal thirds by pitch).
+# Relative registers divide the take's MIDI extent, never its note count.
 BANDS = ("low", "mid", "high")
 
 
@@ -60,9 +60,9 @@ def _tendency(values: list[float]) -> dict | None:
 def summarize(notes) -> dict:
     """The take's intonation: one line per habit, nothing invented.
 
-    `by_register` splits the notes by pitch (equal thirds), `by_position` by
-    time (first half / second half) — a singer drifting flat as the phrase
-    goes on shows up there, not in the take-wide mean.
+    `by_register` uses equal-width MIDI bands over the take's extent;
+    `by_position` uses note-count halves (first half / second half).
+    A singer drifting flat may show up there, not in the take-wide mean.
     """
     devs = [_cents(n) for n in notes]
     n = len(devs)
@@ -92,14 +92,15 @@ def summarize(notes) -> dict:
         if abs(mean) >= MIN_CENTS:
             tendency = "sharp" if mean > 0 else "flat"
 
-    # register: equal thirds by pitch (low/mid/high), each read for itself
-    order = sorted(range(n), key=lambda i: notes[i].midi)
-    third = n // 3
-    bands: dict[str, dict | None] = {}
-    for index, name in enumerate(BANDS):
-        lo = index * third
-        hi = n if index == len(BANDS) - 1 else (index + 1) * third
-        bands[name] = _tendency([devs[i] for i in order[lo:hi]])
+    # Identical pitches belong together regardless of repetitions or order.
+    lowest = min(note.midi for note in notes)
+    highest = max(note.midi for note in notes)
+    values: list[list[float]] = [[], [], []]
+    if highest > lowest:
+        for note, deviation in zip(notes, devs, strict=True):
+            index = min(2, int(3 * (note.midi - lowest) / (highest - lowest)))
+            values[index].append(deviation)
+    bands = {name: _tendency(group) for name, group in zip(BANDS, values, strict=True)}
 
     # position: the first half of the take against the second (a drift)
     half = n // 2

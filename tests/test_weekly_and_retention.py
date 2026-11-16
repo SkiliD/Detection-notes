@@ -27,10 +27,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from v2m.core import coherence as coh
+from v2m.core import replay
 from v2m.core import retention as ret
-from v2m.core.replay import engine_fingerprint
 from v2m.core import weekly as wk
-from v2m.core.i18n import set_language
+from v2m.core.i18n import get_language, set_language, tr
+from v2m.core.replay import engine_fingerprint
+
+
+@pytest.fixture(autouse=True)
+def _restore_language():
+    """Language-specific recap tests must not affect later tests."""
+    original = get_language()
+    yield
+    set_language(original)
 
 
 # --------------------------------------------------------------------------- #
@@ -40,20 +49,25 @@ from v2m.core.i18n import set_language
 
 def _audit(stem: str, clock: str, checked=10, suspects=0, contour=None):
     t = coh.TakeAudit(
-        stem=stem, date=stem.replace("live_", "").split("_")[0], clock=clock,
+        stem=stem,
+        date=stem.replace("live_", "").split("_")[0],
+        clock=clock,
         epoch_s=coh._epoch(stem.replace("live_", "").split("_")[0], clock),
-        suspects=[], checked=checked, verify_ok=True,
-        contour_rate=contour, live_notes=None,
+        suspects=[],
+        checked=checked,
+        verify_ok=True,
+        contour_rate=contour,
+        live_notes=None,
     )
     return t
 
 
 def test_windows_group_by_clock_and_evening_wraps_midnight():
     takes = [
-        _audit("live_20260927_080000", "080000", contour=0.5),   # morning
-        _audit("live_20260927_140000", "140000", contour=0.3),   # afternoon
-        _audit("live_20260927_210000", "210000", contour=0.7),   # evening
-        _audit("live_20260927_003000", "003000", contour=0.9),   # 00:30 -> evening
+        _audit("live_20260927_080000", "080000", contour=0.5),  # morning
+        _audit("live_20260927_140000", "140000", contour=0.3),  # afternoon
+        _audit("live_20260927_210000", "210000", contour=0.7),  # evening
+        _audit("live_20260927_003000", "003000", contour=0.9),  # 00:30 -> evening
     ]
     rows = coh.practice_time_report(takes)
     by_name = {r["window"]: r for r in rows}
@@ -70,8 +84,7 @@ def test_a_take_without_data_never_dilutes_its_window():
     ]
     rows = coh.practice_time_report(takes)
     assert rows == [
-        {"window": "morning", "takes": 2, "suspect_rate": None,
-         "contour_rate": 0.5},
+        {"window": "morning", "takes": 2, "suspect_rate": None, "contour_rate": 0.5},
     ]
 
 
@@ -95,15 +108,13 @@ def _take_dir(tmp_path: Path, stem: str, with_cache: bool = False, size_kb: int 
 
 
 def test_orphan_observation_caches_are_removed(tmp_path):
-    import soundfile as sf
-
     import numpy as np
+    import soundfile as sf
 
     # the LIVE cache: its take folder carries the WAV the cache validates
     d = tmp_path / "live_20260927_090000"
     d.mkdir()
-    sf.write(str(d / "live_20260927_090000.wav"),
-             np.zeros(1000, dtype=np.float32), 8000)
+    sf.write(str(d / "live_20260927_090000.wav"), np.zeros(1000, dtype=np.float32), 8000)
     (d / "live_20260927_090000.observation.npz").write_bytes(b"0" * 512)
     # the ORPHAN: no WAV sibling, the cache can never be matched again
     (tmp_path / "live_20260920_090000.observation.npz").write_bytes(b"0" * 512)
@@ -127,9 +138,12 @@ def test_retention_trims_oldest_takes_whole_and_keeps_the_journal(tmp_path):
     assert (tmp_path / "live_20260921_090000").exists()
     assert (tmp_path / coh.JOURNAL_NAME).exists()
     # history survives in the journal: the trend still reads the pruned take
-    assert json.loads((tmp_path / coh.JOURNAL_NAME).read_text(encoding="utf-8"))[
-        "live_20260920_090000"
-    ]["date"] == "20260920"
+    assert (
+        json.loads((tmp_path / coh.JOURNAL_NAME).read_text(encoding="utf-8"))[
+            "live_20260920_090000"
+        ]["date"]
+        == "20260920"
+    )
 
 
 def test_retention_disabled_with_negative_budget(tmp_path):
@@ -172,8 +186,12 @@ def test_build_weekly_aggregates_the_existing_evidence(tmp_path, monkeypatch):
     monkeypatch.setattr(coh, "LIVE_TAKES_DIR", tmp_path)
     _take_dir(tmp_path, "live_20260921_090000")
     (tmp_path / "live_20260921_090000" / "live_20260921_090000.json").write_text(
-        json.dumps({"coherence": {"checked": 10, "suspects": []},
-                    "live_vs_final": {"rate": 0.5, "live": 10}}),
+        json.dumps(
+            {
+                "coherence": {"checked": 10, "suspects": []},
+                "live_vs_final": {"rate": 0.5, "live": 10},
+            }
+        ),
         encoding="utf-8",
     )
     data = wk.build_weekly(tmp_path)
@@ -187,12 +205,27 @@ def test_weekly_text_renders_every_section(tmp_path):
     set_language("en")
     data = {
         "takes": 2,
-        "health": [{"week": "2026-S39", "takes": 2, "contour_rate": 0.4,
-                    "live_notes": 20, "final_notes": 40, "stems": []}],
-        "windows": [{"window": "morning", "takes": 2, "suspect_rate": 0.0,
-                     "contour_rate": 0.4}],
-        "days": [{"date": "20260921", "sessions": 1, "takes": 2, "checked": 20,
-                  "suspects": 0, "rate_per_100": 0.0}],
+        "health": [
+            {
+                "week": "2026-S39",
+                "takes": 2,
+                "contour_rate": 0.4,
+                "live_notes": 20,
+                "final_notes": 40,
+                "stems": [],
+            }
+        ],
+        "windows": [{"window": "morning", "takes": 2, "suspect_rate": 0.0, "contour_rate": 0.4}],
+        "days": [
+            {
+                "date": "20260921",
+                "sessions": 1,
+                "takes": 2,
+                "checked": 20,
+                "suspects": 0,
+                "rate_per_100": 0.0,
+            }
+        ],
         "regression": None,
     }
     text = wk.weekly_text(data)
@@ -212,12 +245,25 @@ def test_weekly_text_empty_when_no_data():
 def test_the_recap_musicxml_carries_the_text_as_lyrics(tmp_path):
     from v2m.core.weekly_pdf import build_recap_musicxml
 
-    data = {"takes": 1, "health": [{"week": "2026-S39", "takes": 1,
-             "contour_rate": 0.5, "live_notes": 10, "final_notes": 20,
-             "stems": []}], "windows": [], "days": [], "regression": None}
+    data = {
+        "takes": 1,
+        "health": [
+            {
+                "week": "2026-S39",
+                "takes": 1,
+                "contour_rate": 0.5,
+                "live_notes": 10,
+                "final_notes": 20,
+                "stems": [],
+            }
+        ],
+        "windows": [],
+        "days": [],
+        "regression": None,
+    }
     xml = build_recap_musicxml(data)
     assert "<lyric" in xml and "2026-S39" in xml
-    assert "measure=\"yes\"" in xml  # the carrier is a whole-measure rest
+    assert 'measure="yes"' in xml  # the carrier is a whole-measure rest
 
 
 def test_engrave_weekly_without_a_tool_raises_the_missing_kind(tmp_path, monkeypatch):
@@ -257,9 +303,63 @@ def test_engrave_weekly_runs_the_same_tool_as_the_score(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_the_engine_fingerprint_is_deterministic_and_nonempty():
-    a, b = engine_fingerprint(), engine_fingerprint()
-    assert a == b and len(a) >= 12
+def test_engine_fingerprint_tracks_source_content_and_requires_every_source(tmp_path, monkeypatch):
+    """A readable source change changes the fingerprint; no source is a valid hash input."""
+    core_dir = tmp_path / "core"
+    core_dir.mkdir()
+    for name in replay._ENGINE_SOURCE_NAMES:
+        (core_dir / name).write_text(f"source: {name}\n", encoding="utf-8")
+    monkeypatch.setattr(replay, "__file__", str(core_dir / "replay.py"))
+
+    first = engine_fingerprint()
+    assert first == engine_fingerprint()
+    (core_dir / "liveseg.py").write_text("changed engine source\n", encoding="utf-8")
+    assert engine_fingerprint() != first
+
+    (core_dir / "notes.py").unlink()
+    with pytest.raises(FileNotFoundError, match="notes.py"):
+        engine_fingerprint()
+
+
+def test_an_old_journal_final_count_without_a_source_is_unknown(tmp_path):
+    """Pre-fix rate-derived counts are not presented as exact history."""
+    coh.read_journal(tmp_path)
+    stem = "live_20260921_090000"
+    (tmp_path / coh.JOURNAL_NAME).write_text(
+        json.dumps(
+            {
+                stem: {
+                    "date": "20260921",
+                    "contour_rate": 0.6,
+                    "live_notes": 20,
+                    "final_notes": 33,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    trend = coh.contour_trend(tmp_path)
+    assert trend[0]["live_notes"] == 20
+    assert trend[0]["final_notes"] is None
+    text = wk.weekly_text(
+        {
+            "takes": 1,
+            "health": trend,
+            "windows": [],
+            "days": [],
+            "regression": None,
+        }
+    )
+    expected_row = tr("coh week row").format(
+        week=trend[0]["week"],
+        takes=trend[0]["takes"],
+        rate=f"{trend[0]['contour_rate'] * 100:.0f}%",
+        live=20,
+        final="-",
+    )
+    assert expected_row in text
+    assert "None" not in text
 
 
 def test_changed_keeps_only_takes_an_older_engine_measured(tmp_path, capsys, monkeypatch):
@@ -275,24 +375,43 @@ def test_changed_keeps_only_takes_an_older_engine_measured(tmp_path, capsys, mon
     spec.loader.exec_module(mod)
 
     for stem, engine in [
-        ("live_20260926_090000", engine_fingerprint()),   # current engine
-        ("live_20260926_091500", "older-engine-hash"),    # older engine
+        ("live_20260926_090000", engine_fingerprint()),  # current engine
+        ("live_20260926_091500", "older-engine-hash"),  # older engine
     ]:
         d = tmp_path / stem
         d.mkdir()
         (d / f"{stem}.wav").write_bytes(b"RIFF....")
         (d / f"{stem}.live_vs_final.json").write_text(
-            json.dumps({"live": 3, "final": 3, "contours": 0, "off1": 0,
-                        "moved": 0, "absorbed": 0, "rate": 0.0, "engine": engine}),
+            json.dumps(
+                {
+                    "live": 3,
+                    "final": 3,
+                    "contours": 0,
+                    "off1": 0,
+                    "moved": 0,
+                    "absorbed": 0,
+                    "rate": 0.0,
+                    "engine": engine,
+                }
+            ),
             encoding="utf-8",
         )
     replays: list[str] = []
 
     def fake_replay(wav, **kw):
         replays.append(Path(wav).stem)
-        return {"stem": Path(wav).stem, "duration_s": 1.0, "live_notes": 1,
-                "final_notes": 1, "contours": 0, "off1": 0, "moved": 0,
-                "absorbed": 0, "rate": 0.0, "tempo_bpm": 120.0}
+        return {
+            "stem": Path(wav).stem,
+            "duration_s": 1.0,
+            "live_notes": 1,
+            "final_notes": 1,
+            "contours": 0,
+            "off1": 0,
+            "moved": 0,
+            "absorbed": 0,
+            "rate": 0.0,
+            "tempo_bpm": 120.0,
+        }
 
     monkeypatch.setattr(mod, "replay_take", fake_replay)
     assert mod.main([str(tmp_path), "--changed"]) == 0
@@ -316,8 +435,20 @@ def test_a_take_without_sidecar_is_always_due_for_replay(tmp_path, monkeypatch):
     d = tmp_path / "live_20260926_090000"
     d.mkdir()
     (d / "live_20260926_090000.wav").write_bytes(b"RIFF....")
-    monkeypatch.setattr(mod, "replay_take", lambda wav, **kw: {
-        "stem": Path(wav).stem, "duration_s": 1.0, "live_notes": 0,
-        "final_notes": 0, "contours": 0, "off1": 0, "moved": 0,
-        "absorbed": 0, "rate": 0.0, "tempo_bpm": None})
+    monkeypatch.setattr(
+        mod,
+        "replay_take",
+        lambda wav, **kw: {
+            "stem": Path(wav).stem,
+            "duration_s": 1.0,
+            "live_notes": 0,
+            "final_notes": 0,
+            "contours": 0,
+            "off1": 0,
+            "moved": 0,
+            "absorbed": 0,
+            "rate": 0.0,
+            "tempo_bpm": None,
+        },
+    )
     assert mod.main([str(tmp_path), "--changed"]) == 0  # no crash, replayed

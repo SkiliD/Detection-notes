@@ -1,11 +1,9 @@
 """The artifact contract: one spelling for every path a take owns.
 
-The measured bug this pins: the live/final sidecar was once written TWICE
-under two different stems because two writers each minted their own name —
-a contract nobody owned is how that happens. `core.takes` now owns the
-suffixes, the paths and the ONE sidecar reader; these tests walk the
-contract round-trip (write through `explain`, read through `read_sidecar`)
-and the name-grammar guard that keeps a stray directory out of the
+`core.takes` owns the suffixes, paths and the single sidecar reader;
+these tests walk the artifact contract's round trip
+(write through `explain`, read through `read_sidecar`) and the name-grammar
+guard that keeps a stray directory out of the
 take tables.
 """
 

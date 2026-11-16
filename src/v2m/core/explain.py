@@ -30,11 +30,15 @@ def explain(block: dict) -> list[str]:
     not a judgment: the ±1 family is a rounding, not a mistake.
     """
     parsed = read_block(block)
-    if parsed is None or not parsed.live:
+    if parsed is None or (not parsed.live and not parsed.final):
         return []
-    lines = [
-        tr(EXPLAIN_HEAD).format(live=parsed.live, final=parsed.final or 0)
-    ]
+    lines = [tr(EXPLAIN_HEAD).format(live=parsed.live, final=parsed.final or 0)]
+    if parsed.final == 0:
+        lines.append(tr("explain empty final"))
+        return lines
+    if parsed.live == 0:
+        lines.append(tr("explain empty live"))
+        return lines
     off1 = parsed.off1 or 0
     moved = parsed.moved or 0
     absorbed = parsed.absorbed or 0

@@ -9,7 +9,8 @@ as properties over the page's attributes, so the 60+ external readers
 without knowing who built them.
 
 What lives here (was the window's live cluster):
-- the widget build (moved from pages.build_live_page, unchanged layout);
+- the widget build: the singing view (monitor + the roll that follows
+  the voice) and its details disclosure;
 - the 50 ms `_timer` — the ONE writer of the live render (`on_tick`:
   roll, staff, preview, cursor, pitch cloud, status);
 - the note tick (`on_note`: indicator, instantaneous cents, accuracy
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -52,9 +54,10 @@ from ..core.i18n import note_display_pair, tr
 from ..core.intonation_live import LiveIntonation
 from ..core.liveseg import LiveNote
 from ..core.music import on_piano
+from . import widgets
 from .clicks import ClickPlayer
 from .display_stabilizer import DisplayStabilizer
-from .finder_page import LevelMeter
+from .finder_page import LevelMeter, level_bar_style
 from .staff import StaffView
 from .widgets import (
     ACCENT,
@@ -64,9 +67,10 @@ from .widgets import (
     LiveIndicator,
     PianoRoll,
     PianoView,
+    action_button_style,
     cents_deviation,
     intonation_lines,
-    action_button_style,
+    page_scroll,
     tuning_color,
 )
 
@@ -134,6 +138,10 @@ class LivePage(QWidget):
         self._stop_audition = stop_audition
         self._replacement_mode = False
         self._reviewing = False
+        self._details_expanded = False
+        self._input_device_name = ""
+        self._input_device_fell_back = False
+        self._driver_effects = False
         # the captured roll's audition readout: the note the singer is
         # hearing and the stop action that ends it (results-page pattern)
         self._note_audition: tuple[int, int, int] | None = None
@@ -146,6 +154,8 @@ class LivePage(QWidget):
         # the cumulative lean): fed at `note_closed`, read in the render
         # tick — one core owner, the report's own evidence table
         self.intonation = LiveIntonation()
+        self._input_state_key = "ui mic waiting"
+        self._input_state_values: dict[str, object] = {}
         # the big NAME channel is vibration-tolerant (a ±0.5-st beginner
         # vibrato must not flicker the name across the seam): the needle
         # stays instantaneous, the name takes the stabilizer's decision
@@ -162,7 +172,11 @@ class LivePage(QWidget):
     # widgets (moved from pages.build_live_page, unchanged layout)
     # ------------------------------------------------------------------
     def _build(self) -> None:
-        root = QVBoxLayout(self)
+        # the page's whole content sits in ONE vertical scroll surface: the
+        # roll and the staff still grow with the window, and a SHORT window
+        # scrolls to the settings and the piano instead of clipping them
+        content = QWidget()
+        root = QVBoxLayout(content)
         top = QHBoxLayout()
         self.btn_stop_live = QPushButton("")
         self.btn_stop_live.setStyleSheet(action_button_style(primary=True))
@@ -177,9 +191,18 @@ class LivePage(QWidget):
         top.addWidget(self.btn_review_back)
         self.label_status = QLabel("")
         top.addWidget(self.label_status, stretch=1)
+        self.label_input_device = QLabel("")
+        self.label_input_device.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_input_device.setWordWrap(True)
+        # the driver's effects chain, when THIS capture did not get a raw
+        # stream: the take may have been filtered before the app heard it
+        self.label_driver_effects = QLabel("")
+        self.label_driver_effects.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_driver_effects.setWordWrap(True)
+        self.label_driver_effects.setVisible(False)
         self.label_expected = QLabel("")
-        self.label_expected.setStyleSheet("color: #9fb3c8; font-size: 9pt;")
-        top.addWidget(self.label_expected)
+        self.label_expected.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_expected.setWordWrap(True)
         # the frozen roll's audition: which CAPTURED note is sounding, and
         # the stop action (hidden until Space picks a note — Qt skips it)
         self.label_live_audition = QLabel("")
@@ -190,14 +213,18 @@ class LivePage(QWidget):
         self.btn_live_audition_stop.setVisible(False)
         top.addWidget(self.btn_live_audition_stop)
         root.addLayout(top)
+        root.addWidget(self.label_input_device)
+        root.addWidget(self.label_driver_effects)
+        root.addWidget(self.label_expected)
 
         self.label_hint = QLabel("")
         self.label_hint.setStyleSheet(HINT_CARD_STYLE)
         self.label_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self.label_hint)
+        self.label_hint.setWordWrap(True)  # one sentence per line, never a width floor
 
-        # Recording controls share one card so the optional settings stay
-        # visually secondary to the live reading and the stop action.
+        # The singer's primary view stays short: the current note, mic
+        # level, confirmed-note count and stop action remain visible. The
+        # score, tuning history and optional controls live in one disclosure.
         self.box_controls = QGroupBox("")
         controls = QVBoxLayout(self.box_controls)
         metro = QHBoxLayout()
@@ -227,8 +254,14 @@ class LivePage(QWidget):
         rec.addWidget(self.chk_record_audio)
         rec.addStretch(1)
         controls.addLayout(rec)
-        root.addWidget(self.box_controls)
+        self.details_toggle = QPushButton("")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.toggled.connect(self._set_details_expanded)
 
+        # The singing view: the note and mic verdict, then the roll that
+        # draws the take as it is sung. The roll is the scene, not a detail
+        # to unfold — a singer watching the melody build must not open a
+        # disclosure first.
         self.box_monitor = QGroupBox("")
         mid = QHBoxLayout(self.box_monitor)
         self.live_indicator = LiveIndicator()
@@ -241,54 +274,108 @@ class LivePage(QWidget):
         self.level_meter.set_gate_rms(self._gate_rms())
         mid.addWidget(self.level_meter)
         self.piano_live = PianoRoll()
+        self.piano_live.setMinimumHeight(200)
+        self.piano_live.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         # Space on the frozen roll auditions a CAPTURED note; the window
         # slices the take's audio at that note (the roll never holds it)
         self.piano_live.audition_requested.connect(self._audition_note_cb)
-        mid.addWidget(self.piano_live, stretch=3)
-        root.addWidget(self.box_monitor, stretch=2)
+        self.live_indicator.set_theme()
+        self.live_indicator.label_note_count.setStyleSheet(f"font-size: 16pt; color: {ACCENT};")
+        self.live_indicator.label_input_state.setWordWrap(True)
+        self.live_indicator.label_rms.setVisible(False)
+        root.addWidget(self.box_monitor)
+        root.addWidget(self.piano_live, stretch=1)
 
         # Both tuning views share a card: the latest notes and the whole-take
         # trend answer different questions, but belong to the same feedback.
         self.box_feedback = QGroupBox("")
         feedback = QVBoxLayout(self.box_feedback)
         self.label_accuracy = QLabel("")
-        self.label_accuracy.setStyleSheet("color: #8a97a5; font-size: 9pt;")
+        self.label_accuracy.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
         feedback.addWidget(self.label_accuracy)
         self.accuracy_plot = AccuracyPlot()
         feedback.addWidget(self.accuracy_plot)
         self.label_intonation = QLabel("")
-        self.label_intonation.setStyleSheet("color: #8a97a5; font-size: 9pt;")
+        self.label_intonation.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
         feedback.addWidget(self.label_intonation)
-        root.addWidget(self.box_feedback)
-
         self.staff_live = StaffView(live=True)
-        root.addWidget(self.staff_live, stretch=2)
         self.piano_live_keys = PianoView()
-        root.addWidget(self.piano_live_keys)
         self.clicks = ClickPlayer()
 
-        # Keyboard traversal in task order: control the take, set what it
-        # records, then walk the notes it captured. The mirror keyboard
-        # (`piano_live_keys`) is deliberately NOT a Tab stop: it only draws
-        # what is sounding and has no action of its own.
+        self.details_panel = QWidget()
+        details = QVBoxLayout(self.details_panel)
+        details.setContentsMargins(0, 0, 0, 0)
+        # the disclosure packs its sections: every pixel it adds below the
+        # roll is a pixel of the take the singer can no longer see
+        details.setSpacing(4)
+        details.addWidget(self.label_hint)
+        details.addWidget(self.box_controls)
+        details.addWidget(self.box_feedback)
+        details.addWidget(self.staff_live, stretch=2)
+        details.addWidget(self.piano_live_keys)
+        self.details_panel.setVisible(False)
+        root.addWidget(self.details_toggle)
+        root.addWidget(self.details_panel, stretch=1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = page_scroll(content)
+        outer.addWidget(self.scroll)
+
+        # Keyboard traversal in task order: control the take, watch the roll
+        # it builds, then the secondary settings and the captured notes. The
+        # mirror keyboard (`piano_live_keys`) is deliberately NOT a Tab stop:
+        # it only draws what is sounding and has no action of its own.
         focus_order = (
             self.btn_stop_live,
             self.btn_review_back,
+            self.piano_live,
+            self.details_toggle,
             self.chk_metronome,
             self.spin_bpm,
             self.chk_record_audio,
-            self.piano_live,
             self.btn_live_audition_stop,
         )
         self._focus_order = focus_order
         for first, second in zip(focus_order, focus_order[1:], strict=False):
             QWidget.setTabOrder(first, second)
 
+    def refresh_theme(self) -> None:
+        """Refresh page-local text and meter colors from the active palette."""
+        self.label_input_device.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_driver_effects.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_expected.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_accuracy.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_intonation.setStyleSheet(f"color: {widgets.TEXT_DIM}; font-size: 9pt;")
+        self.label_beat.setStyleSheet(f"color: {widgets.ACCENT}; font-weight: bold;")
+        self.label_hint.setStyleSheet(widgets.HINT_CARD_STYLE)
+        self.live_indicator.set_theme()
+        self.piano_live.setBackground(widgets.BG_APP)
+        self.piano_live.set_notes(self.piano_live._last_notes, force=True)
+        self.piano_live.set_live_preview(getattr(self.piano_live, "_live_preview", None))
+        self.piano_live._render_selection()
+        self.piano_live_keys.update()
+        self.staff_live.update()
+        self.accuracy_plot.update()
+        self.level_meter.setStyleSheet(level_bar_style())
+        self.level_meter._fill.setStyleSheet(
+            f"background: {widgets.NOTE_TEXT_COLOR}; border-radius: 3px;"
+        )
+
     def retranslate(self) -> None:
         """The page's user-facing strings (the window's retranslate calls it)."""
         self.btn_stop_live.setText(
             tr("ui finish replacement") if self._replacement_mode else tr("ui stop live")
         )
+        self.set_input_device_status(
+            self._input_device_name or tr("ui input device default name"),
+            self._input_device_fell_back,
+        )
+        self.live_indicator.set_input_state(self._input_state_key, **self._input_state_values)
+        self._render_driver_effects()
         self.label_hint.setText(
             tr("ui replacement prompt") if self._replacement_mode else tr("ui live hint")
         )
@@ -300,6 +387,10 @@ class LivePage(QWidget):
         else:
             self.label_beat.setText("")
         self.box_controls.setTitle(tr("ui live controls"))
+        self.details_toggle.setText(
+            tr("ui hide live details") if self._details_expanded else tr("ui show live details")
+        )
+        self.details_toggle.setAccessibleName(tr("ui live details"))
         self.box_monitor.setTitle(tr("ui live monitor"))
         self.box_feedback.setTitle(tr("ui live feedback"))
         self.chk_record_audio.setText(tr("ui record audio"))
@@ -315,6 +406,14 @@ class LivePage(QWidget):
         if self._replacement_mode:
             self.label_hint.setText(tr("ui replacement prompt"))
             self.btn_stop_live.setText(tr("ui finish replacement"))
+
+    def _set_details_expanded(self, expanded: bool) -> None:
+        """Show secondary score, tuning history and take controls on request."""
+        self._details_expanded = expanded
+        self.details_panel.setVisible(expanded)
+        self.details_toggle.setText(
+            tr("ui hide live details") if expanded else tr("ui show live details")
+        )
 
     # ------------------------------------------------------------------
     # the frozen roll's audition readout (Space on the captured roll)
@@ -358,6 +457,28 @@ class LivePage(QWidget):
     # ------------------------------------------------------------------
     # lifecycle the window drives
     # ------------------------------------------------------------------
+    def set_input_device_status(self, name: str, fell_back: bool = False) -> None:
+        """Name the input endpoint used by the current or next capture."""
+        self._input_device_name = name
+        self._input_device_fell_back = fell_back
+        key = "ui input device fallback" if fell_back else "ui input device active"
+        self.label_input_device.setText(tr(key).format(device=name))
+
+    def set_driver_effects(self, flagged: bool) -> None:
+        """Say whether the driver may have processed THIS capture.
+
+        The flag is page state and the sentence is named by KEY, so switching
+        language re-renders the same fact instead of keeping a stale string.
+        """
+        self._driver_effects = flagged
+        self._render_driver_effects()
+
+    def _render_driver_effects(self) -> None:
+        self.label_driver_effects.setText(
+            tr("ui input device effects") if self._driver_effects else ""
+        )
+        self.label_driver_effects.setVisible(self._driver_effects)
+
     def start_timer(self) -> None:
         self._timer.start()
 
@@ -400,6 +521,7 @@ class LivePage(QWidget):
         """
         self._reviewing = True
         self.btn_review_back.setVisible(True)
+        self.details_toggle.setChecked(True)
         self.label_status.setText(tr("ui live roll review"))
 
     def exit_review(self) -> None:
@@ -420,6 +542,7 @@ class LivePage(QWidget):
     def begin_take_render(self, *, notation: bool) -> None:
         """A starting take: the roll locked pick-less, in notation mode,
         the staff cleared — the window keeps the derived curve handle."""
+        self.details_toggle.setChecked(False)
         self.piano_live.set_selectable(False)  # a running take is never picked
         self.piano_live.begin_live()
         self.piano_live.set_notation_mode(notation)
@@ -477,6 +600,7 @@ class LivePage(QWidget):
         self._comparison_notes = None
         self._comparison_visible = True
         self.piano_live.clear_comparison()
+        self._set_input_state("ui mic waiting")
         self.accuracy.reset()
         self.intonation.reset()
         self.refresh_intonation()
@@ -528,10 +652,31 @@ class LivePage(QWidget):
         self._state().t = t
         self.live_indicator.update_rms(rms)
         self.level_meter.set_level(rms)
-        if self._state().heard_once:
+        state = self._state()
+        if state.heard_once:
+            if rms > self._gate_rms():
+                self._set_input_state("ui mic received")
+            elif state.silence_since is not None:
+                silent_for = t - state.silence_since
+                if silent_for >= LIVE_SILENCE_WARN_S:
+                    self._set_input_state("ui mic silence", s=int(silent_for))
             self.watch_silence(t, rms)  # the take has started: phrase gaps
         else:
+            if rms > self._gate_rms():
+                self._set_input_state("ui mic received")
+            else:
+                low_since = state.low_since
+                silent_for = t - low_since if low_since is not None else 0.0
+                if silent_for >= LIVE_LOW_LEVEL_WARN_S:
+                    self._set_input_state("ui mic low level", s=int(silent_for))
+                else:
+                    self._set_input_state("ui mic waiting")
             self.watch_low_level(t, rms)  # pre-take: name a weak mic early
+
+    def _set_input_state(self, key: str, **values: object) -> None:
+        self._input_state_key = key
+        self._input_state_values = values
+        self.live_indicator.set_input_state(key, **values)
 
     def watch_low_level(self, t: float, rms: float) -> None:
         """Name a mute or weak mic BEFORE the take starts (3 s under the gate).
@@ -690,5 +835,6 @@ class LivePage(QWidget):
 
     def on_failed(self, msg: str) -> None:
         self._timer.stop()
+        self._set_input_state("ui mic waiting")
         self.label_status.setText(tr("ui mic preparing"))
         self._silence_message(msg)  # the window's error surface (same route)

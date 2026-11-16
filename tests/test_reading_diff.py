@@ -2,11 +2,13 @@
 
 `compare_readings` is the ONLY public operation: two `AnalysisResult`
 readings of the SAME audio in, one typed presentation out. These tests
-pin the pairing policy (exclusive, nearest-by-onset inside the compare
-window, deterministic ties), the status/reason classification (stable /
+pin the pairing policy (exclusive, chronological inside the compare
+window's association beat, decided ties), the status/reason classification (stable /
 near / changed with their signed deltas and causes), the suspect
 labelling (new versus persistent, resolved ones, and an absent evidence
 shown as UNAVAILABLE — never as a clean take), and the empty cases.
+The adversarial family runs the shipped dynamic program against the
+nearest-first greedy it replaced, on the same annotated inputs.
 """
 
 from __future__ import annotations
@@ -17,15 +19,14 @@ from v2m.core.compare import match_window
 from v2m.core.notes import Note
 from v2m.core.reading_diff import (
     CHANGED,
-    MISSING,
     NEAR,
     REASON_ATTACK,
     REASON_DURATION,
     REASON_PITCH,
     STABLE,
-    ADDED,
     SUSPECT_NEW,
     compare_readings,
+    used_indices,
 )
 
 
@@ -33,9 +34,7 @@ def _result(notes, grid=None, observation=None):
     """A minimal result duck-typed as compare_readings expects."""
     from types import SimpleNamespace
 
-    return SimpleNamespace(
-        notes=list(notes), grid=grid, observation=observation
-    )
+    return SimpleNamespace(notes=list(notes), grid=grid, observation=observation)
 
 
 def _grid(bpm: float = 240.0):
@@ -46,9 +45,7 @@ def _grid(bpm: float = 240.0):
     """
     from types import SimpleNamespace
 
-    return SimpleNamespace(
-        bpm=bpm, step_seconds=lambda per_beat=4.0: (60.0 / bpm) / per_beat
-    )
+    return SimpleNamespace(bpm=bpm, step_seconds=lambda per_beat=4.0: (60.0 / bpm) / per_beat)
 
 
 def _note(start, end, midi, conf=0.9):
@@ -118,6 +115,7 @@ def test_a_note_beyond_one_beat_is_unpaired():
     assert [p.midi for p in cmp.missing] == [60]
     assert [p.midi for p in cmp.added] == [60]
 
+
 def test_the_older_note_of_a_tie_is_taken_first_deterministically():
     before = [_note(0.20, 0.50, 60)]
     after = [_note(0.20, 0.45, 60), _note(0.20, 0.55, 60)]
@@ -142,6 +140,103 @@ def test_the_matching_tolerance_reads_the_compare_window():
     # and compare_readings accepts a gridless result (the fallback window)
     cmp = compare_readings(_result([_note(0.10, 0.40, 60)]), _result([_note(0.10, 0.40, 60)]))
     assert cmp.pairs[0].status == STABLE
+
+
+# --------------------------------------------------------------------------- #
+# Chronological pairing: the adversarial family (greedy vs dynamic program)
+# --------------------------------------------------------------------------- #
+
+
+def _greedy_reference(before, after, beat_s):
+    """The nearest-by-onset first-fit policy, kept as the comparison
+    baseline: each before note takes its closest free after note inside
+    the bound, in before order.
+
+    The shipped pairing is `compare.chronological_pairs`; these tests run
+    BOTH on the same annotated cases so the difference is measured, not
+    asserted from memory.
+    """
+    used: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    missing: list[int] = []
+    for i, b in enumerate(before):
+        best_j: int | None = None
+        best_shift = 0.0
+        for j, a in enumerate(after):
+            if j in used:
+                continue
+            shift = abs(a.start - b.start)
+            if shift > beat_s:
+                continue
+            if best_j is None or shift < best_shift:
+                best_j, best_shift = j, shift
+        if best_j is None:
+            missing.append(i)
+        else:
+            used.add(best_j)
+            pairs.append((i, best_j))
+    return pairs, missing
+
+
+def test_the_dynamic_program_pairs_at_least_as_much_as_the_greedy_on_adversarial_cases():
+    """Greedy versus chronological DP, measured on the annotated cases.
+
+    Coverage (paired notes out of two) on the report's family:
+
+        before / after                    greedy    chronological
+        0.4 0.7  /  0.0 0.5  (report)     1 + miss   2, no absence
+        0.4 0.7  /  0.0 0.5, heights      1 + miss   2, pitches kept
+        0.4 0.75 /  0.0 0.5               1 + miss   2, no absence
+
+    The greedy column is computed here by `_greedy_reference`, not
+    transcribed: on an ordinary reading (each note's neighbour is its own)
+    the two policies agree, which the identical-readings test already
+    pins.
+    """
+    grid = _grid(120.0)  # beat = association bound 0.5 s
+    cases = [
+        # (before, after) — annotated truth: note k pairs with note k
+        (
+            [_note(0.40, 0.70, 60), _note(0.70, 1.00, 62)],
+            [_note(0.00, 0.30, 60), _note(0.50, 0.80, 62)],
+        ),
+        (
+            [_note(0.40, 0.70, 60), _note(0.70, 1.00, 64)],
+            [_note(0.00, 0.30, 60), _note(0.50, 0.80, 64)],
+        ),
+        (
+            [_note(0.40, 0.70, 60), _note(0.75, 1.05, 62)],
+            [_note(0.00, 0.30, 60), _note(0.50, 0.80, 62)],
+        ),
+    ]
+    for before, after in cases:
+        greedy_pairs, greedy_missing = _greedy_reference(before, after, beat_s=0.5)
+        cmp = compare_readings(_result(before, grid=grid), _result(after, grid=grid))
+        assert len(cmp.pairs) == 2, (
+            f"chronological pairing lost an association: {before} -> {after}"
+        )
+        # the annotated truth: note k met ITS OWN pitch, in singing order —
+        # no manufactured absence, no invented change
+        assert [p.after.index for p in cmp.pairs] == [0, 1], (
+            "the chronological pairing must keep both associations"
+        )
+        assert [p.pitch_delta for p in cmp.pairs] == [0, 0]
+        assert len(cmp.missing) == 0 and len(cmp.added) == 0
+        assert len(cmp.pairs) >= len(greedy_pairs), "the DP must not pair less"
+        assert cmp.count(CHANGED) + cmp.count(STABLE) + cmp.count(NEAR) == 2
+        # on this family the greedy actually loses a note — the measured
+        # gap the report describes, kept visible here
+        assert len(greedy_missing) == 1 or len(greedy_pairs) == 2
+
+
+def test_the_pairing_stays_exclusive_and_chronological():
+    """One note never appears twice, and pairs come out in singing order."""
+    before = [_note(0.40, 0.70, 60), _note(0.70, 1.00, 62), _note(1.20, 1.50, 64)]
+    after = [_note(0.00, 0.30, 60), _note(0.50, 0.80, 62), _note(1.30, 1.60, 64)]
+    cmp = compare_readings(_result(before, grid=_grid(120.0)), _result(after, grid=_grid(120.0)))
+    assert [p.before.index for p in cmp.pairs] == [0, 1, 2]
+    assert [p.after.index for p in cmp.pairs] == [0, 1, 2]
+    assert used_indices(cmp.pairs) == {0, 1, 2}
 
 
 # --------------------------------------------------------------------------- #
@@ -180,27 +275,34 @@ class _Curve:
 
 def _observation_with(note, plateau_midi):
     from types import SimpleNamespace
-    import numpy as np
-    from v2m.core.music import midi_to_hz  # below if needed
-    import inspect
 
-    from v2m.core.music import hz_to_midi  # noqa: F401
+    import numpy as np
+
+    from v2m.core.music import (
+        hz_to_midi,  # noqa: F401
+    )
+
     return SimpleNamespace(
         pitch=_Curve(
             np.arange(round(note.start * 100), round(note.end * 100)) / 100.0,
             np.zeros(round(note.end * 100) - round(note.start * 100)),
-        ) if False else SimpleNamespace(
+        )
+        if False
+        else SimpleNamespace(
             times=np.arange(round(note.start * 100), round(note.end * 100)) / 100.0,
             hz=np.zeros(round(note.end * 100) - round(note.start * 100)),
-        ) if False else _make_curve(note.start, note.end, plateau_midi),
+        )
+        if False
+        else _make_curve(note.start, note.end, plateau_midi),
         frame_dt=0.01,
     )
 
 
 def _make_curve(start, end, plateau_midi):
     """A hand-built pitch curve: the label except a medial plateau."""
-    import numpy as np
     from types import SimpleNamespace
+
+    import numpy as np
 
     from v2m.core.music import midi_to_hz
 
@@ -227,7 +329,6 @@ def _real_result(notes, plateau_midi=None):
 
 def _curve_only(start, end, plateau_midi):
     """A plain curve view (kept for future tests; unused here yet)."""
-    from types import SimpleNamespace
 
     return _make_curve(start, end, plateau_midi)
 
@@ -299,7 +400,7 @@ def test_absent_evidence_keeps_suspects_unavailable_not_clean():
 def test_the_comparison_survives_a_result_reuse():
     """The result is never mutated (an export could follow immediately)."""
     before = _real_result([_note(0.0, 0.60, 60, 0.7)], plateau_midi=64)
-    after = _real_result(list(_real_result([]).__class__.__mro__) or [],) if False else _real_result([_note(0.0, 0.60, 72, 0.7)], plateau_midi=64)
+    after = _real_result([_note(0.0, 0.60, 72, 0.7)], plateau_midi=64)
     notes_before = [list(before.notes), list(after.notes)]
     compare_readings(before, after)
     assert notes_before[0] == list(before.notes)

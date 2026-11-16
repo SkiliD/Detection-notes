@@ -1,0 +1,1117 @@
+/* A take, set like a printed page: a night band for the title, cream paper for
+   the reading, copper only where something is acted on.
+
+   The shell is FLAT — hairlines between sections, square corners, no card, no
+   shadow, no glow. A page about a voice is a sheet of paper; a stack of rounded
+   panels with soft lifts is what makes a tool look assembled rather than drawn.
+   Depth comes from one lit top edge on a control — the same bevel the desktop
+   uses — and from the frame around the roll, which is the only surface that is
+   an instrument.
+
+   These tokens are the page's OWN: the desktop palette is an identity to match
+   by eye, not a table to copy. No light token equals a `gui.widgets` colour,
+   and the few night values that coincide (`--paper`/`--ink` with BG_APP/TEXT)
+   were matched by hand under different names and roles, so nothing here is
+   generated from Python — unlike `constants.js`. */
+
+:root {
+  --night: #131a27;
+  --ivory: #f7f0e1;
+  --deck-ink: #cfc4b1;
+  --paper: #f8f1e3;
+  --ink: #1d2430;
+  /* Deep enough for the worst row, not just bare paper: a playing row washes
+     the row with a 14% copper tint, and the old #6f6656 fell to 4.29:1 there. */
+  --muted: #655c4d;
+  --rule: #e3d6bd;
+  --rule-strong: #cdb894;
+  /* The boundary of the roll's FRAME, a seek surface rather than a decorative
+     hairline: 3.14:1 on the paper and 5.1:1 on the night band. A button takes
+     no stroke at all — its FILL is the boundary, see `--button`. */
+  --control-edge: #a0845a;
+  --copper: #b06b34;
+  --copper-deep: #8a4f24;
+  /* The intonation scale, at the desktop's own bands (< 10 cents, < 25,
+     beyond). The desktop paints them as fills; here they are 13 px text on
+     paper, so the same green / amber / red are deepened to stay legible. */
+  /* The verdicts are read on rows, not on paper: the zebra and playing washes
+     darken the row, so these are deepened to stay above 4.5:1 on a playing row
+     (the old three read 3.92, 4.27 and 4.48 there — a green that only looked
+     just-tuned because the page was light). */
+  --tune-ok: #3d6449;
+  --tune-near: #7d5416;
+  --tune-off: #8a4a38;
+  /* Surfaces a theme must repaint: a control's fill, the one plate the page
+     asks the singer to press, the meter's trough, the copper wash that marks a
+     row or a margin note. */
+  /* A secondary control is a FILLED field, never an outlined one: a 1 px tan
+     line over cream reads as a drawn box, while a printed form shades its
+     fields. WCAG 1.4.11 asks the fill for 3:1 against the paper, and the label
+     needs 4.5:1 on that fill — the two floors nearly meet: 3:1 on #f8f1e3 pins
+     the fill to a 4 % luminance band (L 0.2506-0.2613). #9d8963 reads 3.02:1
+     with the ink at 4.60:1, so the hover may deepen only ONE step (#9c8862,
+     3.06 / 4.54): anything further breaks the label, and an outlined hover
+     would re-draw the very line this replaced. */
+  --button: #9d8963;
+  --button-hover: #9c8862;
+  /* The masthead pills sit on the night BAND in both palettes, so one fill
+     answers to that band — and it stays in the warm family rather than
+     importing a blue-grey chip onto a copper page: 3.12:1 on #131a27 (3.38 on
+     the darker #0b111c) with the ivory label at 4.88:1; hover 3.32 / 4.59. */
+  --link-fill: #75664a;
+  --link-fill-hover: #7a6a4c;
+  /* An INACTIVE control keeps its field and loses its ink: the field goes quiet
+     (1.17:1 on the paper — WCAG 1.4.11 exempts inactive components) while the
+     label stays a readable WORD at 5.73:1. Fading the whole control to 45 %
+     left the label at 1.71:1 over the washed field — a smudge, not a word. */
+  --button-off: #ecdfc4;
+  --button-off-ink: #5c5344;
+  --plate: #a4622b;
+  --plate-hover: #8f5626;
+  --plate-ink: #fff8ec;
+  --meter-track: #ece0c8;
+  --slider-from: #d9c7a6;
+  --zebra: rgba(176, 107, 52, 0.035);
+  --zebra-hover: rgba(176, 107, 52, 0.075);
+  --playing-tint: rgba(176, 107, 52, 0.14);
+  --hint-rule: rgba(176, 107, 52, 0.3);
+  /* The roll paints itself on a canvas, so its colours live here too: the two
+     themes can then never drift apart from the page they sit on. */
+  --roll-bg: #fffdf7;
+  --roll-lane: rgba(29, 36, 48, 0.055);
+  --roll-grid: rgba(29, 36, 48, 0.07);
+  --roll-rule: rgba(176, 107, 52, 0.3);
+  /* Words the canvas paints — octave labels, second marks — are invisible to
+     every automated check, so they are measured here by hand over the roll's
+     own background (#fffdf7, and a black key's lane over it): the previous
+     0.85 and 0.6 washes read 4.24:1 and 2.36:1, the second marks being the
+     least readable words on the page. Opaque, they read 5.77 and 6.31. */
+  --roll-label: #8a4f24;
+  --roll-time: #5f5749;
+  --roll-bar: rgba(176, 107, 52, 0.86);
+  --roll-bar-preview: rgba(176, 107, 52, 0.28);
+  --roll-bar-now: #8a4f24;
+  --roll-glint: rgba(255, 246, 232, 0.42);
+  --roll-outline: #1d2430;
+  --roll-playhead: #8a4f24;
+  --roll-playhead-glow: rgba(138, 79, 36, 0.45);
+  --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+
+/* Night & copper: the desktop's palette, on the page. Nothing below is a tint
+   of the paper palette — a dark mode built by inverting its colours reads blue
+   and cold, and the point is the same studio after dark. */
+[data-theme="dark"] {
+  --night: #0b111c;
+  --ivory: #f4efe6;
+  --deck-ink: #cfc4b1;
+  --paper: #111827;
+  --ink: #f4efe6;
+  --muted: #c2bbad;
+  --rule: #3a332b;
+  --rule-strong: #7a6749;
+  /* The warm rule already clears 3:1 on night paper (3.26); kept as its own
+     name so both palettes answer the same question. */
+  --control-edge: #7a6749;
+  --copper: #d9a76c;
+  --copper-deep: #e9c99b;
+  /* The verdicts must stay legible on night blue, not only on paper: the same
+     three meanings, lightened just enough to sit at 13 px. */
+  --tune-ok: #8fbfa0;
+  --tune-near: #e0b96b;
+  --tune-off: #e2907f;
+  /* The same warm field on darker paper — 3.17:1 on #111827 with the ivory
+     label at 4.88:1 (hover 3.37 / 4.59) — because a blue-grey control reads as
+     a chip borrowed from another page; this is the pill's own tan, so a
+     control is the same material in both palettes. */
+  --button: #75664a;
+  --button-hover: #7a6a4c;
+  /* The same pair on night paper: a quiet field (1.33:1) whose label, the
+     page's dim text, still reads at 6.98:1. */
+  --button-off: #26303f;
+  --button-off-ink: #c2bbad;
+  --plate: #a4622b;
+  /* Hover DEEPENS the plate in both palettes: a lighter copper puts the ivory
+     label under 4.5:1 (measured 3.98 on #b06b34). */
+  --plate-hover: #96582a;
+  --plate-ink: #fff8ec;
+  --meter-track: #243040;
+  --slider-from: #2b3646;
+  --zebra: rgba(217, 167, 108, 0.06);
+  --zebra-hover: rgba(217, 167, 108, 0.11);
+  --playing-tint: rgba(217, 167, 108, 0.14);
+  --hint-rule: rgba(217, 167, 108, 0.34);
+  --roll-bg: #161f2c;
+  /* Black keys go DARKER on a dark roll, never lighter: the lane cue is what
+     makes a contour readable without counting rows. */
+  --roll-lane: rgba(0, 0, 0, 0.22);
+  --roll-grid: rgba(244, 239, 230, 0.06);
+  --roll-rule: rgba(217, 167, 108, 0.32);
+  --roll-label: rgba(233, 201, 155, 0.9);
+  /* 0.55 read 4.1:1 on the night roll; 0.7 reads 5.5. */
+  --roll-time: rgba(201, 194, 179, 0.7);
+  --roll-bar: rgba(217, 167, 108, 0.9);
+  --roll-bar-preview: rgba(217, 167, 108, 0.3);
+  --roll-bar-now: #f2dcbc;
+  --roll-glint: rgba(255, 250, 240, 0.35);
+  --roll-outline: #0b111c;
+  --roll-playhead: #e9c99b;
+  --roll-playhead-glow: rgba(233, 201, 155, 0.45);
+  --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The measure: a page of text has one, and at 720 px the roll and its own hints
+   never sit on opposite shores. A WIDE window is the one exception this used to
+   deny — held at 720 px on a 1600 px screen, the column became a ribbon with its
+   masthead rule and its notes row answering nothing, so the measure grows with
+   the window past 1000 px. Only the MEASURE grows: every block made of prose
+   keeps its own `ch` limit below, so no line of text stretches with it. */
+:root {
+  --measure: 720px;
+  --measure-wide: 1040px;
+}
+
+.wrap {
+  width: min(var(--measure), calc(100% - 44px));
+  margin: 0 auto;
+}
+
+@media (min-width: 1000px) {
+  .wrap {
+    width: min(var(--measure-wide), calc(100% - 72px));
+  }
+
+  /* A level meter is a gauge: stretched to the wide column it became a 900 px
+     hairline floating under an empty readout, longer than anything it
+     measures. Only here, where it was one: at the narrow measure the bar
+     spanning the column is what the readout looks like. */
+  .meter {
+    max-width: 420px;
+  }
+}
+
+/* ---------------------------------------------------------------- masthead */
+
+.masthead {
+  padding: 46px 0 30px;
+  background: var(--night);
+  color: var(--ivory);
+  border-bottom: 2px solid var(--copper);
+}
+
+.masthead .wrap {
+  position: relative;
+}
+
+h1 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(32px, 5.4vw, 44px);
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -0.012em;
+}
+
+.deck {
+  margin: 14px 0 0;
+  max-width: 46ch;
+  color: var(--deck-ink);
+}
+
+/* The two pills — appearance and language — share one corner, so neither can
+   drift onto the title. Square, like everything else. */
+.tools {
+  position: absolute;
+  top: 3px;
+  right: 0;
+  display: flex;
+  gap: 6px;
+}
+
+.link {
+  /* No stroke: the fill is the boundary (3:1 against the night band), and the
+     label is ivory rather than the deck's grey, which the fill no longer
+     carries at 4.5:1. */
+  border: 0;
+  border-radius: 2px;
+  background: var(--link-fill);
+  color: var(--ivory);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: background-color 90ms ease;
+}
+
+.link:hover,
+.link:focus-visible {
+  background: var(--link-fill-hover);
+}
+
+/* ---------------------------------------------------------------- sections */
+
+section {
+  padding: 28px 0 30px;
+  border-top: 1px solid var(--rule);
+}
+
+main > section:first-of-type {
+  border-top: 0;
+  padding-top: 24px;
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 400;
+  letter-spacing: 0.002em;
+}
+
+/* --------------------------------------------------------------- transport */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+button {
+  border: 0;
+  border-radius: 2px;
+  background: var(--button);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 15px;
+  cursor: pointer;
+  /* The bevel: one lit line on top, so a press is felt. No gradient, and no
+     shadow around the control — a floating card is not a button. */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  /* background-color, not the shorthand: the shorthand is not animatable, so
+     the hover would jump instead of settling. */
+  transition: background-color 90ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--button-hover);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+button:focus-visible,
+.link:focus-visible,
+.file input:focus-visible + span,
+.balance-reset:focus-visible,
+input[type="range"]:focus-visible {
+  outline: 2px solid var(--copper);
+  outline-offset: 2px;
+}
+
+/* The one plate the page asks the singer to press: flat copper, ivory label,
+   and the SAME shape as every other control — a primary action is not a bigger
+   pill, it is the only filled one. */
+button.primary {
+  background: var(--plate);
+  color: var(--plate-ink);
+  font-weight: 500;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--plate-hover);
+}
+
+/* An inactive control keeps its FIELD and drops its ink — it does not fade
+   away. At 45 % the label became a smudge on a washed field; now the surface is
+   deliberately quiet and the word on it stays a word (measured in
+   `test_a_disabled_field_keeps_its_label_readable`). No stroke comes back: the
+   fill is still the boundary. */
+button:disabled {
+  background: var(--button-off);
+  color: var(--button-off-ink);
+  cursor: default;
+  box-shadow: none;
+}
+
+.file input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+/* Reading a file is a way OUT of the take, so it is a link, not a fifth
+   button competing with the plate. */
+.file span {
+  display: inline-block;
+  padding: 8px 2px;
+  color: var(--copper-deep);
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--hint-rule);
+  text-underline-offset: 4px;
+}
+
+.file span:hover {
+  text-decoration-color: var(--copper);
+}
+
+/* A margin note in the reading, not a caption inside a box. */
+.status {
+  margin: 14px 0 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--hint-rule);
+  color: var(--muted);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 14px;
+}
+
+/* ------------------------------------------------------------------- tuner */
+
+.readout {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.note {
+  margin: 0;
+  min-width: 2.9ch;
+  /* The slot keeps its height while empty: the readout must not jump the page
+     when the first note arrives. */
+  min-height: 1em;
+  font-family: var(--serif);
+  font-size: 52px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--copper-deep);
+}
+
+.hz {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.meter {
+  flex: 1;
+  height: 5px;
+  background: var(--meter-track);
+  overflow: hidden;
+}
+
+/* A level meter, not a measurement: one flat copper bar, no glow, and never
+   the verdict colours — those belong to the cents column. */
+.meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--copper);
+  transition: width 80ms linear;
+}
+
+/* -------------------------------------------------------------------- roll */
+
+/* The roll is the page's instrument: a thin rule around it, the way a printed
+   example is boxed, and nothing else. It is also a seek surface, so its frame
+   is a control boundary (3:1), not a decorative hairline. */
+.roll-frame {
+  padding: 8px;
+  border: 1px solid var(--control-edge);
+  border-radius: 2px;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 220px;
+  border-radius: 1px;
+  background: var(--roll-bg);
+}
+
+/* The roll is a seek surface once there is something to hear; before that a
+   pointer cursor would promise an action that does nothing. */
+canvas.seekable {
+  cursor: pointer;
+}
+
+/* The playback clock: muted, tabular, only while something is sounding. */
+.roll-clock {
+  display: flex;
+  gap: 8px;
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.roll-clock[hidden] {
+  display: none;
+}
+
+.clock-sep {
+  color: var(--copper);
+}
+
+/* The shortcut hints: a margin note beside the roll, never a legend block. */
+.hints {
+  display: grid;
+  gap: 2px;
+  margin: 12px 0 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--hint-rule);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.hints p {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------- notes */
+
+.notes-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.notes-head h2 {
+  margin-bottom: 0;
+}
+
+.notes-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Voice / piano balance: a small mixer strip drawn as one quiet line. */
+.balance-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* WCAG 2.2 AA (2.5.8): a pointer target is at least 24 px. The box used to BE
+   the 6 px track, so the only thing a thumb could grab was that strip; the
+   target is now 24 px tall with the same thin line drawn inside it. */
+.balance-row input[type="range"] {
+  width: 180px;
+  height: 24px;
+  appearance: none;
+  background: transparent;
+  accent-color: var(--copper);
+  cursor: pointer;
+}
+
+.balance-row input[type="range"]::-webkit-slider-runnable-track {
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--slider-from), var(--copper));
+  box-shadow: inset 0 1px 2px rgba(72, 50, 24, 0.2);
+}
+
+.balance-row input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--slider-from), var(--copper));
+  box-shadow: inset 0 1px 2px rgba(72, 50, 24, 0.2);
+}
+
+/* The knob is solid copper on a tan-to-copper track, with a paper ring: the
+   thumb itself clears 3:1 against the light end of the track (3.25) and the
+   ring clears it against the copper end, so the slider stays identifiable
+   wherever it sits (WCAG 1.4.11 — a pale knob on a pale track reads as one
+   continuous bar). */
+.balance-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  /* centred on the 6 px track inside the 24 px target */
+  margin-top: -6px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--plate);
+  box-shadow: 0 0 0 2px var(--paper), 0 1px 3px rgba(90, 60, 30, 0.32);
+}
+
+.balance-row input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--plate);
+  box-shadow: 0 0 0 2px var(--paper), 0 1px 3px rgba(90, 60, 30, 0.32);
+}
+
+.balance-row input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* One gesture back to the reference: a 5-cent step makes the exact middle a
+   fine-motor task the default should not require. Quiet, underlined text so
+   it never competes with the slider it corrects. */
+.balance-reset {
+  /* WCAG 2.2 AA (2.5.8): bare underlined text is 18 px tall, and 11 px type is
+     not a target a thumb can find; the box is 24 px while the word keeps its
+     quiet look. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.balance-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The notes list keeps its six columns readable instead of squeezing them:
+   on a narrow screen the list scrolls sideways, the page never does. */
+.table-scroll {
+  margin-top: 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* A sideways-scrolling region is reachable with the KEYBOARD or not at all:
+   `tabindex="0"` puts it in the tab chain (axe's `scrollable-region-focusable`),
+   and the ring says which box the arrows will move. */
+.table-scroll:focus-visible {
+  outline: 2px solid var(--copper);
+  outline-offset: 2px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 7px 10px 7px 0;
+  font-weight: 400;
+}
+
+th {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--rule-strong);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+td {
+  border-bottom: 1px solid var(--rule);
+}
+
+tbody tr:nth-child(even) td {
+  background: var(--zebra);
+}
+
+tbody tr:hover td {
+  background: var(--zebra-hover);
+}
+
+/* The row's number in the display face: the list reads like a programme, not
+   like a data dump. */
+td:first-child {
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--muted);
+  width: 3ch;
+}
+
+td.doubt {
+  color: var(--copper);
+}
+
+td.cents-ok {
+  color: var(--tune-ok);
+}
+
+td.cents-near {
+  color: var(--tune-near);
+}
+
+td.cents-off {
+  color: var(--tune-off);
+}
+
+/* On the wide page the table spans six columns of ~170 px, and a figure set
+   against the left edge of a column that wide sits nearer the NEXT column's
+   header than its own: the numbers — row number, start, duration, cents — are
+   set flush right, headers included, so two start times are compared by their
+   last digit instead of hunted across the sheet. The two text columns (the
+   note's name and a possible doubt) keep their reading edge. The right padding
+   is the column's own gap, since a right-aligned cell has none of the left
+   padding that separates the others. */
+@media (min-width: 1000px) {
+  th:nth-child(1),
+  td:nth-child(1),
+  th:nth-child(2),
+  td:nth-child(2),
+  th:nth-child(3),
+  td:nth-child(3),
+  th:nth-child(5),
+  td:nth-child(5) {
+    text-align: right;
+    padding-right: 20px;
+  }
+}
+
+/* The take's intonation, one quiet line: a summary under the table it
+   summarises, never a panel competing with it. */
+.intonation {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 14px;
+}
+
+/* The row of the note being heard: a copper edge and a wash, so the eye can
+   follow the list while the ear follows the roll. */
+tr.playing td {
+  background: var(--playing-tint);
+}
+
+tr.playing td:first-child {
+  box-shadow: inset 2px 0 0 var(--copper);
+  color: var(--copper-deep);
+}
+
+tr.playing td:nth-child(4) {
+  color: var(--copper-deep);
+}
+
+/* The colophon: what the page can hear, what the computer adds, and that the
+   recording never leaves the machine. Two short paragraphs, one measure. */
+.fineprint {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 13.5px;
+  line-height: 1.6;
+  max-width: 66ch;
+}
+
+/* The tutorial: one summary line, the steps behind it. It is a printed
+   instruction sheet, so it keeps the paper's voice — a serif heading, muted
+   body, numbered steps — rather than becoming a panel with a coloured badge. */
+.guide {
+  margin: 0 0 10px;
+  padding: 14px 0 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.guide > summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--serif);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.guide > summary::marker {
+  color: var(--copper);
+}
+
+.guide > summary:hover {
+  color: var(--copper-deep);
+}
+
+.guide[open] > summary {
+  margin-bottom: 10px;
+}
+
+.guide-steps {
+  margin: 0 0 12px;
+  padding-left: 22px;
+  max-width: 64ch;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.guide-steps li + li {
+  margin-top: 8px;
+}
+
+/* The tutorial's entrance to the demo: a text link on the PAPER, never the
+   masthead pill — that fill is drawn for the night band and reads as a badge
+   inside a printed instruction sheet. 24 px tall for WCAG 2.2's pointer
+   target, while the word keeps the paragraph's own size. */
+.guide-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  margin-left: 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--ink);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--hint-rule);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.guide-link:hover,
+.guide-link:focus-visible {
+  text-decoration-color: var(--copper);
+}
+
+.guide-link:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.guide-print {
+  margin: 10px 0 0;
+}
+
+.guide-print .guide-link {
+  margin-left: 0;
+}
+
+/* The steps are read on the paper, so their numbers take the ink, not copper:
+   copper already means "press this" on every control of the page. */
+.guide-steps li::marker {
+  color: var(--ink);
+}
+
+/* On the wide page the tutorial would be a strip of text hugging a quarter of a
+   1040 px rule: the five steps flow into two columns, each keeping a reading
+   measure, so the block fills the sheet it is drawn on. `break-inside: avoid`
+   because a step split across the fold is read twice or not at all. */
+@media (min-width: 1000px) {
+  .guide-steps {
+    max-width: none;
+    columns: 2;
+    column-gap: 56px;
+  }
+
+  .guide-steps li {
+    break-inside: avoid;
+  }
+}
+
+.footer {
+  margin-top: 8px;
+  padding: 24px 0 40px;
+  border-top: 1px solid var(--rule);
+}
+
+.footer .fineprint + .fineprint {
+  margin-top: 12px;
+}
+
+/* ------------------------------------------------------------------ narrow */
+
+@media (max-width: 620px) {
+  .masthead {
+    padding: 40px 0 26px;
+  }
+
+  /* The pills leave their corner on a narrow screen: overlapping the title is
+     how they read before, and a header is a column there anyway. */
+  .tools {
+    position: static;
+    margin-top: 16px;
+  }
+
+  section {
+    padding: 24px 0 26px;
+  }
+
+  .readout {
+    flex-wrap: wrap;
+    gap: 12px 16px;
+  }
+
+  .note {
+    font-size: 40px;
+  }
+
+  .wrap {
+    width: calc(100% - 28px);
+  }
+
+  .balance-row input[type="range"] {
+    flex: 1 1 140px;
+    width: auto;
+  }
+
+  .notes-actions {
+    width: 100%;
+  }
+
+  .notes-actions button {
+    flex: 1 1 auto;
+  }
+}
+
+/* A phone held SIDEWAYS. This is a height problem, not a width one: at
+   812 x 375 the widest phone in landscape spent 190 px of a 375 px window on
+   the masthead — half the screen before the first control — and a 640 x 360
+   window left only the title and the tutorial above the fold. The header is
+   trimmed instead of scrolled past; the deck and the pills stay, smaller. */
+@media (max-height: 480px) {
+  .masthead {
+    padding: 20px 0 16px;
+  }
+
+  .masthead h1 {
+    font-size: 30px;
+  }
+
+  .deck {
+    margin-top: 8px;
+    font-size: 14px;
+  }
+
+  section {
+    padding: 18px 0 20px;
+  }
+
+  .guide {
+    padding: 10px 0 12px;
+  }
+}
+
+/* The page's one motion is a control settling under the pointer. A reader who
+   asked the system for less motion gets none of it — and the painting, the
+   playhead and the meter are canvas frames, not transitions, so nothing they
+   rely on stops. */
+@media (prefers-reduced-motion: reduce) {
+  button,
+  .link {
+    transition: none;
+  }
+}
+
+@media (max-width: 420px) {
+  h1 {
+    font-size: 30px;
+  }
+
+  .deck {
+    font-size: 15px;
+  }
+
+  .note {
+    font-size: 34px;
+  }
+
+  .actions button {
+    flex: 1 1 auto;
+  }
+
+  .file span {
+    flex: 1 1 100%;
+    padding-left: 2px;
+  }
+}
+
+/* ----------------------------------------------------------------- printing */
+
+/* The page as a SHEET, to be taken beside the microphone: everything a printed
+   page can still do — the tutorial, the notes of the take and the sentence that
+   sums them up — and nothing that needs a pointer, a microphone or a speaker,
+   because a button on paper is a promise nothing keeps. The palette is forced
+   back to black on white whatever the screen shows: the night theme's ivory on
+   navy prints as a dark smear and asks a printer to lay down a background. The
+   tutorial is opened for the printer by `listenForPrint` in app.js, since its
+   steps are the reason to print while the screen keeps them folded. */
+@media print {
+  :root,
+  [data-theme="dark"] {
+    --paper: #fff;
+    --ink: #000;
+    --ivory: #000;
+    --deck-ink: #222;
+    --muted: #333;
+    --rule: #bbb;
+    --rule-strong: #888;
+    --copper: #6b3d18;
+    --copper-deep: #4a2a10;
+    --zebra: transparent;
+    --zebra-hover: transparent;
+    --playing-tint: transparent;
+    --hint-rule: #999;
+    color-scheme: light;
+  }
+
+  /* A printed page has no viewport to scroll: the margins are the sheet's. */
+  @page {
+    margin: 15mm 14mm;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+    font-size: 11pt;
+  }
+
+  /* One column: the measure exists to keep a line readable in a window, and a
+     sheet is already that narrow. */
+  .wrap {
+    width: auto;
+    max-width: none;
+    margin: 0;
+  }
+
+  /* The masthead becomes the sheet's title block: the same rule, no band. */
+  .masthead {
+    padding: 0 0 10pt;
+    background: none;
+    color: #000;
+    border-bottom: 1.5pt solid #000;
+  }
+
+  h1 {
+    font-size: 22pt;
+  }
+
+  .deck {
+    margin-top: 6pt;
+    color: #222;
+  }
+
+  /* The live half of the page: a microphone, a file picker, a player and a
+     graph that repaints itself — none of it survives paper, and printing an
+     empty table of buttons would bury what does. */
+  .tools,
+  /* The whole capture section: with its buttons and its status line gone it
+     would print as an empty heading. */
+  .take,
+  .readout,
+  .roll-section,
+  .hints,
+  .notes-actions,
+  .balance-row,
+  #empty,
+  /* Both tutorial controls are links on the sheet: the demo entrance inside
+     step one and the print line under the steps. */
+  .guide-link,
+  .guide-print {
+    display: none;
+  }
+
+  section {
+    padding: 10pt 0;
+    border-top: 1pt solid #bbb;
+  }
+
+  h2 {
+    font-size: 13pt;
+    break-after: avoid;
+  }
+
+  /* The tutorial prints as it reads: one column, its heading attached to its
+     steps, and no step split across the fold. */
+  .guide {
+    padding: 0 0 8pt;
+    border-bottom: 1pt solid #bbb;
+  }
+
+  .guide > summary {
+    margin-bottom: 6pt;
+    color: #000;
+    font-size: 13pt;
+  }
+
+  .guide-steps {
+    max-width: none;
+    font-size: 10.5pt;
+    line-height: 1.45;
+  }
+
+  .guide-steps li,
+  tr {
+    break-inside: avoid;
+  }
+
+  /* The table is what a singer carries to the microphone: a rule under every
+     row, and the header repeated on each page it spans. */
+  .table-scroll {
+    overflow: visible;
+  }
+
+  table {
+    font-size: 10.5pt;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  th,
+  td {
+    padding: 4pt 8pt 4pt 0;
+    border-bottom: 0.5pt solid #999;
+  }
+
+  th {
+    color: #000;
+  }
+
+  .intonation,
+  .fineprint {
+    color: #222;
+    font-size: 10pt;
+  }
+
+  .footer {
+    margin-top: 0;
+    padding: 8pt 0 0;
+    border-top: 1pt solid #bbb;
+  }
+}

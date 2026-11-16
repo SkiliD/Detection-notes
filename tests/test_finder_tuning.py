@@ -1,8 +1,7 @@
 """The note finder says whether the sung note is in tune or off.
 
-The finder used to name the note and light its key but never said whether
-the pitch SAT on that note. Now a tuning needle plus a named advice line
-sit under the big name, on the same cents scale the report uses
+A tuning needle and named advice line sit under the note name, using the
+same cents scale as the report
 (`tuning_advice` / `tuning_color`, one shared vocabulary), driven by the
 same reading that names the note.
 """
@@ -73,21 +72,56 @@ def test_tuning_advice_reads_the_shared_scale(qapp):
     assert tr("ui tuning flat") in tuning_advice(-40.0)
 
 
-def test_set_tuning_shows_a_needle_and_a_colored_verdict(qapp):
-    """The widget names the deviation and paints the verdict's color."""
-    from v2m.gui.widgets import MATCH_COLOR, MISMATCH_COLOR, tuning_color
+def test_clear_tuning_advice_reports_direction_and_measured_cents(qapp):
+    """The strong correction names the measured deviation without guessing why."""
+    from v2m.core.i18n import get_language, set_language, tr
+    from v2m.gui.widgets import tuning_advice
+
+    previous = get_language()
+    try:
+        set_language("fr")
+        assert tuning_advice(40.0) == tr("ui tuning off").format(
+            dir=tr("ui tuning sharp"), cents=40.0
+        )
+        assert "40 c" in tuning_advice(40.0)
+        assert tuning_advice(-40.0) == tr("ui tuning off").format(
+            dir=tr("ui tuning flat"), cents=-40.0
+        )
+        assert "détendez" not in tuning_advice(40.0)
+
+        set_language("en")
+        assert tuning_advice(40.0) == tr("ui tuning off").format(
+            dir=tr("ui tuning sharp"), cents=40.0
+        )
+        assert "40 c" in tuning_advice(40.0)
+        assert "relax" not in tuning_advice(40.0)
+    finally:
+        set_language(previous)
+
+
+def test_set_tuning_names_the_verdict_and_keeps_a_colored_meter(qapp):
+    """The text answers just/off; the needle retains the shared cents scale."""
+    from v2m.core.i18n import tr
+    from v2m.gui.widgets import (
+        MATCH_COLOR,
+        MISMATCH_COLOR,
+        TEXT,
+        tuning_advice,
+        tuning_color,
+    )
 
     page = _page()
     try:
         page.set_tuning(3.0)
+        assert tr("ui tuning ok") in page.label_tuning.text()
         assert "¢" in page.label_tuning.text()
-        assert "rgb(" in page.label_tuning.styleSheet()
+        assert TEXT in page.label_tuning.styleSheet()
         assert page.tuning._cents == 3.0
 
         page.set_tuning(60.0)
-        r, g, b = MISMATCH_COLOR
-        assert f"rgb({r}, {g}, {b})" in page.label_tuning.styleSheet()
-        assert (r, g, b) == tuning_color(60.0)
+        assert tuning_advice(60.0) in page.label_tuning.text()
+        assert TEXT in page.label_tuning.styleSheet()
+        assert tuning_color(60.0) == MISMATCH_COLOR
         assert page.tuning._cents == 50.0  # the meter clamps to its ±50 rail
 
         page.set_tuning(None)
@@ -102,7 +136,8 @@ def test_the_tuning_follows_the_note_being_sung(qapp, monkeypatch):
     """`_on_note` derives the verdict from the same reading it names."""
     page = _page()
     monkeypatch.setattr(
-        page, "_thread",
+        page,
+        "_thread",
         _FakeThread(_FakeSegmenter(confirmed=(60.0, 261.6), heard=(60.0, 261.6))),
     )
     try:

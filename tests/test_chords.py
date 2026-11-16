@@ -27,7 +27,6 @@ def _chord_notes(midi_weights: dict[int, float]) -> list[Note]:
 
 
 def test_major_triad_recognized():
-    notes = _chord_notes({60: 1.0, 64: 1.0, 67: 1.0})  # C4 E4 G4
     res = _chord({60: 1.0, 64: 1.0, 67: 1.0})
     assert res.best.label == "C"
     assert res.best.score > 0.9
@@ -102,9 +101,35 @@ def test_segments_are_adjacent_windows_not_overlapping_ones():
     segs = detect_chord_segments(notes, segment_s=2.0)
 
     assert [(t0, t1) for t0, t1, _ in segs] == [(0.0, 2.0), (2.0, 3.95)]
-    for (t0, t1, _), (n0, _, _) in zip(segs, segs[1:]):
+    for (t0, t1, _), (n0, _, _) in zip(segs[:-1], segs[1:], strict=True):
         assert n0 == t1, "les fenêtres doivent se toucher, jamais se recouvrir"
         assert t1 - t0 == 2.0
+
+
+def test_window_weights_only_the_sounding_intersection(monkeypatch):
+    from v2m.core import chords
+
+    notes = [
+        Note(start=0.0, end=2.01, midi=60, confidence=0.9),
+        Note(start=2.1, end=2.5, midi=64, confidence=0.9),
+        Note(start=2.6, end=3.0, midi=67, confidence=0.9),
+    ]
+    histograms = []
+    real_classify = chords._classify
+
+    def classify(histogram, window, top_k):
+        histograms.append(histogram.copy())
+        return real_classify(histogram, window, top_k)
+
+    monkeypatch.setattr(chords, "_classify", classify)
+    result = detect_chord_segments(notes)
+    assert abs(histograms[0][0] - 0.01) < 1e-9
+    assert abs(histograms[0][4] - 0.4) < 1e-9
+    original = [(note.start, note.end) for note in notes]
+    # Extending the part before this window cannot change its weights.
+    notes[0].start = -4.0
+    assert detect_chord_segments(notes) == result
+    assert [(note.start, note.end) for note in notes[1:]] == original[1:]
 
 
 def test_segments_empty_for_short_input():

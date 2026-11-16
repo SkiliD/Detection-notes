@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import signal
 import sys
 import time
@@ -19,12 +21,23 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import audio_io
+from ..core import audio_io, driver_fx
 from ..core.audio_io import LiveCapture
 from ..core.compare import invalidate as invalidate_breakdown
 from ..core.compare import match as compare_match
 from ..core.continuity import coherence_report
-from ..core.edits import EditHistory, EditMove, EditState, delete_notes, snapshot_state
+from ..core.edits import (
+    CorrectPitchIntent,
+    DeleteNotesIntent,
+    EditHistory,
+    EditMove,
+    EditOutcome,
+    EditState,
+    MoveNoteIntent,
+    NoteEditIntent,
+    apply_note_edit,
+    snapshot_state,
+)
 from ..core.grid import BeatGrid
 from ..core.i18n import get_language, note_display_pair, set_language, tr
 from ..core.live_session import LiveEvent, LiveTake
@@ -33,20 +46,31 @@ from ..core.metronome import Metronome, qt_scheduler
 from ..core.pipeline import AnalysisResult, AnalyzeOptions, FileAnalysis
 from ..core.playback import NotePlayer, PlaybackSession
 from ..core.take_export import ExportOptions, ExportWarning, write_take
-from ..core.takes import live_export_dir
+from ..core.takes import (
+    automatic_reading_dir,
+    corrected_readings_dir,
+    live_export_dir,
+)
+from . import widgets
+from .analysis_workers import AnalysisThread, FullReanalysisThread, SignalAnalysisThread
+from .analysis_workflow import AnalysisWorkflow, WorkflowPhase
 from .audition_controller import AuditionController, AuditionRequest
 from .finder_page import FinderPage
 from .home_page import HomePage
 from .live_page import LIVE_SILENCE_WARN_S, LivePage
 from .live_session_controller import LiveSessionController
 from .results_page import ResultsPage
-from .widgets import (
-    STYLESHEET,
-    ErrorBanner,
-)
+from .widgets import ErrorBanner
+
+# the opening size, the floor and the position come from ONE policy module:
+# the window reads the screen it runs on and applies the plan it returns
+# (the size and floor are no longer window constants)
+from .window_geometry import WindowPlan, window_plan
 
 AUDIO_EXTS = audio_io.AUDIO_EXTS  # single source of truth (core.audio_io)
 EXPORT_DIRECTORY_FILE = Path.home() / ".v2m_export_dir"
+INPUT_DEVICE_FILE = Path.home() / ".v2m_input_device"
+THEME_FILE = Path.home() / ".v2m_theme"
 
 
 def audio_filter() -> str:
@@ -64,131 +88,32 @@ LiveFrame = tuple[float, float] | None
 class LiveRenderState:
     """EVERYTHING the GUI renders from one live take, owned as a whole.
 
-    The take's signal, the closed notes handed over for the diff mark, the
-    audio-box choice read at take start, the pitch cloud, the published
-    grid: these used to be nine loose attributes on the window, reset one
-    by one in `on_start_live` — one forgotten reset was the previous take's
-    value leaking into this one (measured: the exported WAV described the
-    PREVIOUS take). Now the take OWNS one object and `on_start_live` swaps
-    it wholesale: a stale value is structurally impossible, there is no
-    buffer left to survive. The tests fake a mid-take state by building
+    The take's signal, closed notes, audio choice, pitch cloud and published
+    grid travel together in one state object. `on_start_live` replaces the
+    whole object, so no buffer or fact from the prior take can survive. The
+    tests fake a mid-take state by building
     THIS object instead of driving the whole window; the window keeps the
     familiar `win._live_*` faces as thin properties over it.
     """
 
     def __init__(self) -> None:
-        self.signal: np.ndarray | None = None      # the take's audio (float32)
-        self.record_audio = False                  # the box, read at take START
-        self.closed_notes: list = []               # handed over by on_stop_live
-        self.last_take_notes: list = []            # for the report's live_vs_final
-        self.pitch_t: list[float] = []             # the live pitch cloud (x)
-        self.pitch_m: list[float] = []             # ...and its pitches (y)
-        self.curve = None                          # the cloud's plot item
-        self.t = 0.0                               # capture time of the last block
-        self.grid = BeatGrid(120.0)                # until the take publishes its own
-        self.accuracy_target = "live"              # where a plot click seeks
-        self.silence_since: float | None = None    # silence watch (ui live silence)
+        self.signal: np.ndarray | None = None  # the take's audio (float32)
+        self.record_audio = False  # the box, read at take START
+        self.closed_notes: list = []  # handed over by on_stop_live
+        self.last_take_notes: list = []  # for the report's live_vs_final
+        self.pitch_t: list[float] = []  # the live pitch cloud (x)
+        self.pitch_m: list[float] = []  # ...and its pitches (y)
+        self.curve = None  # the cloud's plot item
+        self.t = 0.0  # capture time of the last block
+        self.grid = BeatGrid(120.0)  # until the take publishes its own
+        self.accuracy_target = "live"  # where a plot click seeks
+        self.silence_since: float | None = None  # silence watch (ui live silence)
         # the PRE-TAKE low-level watch (ui live low mic): the mic's first
         # clear block arms the take (heard_once) and disarms this — the
         # take is then judged by `watch_silence`. One swap per take: the
         # watch re-arms itself when a new take replaces the state.
-        self.heard_once = False                    # any block above the gate yet
-        self.low_since: float | None = None        # pre-take low-level watch
-
-
-class AnalysisThread(QThread):
-    """Run one file analysis and publish its complete outcome."""
-
-    progress = pyqtSignal(float, str)
-    finishedOk = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, source: str, opts: AnalyzeOptions):
-        super().__init__()
-        self.source = source
-        self.opts = opts
-
-    def run(self) -> None:
-        # pYIN only has to finish EVENTUALLY: below the capture's priority,
-        # so finalizing the previous take cannot starve the next one's live
-        # drain (see gui/priority.py)
-        from .priority import lower_background_priority
-
-        lower_background_priority()
-        try:
-            from ..core.pipeline import analyze_file
-
-            outcome = analyze_file(
-                self.source,
-                opts=self.opts,
-                progress=lambda f, m: self.progress.emit(f, m),
-            )
-            self.finishedOk.emit(outcome)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class SignalAnalysisThread(QThread):
-    """Analyze an edited in-memory take without blocking the GUI thread."""
-
-    finishedOk = pyqtSignal(object, object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, signal: np.ndarray, sr: int, source: str):
-        super().__init__()
-        self.signal = np.asarray(signal, dtype=np.float32)
-        self.sr = sr
-        self.source = source
-
-    def run(self) -> None:
-        from .priority import lower_background_priority
-
-        lower_background_priority()
-        try:
-            from ..core.pipeline import LIVE_CONF, AnalyzeOptions, analyze_signal
-
-            result = analyze_signal(
-                self.signal,
-                self.sr,
-                source=self.source,
-                opts=AnalyzeOptions(min_conf=LIVE_CONF),
-            )
-            self.finishedOk.emit(result, self.signal)
-        except Exception as error:
-            self.failed.emit(str(error))
-
-
-class FullReanalysisThread(QThread):
-    """Rebuild vocal evidence from the retained audio, then interpret it."""
-
-    progress = pyqtSignal(float, str)
-    finishedOk = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, signal: np.ndarray, sr: int, source: str, opts: AnalyzeOptions):
-        super().__init__()
-        self.signal = np.asarray(signal, dtype=np.float32).copy()
-        self.sr = sr
-        self.source = source
-        self.opts = opts
-
-    def run(self) -> None:
-        from .priority import lower_background_priority
-
-        lower_background_priority()
-        try:
-            from ..core.pipeline import analyze_signal
-
-            result = analyze_signal(
-                self.signal,
-                self.sr,
-                source=self.source,
-                opts=self.opts,
-                progress=lambda fraction, message: self.progress.emit(fraction, message),
-            )
-            self.finishedOk.emit(result)
-        except Exception as error:
-            self.failed.emit(str(error))
+        self.heard_once = False  # any block above the gate yet
+        self.low_since: float | None = None  # pre-take low-level watch
 
 
 class LiveThread(QThread):
@@ -206,12 +131,21 @@ class LiveThread(QThread):
     finderFrame = pyqtSignal(object, object, object)
     gridChanged = pyqtSignal(object)  # BeatGrid: the take's live grid policy
     liveNoteClosed = pyqtSignal(object)  # one closed LiveNote (intonation feed)
+    captureOpened = pyqtSignal(bool)  # the take opened (True = raw/exclusive)
     analysisFinished = pyqtSignal(object, bytes)
     failed = pyqtSignal(str, bytes)  # the error + the take's signal (the trace reads it)
 
-    def __init__(self):
+    def __init__(
+        self,
+        device: int | None = None,
+        device_name: str | None = None,
+        exclusive: bool = False,
+    ):
         super().__init__()
         self._stop = False
+        self.device = device
+        self.device_name = device_name or "System default"
+        self.exclusive = exclusive
         self.take: LiveTake | None = None
 
     def _on_take_event(self, event: LiveEvent) -> None:
@@ -222,9 +156,7 @@ class LiveThread(QThread):
             self.pitchFrame.emit(*event.pitch)
         elif event.kind == "note":
             self.noteFrame.emit(event.pitch)
-            self.finderFrame.emit(
-                event.pitch, event.confirmed_pitch, event.heard_pitch
-            )
+            self.finderFrame.emit(event.pitch, event.confirmed_pitch, event.heard_pitch)
         elif event.kind == "note_closed":
             # the grid is published by its single owner (LiveTake); the GUI
             # consumes it, it never re-derives the approximate BPM itself
@@ -238,9 +170,16 @@ class LiveThread(QThread):
             self.failed.emit(event.error, sig)
 
     def run(self) -> None:
-        self.take = LiveTake(on_event=self._on_take_event)  # default thresholds (pipeline)
+        self.take = LiveTake(
+            on_event=self._on_take_event,
+            device=self.device,
+            exclusive=self.exclusive,
+        )  # default thresholds (pipeline)
         try:
             self.take.start()
+            # what the capture really OPENED (a refused raw open falls back
+            # silently): the page must name the mode it actually got
+            self.captureOpened.emit(self.take.raw_capture)
             while not self._stop:
                 self.msleep(50)
             self.take.stop()
@@ -263,6 +202,10 @@ class LiveThread(QThread):
     def capture(self) -> LiveCapture | None:
         return self.take.capture if self.take is not None else None
 
+    @property
+    def raw_capture(self) -> bool:
+        return self.take.raw_capture if self.take is not None else False
+
     def stop(self) -> None:
         self._stop = True
 
@@ -278,10 +221,15 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         get_language()  # restore the persisted choice before building the UI
         self.setWindowTitle(tr("ui window title"))
-        self.resize(1280, 780)
+        # The window opens FOR the screen it runs on (gui/window_geometry.py
+        # owns the policy): its default 1280x780 hangs past the edges of a
+        # scaled laptop screen, and its old fixed 900x560 floor left the
+        # window taller than the desktop with no way to shrink it back on.
+        self._screen_hooked = False
+        self._apply_screen_plan(self._screen_plan())
         self.setAcceptDrops(True)
 
-        self.result = None            # last AnalysisResult
+        self.result = None  # last AnalysisResult
         self._live = LiveRenderState()
         self.analyze_thread: AnalysisThread | None = None
         self.live_thread: LiveThread | None = None
@@ -293,29 +241,22 @@ class MainWindow(QMainWindow):
         # the archive below consumes it through the page
         self._analysis_started_at: float = 0.0  # cache-status timing (perf_counter)
         self._replay_worker = None  # ReplayWorker: the take's own cross-check
-        self._phrase_replacement: tuple[
-            AnalysisResult, np.ndarray, int, int, bool
-        ] | None = None
-        self._replacement_source_path: str | None = None
-        self._replacement_pending_analysis = False
+        self._workflow = AnalysisWorkflow()
         self._signal_analysis_thread: SignalAnalysisThread | None = None
         self._full_reanalysis_thread: FullReanalysisThread | None = None
-        self._reanalysis_source: AnalysisResult | None = None
-        self._reanalysis_signal: np.ndarray | None = None
-        self._reanalysis_failed = False
         # the note edits' undo/redo: whole-take states (core.edits owns the
         # history; this window snapshots its facts and applies restorations)
         self._edit_history = EditHistory()
-        # the re-sung phrase awaiting the singer's verdict: (before-state,
-        # phrase start s, phrase end s in the merged audio). Export waits,
-        # and the views show the spliced take — the decision is informed.
-        self._replacement_decision: tuple | None = None
+        # The first completed live interpretation is held separately from
+        # later readings and edits so export can preserve it unchanged.
+        self._automatic_live_result: AnalysisResult | None = None
+        self._automatic_live_signal: np.ndarray | None = None
         # the take in progress, ONE owner: stem (minted once), signal (the
         # event's bytes), replay queue (survives a new take), sidecar and
         # timer decisions — this window is its Qt adapter (applies its
         # Verdicts)
         self.take_ctl = LiveSessionController()
-        self.metronome = None       # created when the user opts in
+        self.metronome = None  # created when the user opts in
         self.playback = PlaybackSession(audio_io.SR, on_error=self._on_playback_error)
         self.player: NotePlayer | None = None
         self._voice_player: NotePlayer | None = None
@@ -333,6 +274,16 @@ class MainWindow(QMainWindow):
         self._calibration_timer.setInterval(400)
         self._calibration_timer.timeout.connect(self._calibration_feed_tick)
         self._calibration_hz = None
+        # the pitch's ARRIVAL time: a round counts only while the note is
+        # still sounding (a stale value would grade a note that ended)
+        self._calibration_at = 0.0
+        # the card's OWN mic, opened when no take is capturing
+        self._calibration_thread: LiveThread | None = None
+        self._selected_input_key: str | None = self._read_input_device_key()
+        self._theme = self._read_theme()
+        widgets.set_theme(self._theme)
+        self._active_input_label = ""
+        self._input_device_fell_back = False
         # Ctrl+Z / Ctrl+Y (StandardKey.Redo covers Ctrl+Shift+Z too): the
         # handlers no-op when there is nothing to restore
         undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
@@ -362,10 +313,14 @@ class MainWindow(QMainWindow):
             open_finder=self.on_open_finder,
             toggle_language=self.on_toggle_language,
             snapshot_factory=self._coherence_snapshot,
-            show_status=lambda message, timeout: self.statusBar().showMessage(
-                message, timeout
-            ),
+            show_status=lambda message, timeout: self.statusBar().showMessage(message, timeout),
             on_calibrate_toggled=self._on_calibrate_toggled,
+            input_devices=self._input_device_choices,
+            driver_note=driver_fx.enhancement_note,
+            selected_input_key=self._selected_input_key,
+            input_device_changed=self._on_input_device_changed,
+            theme=self._theme,
+            theme_changed=self._on_theme_changed,
         )
         # The results page is a Page module (ADR 0010's full shape): it owns
         # its widgets (waveform, staff, roll, keyboard, options, play
@@ -397,6 +352,7 @@ class MainWindow(QMainWindow):
             audition_replacement=self.on_audition_replacement,
             audition_original=self.on_audition_original,
             show_live_roll=self.on_show_live_roll,
+            open_archived_comparison=self.on_open_archived_comparison,
             audition_note=self.on_audition_note,
             audition_pitch=self.on_audition_key,
             stop_audition=self.stop_playback,
@@ -426,7 +382,7 @@ class MainWindow(QMainWindow):
         # home is, where errors go), thread injected as a factory. The
         # window composes; it keeps no finder mirror.
         self.page_finder = FinderPage(
-            thread_factory=LiveThread,
+            thread_factory=self._new_finder_input_thread,
             go_home=lambda: self.stack.setCurrentWidget(self.page_home),
             show_error=self._on_error,
             clear_error=self.error_banner.clear,
@@ -437,9 +393,47 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.page_live)
         self.stack.addWidget(self.page_finder)
         self.retranslate()
+        self._refresh_input_device_status()
 
     # Pages are Page modules (gui/*_page.py); MainWindow owns the window
     # state (result, cache, playback, captures) and the user callbacks.
+
+    # ------------------------------------------------------------------
+    # The screen the window runs on. `gui/window_geometry.py` owns the
+    # POLICY (how big a window opens on a given screen, and how far it may
+    # shrink); these methods are only the adapter that reads the screen and
+    # applies the returned plan.
+    # ------------------------------------------------------------------
+    def _screen_plan(self, screen=None) -> WindowPlan:
+        screen = screen or self.screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        return window_plan(rect.width(), rect.height(), rect.x(), rect.y())
+
+    def _apply_screen_plan(self, plan: WindowPlan) -> None:
+        """Open at the plan's floor, size and position."""
+        self.setMinimumSize(plan.min_width, plan.min_height)
+        self.resize(plan.width, plan.height)
+        self.move(plan.x, plan.y)
+
+    def _adapt_floor_to_screen(self, screen) -> None:
+        """Re-clamp the FLOOR to the screen the window now sits on.
+
+        Dragging the window onto a smaller monitor must leave it shrinkable
+        there; back on a large one the floor returns to its full height. The
+        window's own size and position stay as the user left them — the move
+        was their decision, not ours.
+        """
+        plan = self._screen_plan(screen)
+        self.setMinimumSize(plan.min_width, plan.min_height)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt's own name
+        super().showEvent(event)
+        # one hook per window: the screen the user drags the window onto is
+        # only reachable through the window handle, which exists from here
+        handle = self.windowHandle()
+        if handle is not None and not self._screen_hooked:
+            self._screen_hooked = True
+            handle.screenChanged.connect(self._adapt_floor_to_screen)
 
     # ------------------------------------------------------------------
     # The live render state, read through its familiar faces: one owner
@@ -535,10 +529,81 @@ class MainWindow(QMainWindow):
         set_language("en" if get_language() == "fr" else "fr")
         self.retranslate()
 
+    def _read_theme(self) -> str:
+        """Load the saved theme; malformed or missing values keep dark mode."""
+        try:
+            value = THEME_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            return "dark"
+        return value if value in widgets.THEMES else "dark"
+
+    def _write_theme(self, theme: str) -> None:
+        """Persist the selected theme best-effort."""
+        try:
+            THEME_FILE.write_text(theme, encoding="utf-8")
+        except OSError:
+            pass
+
+    def _on_theme_changed(self, theme: str) -> None:
+        """Apply the selected theme immediately and keep all page facts in sync."""
+        if theme not in widgets.THEMES:
+            raise ValueError(f"unknown theme: {theme}")
+        app = QApplication.instance()
+        previous_theme = self._theme
+        self._theme = theme
+        try:
+            widgets.set_theme(theme)
+            if app is not None:
+                app.setStyleSheet(widgets.theme_stylesheet())
+            self.page_home.set_theme(theme)
+        except Exception:
+            self._theme = previous_theme
+            widgets.set_theme(previous_theme)
+            self.page_home.set_theme(previous_theme)
+            if app is not None:
+                app.setStyleSheet(widgets.theme_stylesheet())
+            raise
+        self._write_theme(theme)
+        self._refresh_theme_views()
+
+    def _refresh_theme_views(self) -> None:
+        """Repaint custom-drawn and locally styled widgets from current tokens."""
+        from . import staff
+
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, widgets.PianoRoll):
+                widget.setBackground(widgets.BG_APP)
+                # pyqtgraph's own words follow the palette too, or a theme switch
+                # leaves the pitch rows and the seconds in the other theme's ink.
+                widgets.ink_plot(widget)
+                widget.set_notes(widget._last_notes, force=True)
+                widget.set_live_preview(getattr(widget, "_live_preview", None))
+                widget._render_selection()
+            elif isinstance(widget, widgets.WaveformView):
+                widget.setBackground(widgets.BG_APP)
+                widgets.ink_plot(widget)
+            elif isinstance(widget, staff.StaffView):
+                widget.update()
+            elif isinstance(widget, widgets.PianoView):
+                widget.update()
+            elif isinstance(widget, widgets.TuningMeter):
+                widget.update()
+            elif isinstance(widget, widgets.AccuracyPlot):
+                widget.update()
+            elif isinstance(widget, widgets.LiveIndicator):
+                widget.set_theme()
+        self.page_home.refresh_theme()
+        self.page_home.retranslate()
+        self.page_finder.refresh_theme()
+        self.page_live.refresh_theme()
+        self.page_results.refresh_theme()
+
     def retranslate(self) -> None:
         """Refresh every window string in the current language."""
         self.setWindowTitle(tr("ui window title"))
         self.page_home.retranslate()
+        self.page_home.set_theme(self._theme)
+        self.page_home.refresh_theme()
         self.page_finder.retranslate()
         self.page_results.retranslate()
         self.page_live.retranslate()
@@ -552,6 +617,7 @@ class MainWindow(QMainWindow):
             self.live_thread is None or not self.live_thread.isRunning()
         ) and not self.page_live.review_active():
             self.page_live.announce(tr("ui mic preparing"))
+            self.page_live._set_input_state("ui mic waiting")
 
     # ------------------------------------------------------------------
     # Errors (inline red banner)
@@ -595,7 +661,9 @@ class MainWindow(QMainWindow):
         if self.result is None:
             return
         self.player = NotePlayer(
-            self.result.notes, sr=audio_io.SR, gain=self._piano_gain(),
+            self.result.notes,
+            sr=audio_io.SR,
+            gain=self._piano_gain(),
             on_error=self._on_playback_error,
         )
         if self._auditions.active:
@@ -650,9 +718,7 @@ class MainWindow(QMainWindow):
         return signal if signal is not None and len(signal) > 0 else None
 
     def _sync_play_buttons(self) -> None:
-        self.page_results.sync_play_buttons(
-            self.playback.mode if self.playback.playing else None
-        )
+        self.page_results.sync_play_buttons(self.playback.mode if self.playback.playing else None)
 
     def _make_voice_player(self) -> NotePlayer | None:
         """A rendered voice source at the live transposition, or None without a take."""
@@ -660,8 +726,9 @@ class MainWindow(QMainWindow):
         if signal is None:
             return None
         return NotePlayer(
-            signal=signal, sr=audio_io.SR,
-            transpose=self.page_results.spin_transpose.value(),
+            signal=signal,
+            sr=audio_io.SR,
+            transpose=self.page_results.transpose_st(),
             on_error=self._on_playback_error,
         )
 
@@ -787,8 +854,13 @@ class MainWindow(QMainWindow):
         """
         if self.result is None or self.result.source != "live":
             return
-        if self._phrase_replacement is not None:
+        if self._workflow.phase in (
+            WorkflowPhase.SPLICE_ANALYSIS,
+            WorkflowPhase.REPLACEMENT_CAPTURE,
+        ):
             return
+        if self._workflow.phase is WorkflowPhase.REPLACEMENT_DECISION:
+            self._abandon_pending_replacement()
         self.stop_playback()
         self.page_live.enter_review()
         self.stack.setCurrentWidget(self.page_live)
@@ -819,26 +891,32 @@ class MainWindow(QMainWindow):
         source: AnalysisResult,
     ) -> None:
         """Start pYIN again from retained audio without replacing the old view."""
-        if self._full_reanalysis_thread is not None:
+        context = self._workflow.begin_full_reanalysis(source, signal)
+        if context is None:
             return
         self.error_banner.clear()
         self.stop_playback()
-        self._reanalysis_source = source
-        self._reanalysis_signal = np.asarray(signal, dtype=np.float32).copy()
-        self._reanalysis_failed = False
         self.page_results.set_full_reanalysis(True)
         options = AnalyzeOptions(
             min_note_s=self.page_results.min_note_ms() / 1000.0,
             min_conf=AnalyzeOptions().min_conf,
         )
-        worker = FullReanalysisThread(
-            self._reanalysis_signal, source.sr, source.source, options
-        )
+        worker = FullReanalysisThread(context.signal, source.sr, source.source, options)
         self._full_reanalysis_thread = worker
-        worker.progress.connect(self._on_full_reanalysis_progress)
-        worker.finishedOk.connect(self._on_full_reanalysis_done)
-        worker.failed.connect(self._on_full_reanalysis_failed)
-        worker.finished.connect(self._on_full_reanalysis_thread_finished)
+        worker.progress.connect(
+            lambda fraction, message, token=context.token: self._on_full_reanalysis_progress(
+                token, fraction, message
+            )
+        )
+        worker.finishedOk.connect(
+            lambda result, token=context.token: self._on_full_reanalysis_done(result, token)
+        )
+        worker.failed.connect(
+            lambda error, token=context.token: self._on_full_reanalysis_failed(error, token)
+        )
+        worker.finished.connect(
+            lambda current=worker: self._on_full_reanalysis_thread_finished(current)
+        )
         worker.start()
 
     def on_full_reanalyze(self) -> None:
@@ -848,31 +926,27 @@ class MainWindow(QMainWindow):
         if source is None or signal is None or len(signal) == 0:
             self.show_error(tr("err full reanalysis audio"), timeout=6_000)
             return
-        if self._replacement_decision is not None:
-            return
         self._start_full_reanalysis(signal=signal, source=source)
 
-    def _on_full_reanalysis_progress(self, fraction: float, message: str) -> None:
-        self.page_results.set_full_reanalysis_progress(fraction, message)
+    def _on_full_reanalysis_progress(
+        self, token: int, fraction: float, message: str
+    ) -> None:
+        if self._workflow.is_current(token, WorkflowPhase.FULL_REANALYSIS):
+            self.page_results.set_full_reanalysis_progress(fraction, message)
 
-    def _on_full_reanalysis_thread_finished(self) -> None:
-        """Release the completed worker after its run method returns."""
-        worker = self._full_reanalysis_thread
-        if worker is not None and not worker.isRunning():
+    def _on_full_reanalysis_thread_finished(self, worker: FullReanalysisThread) -> None:
+        """Release only the worker whose run method just returned."""
+        if self._full_reanalysis_thread is worker and not worker.isRunning():
             self._full_reanalysis_thread = None
-            if self._reanalysis_failed:
-                self.page_results.finish_full_reanalysis()
-                self._reanalysis_failed = False
 
-    def _on_full_reanalysis_done(self, result: AnalysisResult) -> None:
+    def _on_full_reanalysis_done(self, result: AnalysisResult, token: int) -> None:
         """Publish a completed fresh reading, preserving audio and take facts."""
-        source = self._reanalysis_source
-        signal = self._reanalysis_signal
-        self._reanalysis_source = None
-        self._reanalysis_signal = None
-        if source is None or signal is None:
-            self.page_results.finish_full_reanalysis()
+        transition = self._workflow.accept_current(token, WorkflowPhase.FULL_REANALYSIS)
+        if transition is None or transition.full_reanalysis is None:
             return
+        context = transition.full_reanalysis
+        source = context.source
+        signal = context.signal
         result.source = source.source
 
         if source.source == "live":
@@ -906,16 +980,15 @@ class MainWindow(QMainWindow):
             tr("ui status full reanalyzed").format(n=len(result.notes)), 8_000
         )
 
-    def _on_full_reanalysis_failed(self, error: str) -> None:
+    def _on_full_reanalysis_failed(self, error: str, token: int) -> None:
         """Keep the prior reading and edits if a fresh evidence pass fails."""
-        source = self._reanalysis_source
-        signal = self._reanalysis_signal
-        self._reanalysis_source = None
-        self._reanalysis_signal = None
-        self._reanalysis_failed = True
-        if source is not None and signal is not None:
-            self.result = source
-            self._show_result(source, signal)
+        transition = self._workflow.fail_full_reanalysis(token)
+        if transition is None or transition.full_reanalysis is None:
+            return
+        context = transition.full_reanalysis
+        self.result = context.source
+        self._show_result(context.source, context.signal)
+        self.page_results.finish_full_reanalysis()
         self.show_error(tr("err full reanalysis failed").format(e=error), timeout=8_000)
 
     # ------------------------------------------------------------------
@@ -926,9 +999,14 @@ class MainWindow(QMainWindow):
         """Compute and show one before/after comparison for the SAME audio.
 
         `before` is the reading that was SHOWN, `after` the one that just
-        succeeded. A missing comparison (no notes at all, an engine hiccup)
-        leaves the previous presentation: it must never cost the reading.
+        succeeded. If comparison fails, the previous diagnostic stays cleared:
+        it must never be shown beside a reading it does not describe, nor cost
+        the reading itself.
         """
+        # The current reading has already been replaced by the caller. Drop
+        # the previous diagnostic first: if this optional comparison fails,
+        # it must not remain beside a reading it does not describe.
+        self._clear_reading_diff()
         try:
             from ..core.reading_diff import compare_readings
 
@@ -953,7 +1031,7 @@ class MainWindow(QMainWindow):
         different reading, nothing is exported until they export again.
         """
         res = self.result
-        if self._full_reanalysis_thread is not None:
+        if self._workflow.phase is not WorkflowPhase.IDLE:
             return
         if res is None or getattr(res, "observation", None) is None:
             self.show_error(tr("err reinterpret none"), timeout=6_000)
@@ -963,9 +1041,7 @@ class MainWindow(QMainWindow):
         self._edit_history.clear()
         self._sync_edit_history()
         self.stop_playback()
-        opts = AnalyzeOptions(
-            min_note_s=self.page_results.min_note_ms() / 1000.0
-        )
+        opts = AnalyzeOptions(min_note_s=self.page_results.min_note_ms() / 1000.0)
         observation = res.observation
         assert observation is not None  # guarded above; narrows for the reader
         try:
@@ -997,19 +1073,16 @@ class MainWindow(QMainWindow):
     # File analysis
     # ------------------------------------------------------------------
     def on_open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("ui choose file"), "", audio_filter()
-        )
+        path, _ = QFileDialog.getOpenFileName(self, tr("ui choose file"), "", audio_filter())
         if not path:
             return
         self.start_analysis(path)
 
     def start_analysis(self, path: str) -> None:
         """Validate the input early, then run the analysis in a thread."""
-        if self._full_reanalysis_thread is not None:
+        if self._workflow.phase is WorkflowPhase.FULL_REANALYSIS:
             return
         self.error_banner.clear()
-        self.page_results.begin_analysis()
         p = Path(path)
         if not p.exists():
             self.show_error(tr("err ui missing").format(path=path))
@@ -1031,6 +1104,13 @@ class MainWindow(QMainWindow):
             self.show_error(tr("err ui unreadable").format(e=e))
             return
 
+        was_capturing_replacement = (
+            self._workflow.phase is WorkflowPhase.REPLACEMENT_CAPTURE
+        )
+        self._abandon_pending_replacement()
+        if was_capturing_replacement:
+            self.on_stop_live()
+        self.page_results.begin_analysis()
         self.stack.setCurrentWidget(self.page_results)
         self.source_path = path
         self.page_results.set_source_name(p.name)
@@ -1072,10 +1152,8 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_done(self, outcome: FileAnalysis) -> None:
         res = outcome.analysis
-        # a new file is a new take: an unaccepted splice dies with the take
-        # it edited, and the edit history never crosses takes — nor the
-        # before/after diff (its "after" reading belonged to the last take)
-        self._abandon_pending_replacement()
+        # a new file is a new take: its old splice decision is already
+        # abandoned when the validated analysis starts.
         self.page_results.clear_reading_diff()
         self._edit_history.clear()
         self._sync_edit_history()
@@ -1086,23 +1164,21 @@ class MainWindow(QMainWindow):
         self._live_signal = None  # a file view must never show a live take
         self.stop_playback()
         self.player = NotePlayer(
-            res.notes, sr=audio_io.SR, gain=self._piano_gain(),
+            res.notes,
+            sr=audio_io.SR,
+            gain=self._piano_gain(),
         )
         self._show_result(res, outcome.audio)
         # The analysis remains editable; the export button writes artifacts.
         summary = self._coherence_summary(res)
         if summary:
-            self.statusBar().showMessage(
-                tr("ui status coherence").format(summary=summary), 10_000
-            )
+            self.statusBar().showMessage(tr("ui status coherence").format(summary=summary), 10_000)
         # Keep the cache explanation last: before the file outcome carried
         # this fact, its queued signal ran after this handler and the
         # coherence summary. A synchronous write here would be overwritten.
         if outcome.cache_used:
             elapsed_ms = 1000.0 * (time.perf_counter() - self._analysis_started_at)
-            self.statusBar().showMessage(
-                tr("ui status cache").format(ms=elapsed_ms), 8_000
-            )
+            self.statusBar().showMessage(tr("ui status cache").format(ms=elapsed_ms), 8_000)
 
     # ------------------------------------------------------------------
     # Exports
@@ -1114,7 +1190,11 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.result is None:
             return
-        if self._replacement_decision is not None or self._full_reanalysis_thread is not None:
+        if self._workflow.phase in (
+            WorkflowPhase.REPLACEMENT_DECISION,
+            WorkflowPhase.SPLICE_ANALYSIS,
+            WorkflowPhase.FULL_REANALYSIS,
+        ):
             return  # a splice decision or fresh evidence pass is in progress
         res = self.result
         stem = self._export_stem(res)
@@ -1124,20 +1204,20 @@ class MainWindow(QMainWindow):
             if res.source == "live"
             else False
         )
+        archive_signal = (
+            self._automatic_live_signal
+            if manually_corrected and self._automatic_live_signal is not None
+            else self._live_signal
+        )
         options = ExportOptions(
-            quantize_s=(
-                res.quantize_step(16)
-                if self.page_results.quantize_checked()
-                else None
-            ),
+            quantize_s=(res.quantize_step(16) if self.page_results.quantize_checked() else None),
             transpose=self.page_results.transpose_st(),
             record_audio=self._live_record_audio,
-            pdf=(
-                self.page_results.pdf_checked()
-                or format_suffix == ".pdf"
-            ),
+            pdf=(self.page_results.pdf_checked() or format_suffix == ".pdf"),
             live_notes=self._last_take_live_notes,
             manual_corrections=manually_corrected,
+            automatic_result=self._automatic_live_result if res.source == "live" else None,
+            archive_corrected_reading=manually_corrected and res.source == "live",
             archive_sidecar=archive_sidecar,
             save_path=save_path,
             format_suffix=format_suffix,
@@ -1145,17 +1225,13 @@ class MainWindow(QMainWindow):
         # ONE call owns the whole sequence (WAV -> artifacts -> PDF, the
         # sidecar archive, the retention trim); the window only RENDERS the
         # receipt — it never re-derives what was written.
-        receipt = write_take(res, stem, signal=self._live_signal, options=options)
+        receipt = write_take(res, stem, signal=archive_signal, options=options)
         if receipt.failed:
             if receipt.pdf_status in ("missing_tool", "failed"):
-                self._show_export_warning(
-                    ExportWarning("pdf", receipt.warning_detail("pdf"))
-                )
+                self._show_export_warning(ExportWarning("pdf", receipt.warning_detail("pdf")))
             else:
                 detail = receipt.warning_detail("export")
-                self.show_error(
-                    tr("err ui export failed").format(e=detail), timeout=8_000
-                )
+                self.show_error(tr("err ui export failed").format(e=detail), timeout=8_000)
             return
         for warning in receipt.warnings:
             self._show_export_warning(warning)
@@ -1171,6 +1247,7 @@ class MainWindow(QMainWindow):
         self.page_results.ack_export()
         self.statusBar().showMessage(tr("ui status exported").format(files=files), 10_000)
         self._refresh_exported_coherence()
+        self._refresh_archive_comparison()
         # the take's WAV now exists on disk: its queued cross-check may
         # start — the controller's guards still hold (a running capture or
         # replay keeps it waiting); a file analysis's export pumps an empty
@@ -1246,8 +1323,7 @@ class MainWindow(QMainWindow):
         suffix = suffix_by_filter.get(selected_filter)
         if suffix is None:
             suffix = next(
-                (candidate for _label, candidate in formats
-                 if target.suffix.lower() == candidate),
+                (candidate for _label, candidate in formats if target.suffix.lower() == candidate),
                 default_suffix,
             )
         if target.suffix.lower() != suffix:
@@ -1258,11 +1334,99 @@ class MainWindow(QMainWindow):
     def _show_export_warning(self, warning: ExportWarning) -> None:
         """Render one non-fatal export warning (the receipt carries values)."""
         if warning.kind == "wav":
-            self.show_error(
-                tr("err ui wav failed").format(e=warning.detail), timeout=8_000
-            )
+            self.show_error(tr("err ui wav failed").format(e=warning.detail), timeout=8_000)
         elif warning.kind == "pdf":
             self.show_error(tr("err ui pdf").format(e=warning.detail), timeout=6_000)
+
+    def _archived_live_readings(self) -> list[tuple[str, AnalysisResult]]:
+        """Read the current take's JSON archives as comparison-only results."""
+        take_dir = self.take_ctl.take_dir()
+        stem_name = self.take_ctl.take_stem()
+        if take_dir is None or stem_name is None:
+            return []
+
+        candidates: list[tuple[str, Path]] = []
+        automatic_json = automatic_reading_dir(take_dir) / f"{stem_name}.json"
+        if automatic_json.is_file():
+            candidates.append((tr("ui compare automatic"), automatic_json))
+
+        corrected_parent = corrected_readings_dir(take_dir)
+        if corrected_parent.is_dir():
+            corrected_dirs = sorted(
+                (path for path in corrected_parent.glob("v*") if path.is_dir()),
+                key=lambda path: int(path.name[1:]) if path.name[1:].isdigit() else -1,
+            )
+            for path in corrected_dirs:
+                version = path.name[1:]
+                if not version.isdigit():
+                    continue
+                report_path = path / f"{stem_name}.json"
+                if report_path.is_file():
+                    candidates.append(
+                        (tr("ui compare corrected").format(version=int(version)), report_path)
+                    )
+
+        readings: list[tuple[str, AnalysisResult]] = []
+        for label, report_path in candidates:
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                if not isinstance(report, dict) or not isinstance(report.get("notes"), list):
+                    continue
+                from ..core.notes import Note
+
+                notes = []
+                for item in report["notes"]:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid note row")
+                    start = float(item["start_s"])
+                    end = float(item["end_s"])
+                    midi = int(item["midi"])
+                    confidence = float(item.get("confidence", 0.0))
+                    if not np.isfinite((start, end, confidence)).all() or end < start:
+                        raise ValueError("invalid note timing")
+                    notes.append(Note(start, end, midi, confidence))
+                tempo_data = report.get("tempo")
+                bpm = float(tempo_data["bpm"]) if isinstance(tempo_data, dict) else 120.0
+                if not np.isfinite(bpm) or bpm <= 0:
+                    bpm = 120.0
+                grid = BeatGrid(bpm)
+                duration = max(
+                    float(report.get("duration_s", 0.0)),
+                    max((note.end for note in notes), default=0.0),
+                )
+                if not np.isfinite(duration) or duration < 0:
+                    raise ValueError("invalid reading duration")
+                result = AnalysisResult(
+                    source="live",
+                    duration_s=duration,
+                    notes=notes,
+                    tempo=None,
+                    key=None,
+                    grid=grid,
+                )
+            except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+            readings.append((label, result))
+        return readings
+
+    def _refresh_archive_comparison(self) -> None:
+        """Publish whether the current live take has two readable archives."""
+        available = len(self._archived_live_readings()) >= 2
+        self.page_results.set_archive_comparison_available(available)
+
+    def on_open_archived_comparison(self) -> None:
+        """Compare two immutable reading archives without touching the active result."""
+        readings = self._archived_live_readings()
+        if len(readings) < 2:
+            self.page_results.set_archive_comparison_available(False)
+            return
+        from ..core.reading_diff import compare_readings
+
+        labels = tuple(label for label, _result in readings)
+        self.page_results.show_archived_comparison(
+            labels,
+            lambda before, after: compare_readings(readings[before][1], readings[after][1]),
+        )
 
     def _export_stem(self, res: AnalysisResult) -> Path:
         """The artifact prefix for one export.
@@ -1280,9 +1444,7 @@ class MainWindow(QMainWindow):
             stem = live_export_dir(stem) / stem.name
         return stem
 
-    def _stage_live_export(
-        self, res: AnalysisResult, stem: Path, manually_corrected: bool
-    ) -> bool:
+    def _stage_live_export(self, res: AnalysisResult, stem: Path, manually_corrected: bool) -> bool:
         """Hand a live export to the controller; answer the sidecar decision.
 
         The controller owns the take's stem and the sidecar decision (ADR
@@ -1329,7 +1491,7 @@ class MainWindow(QMainWindow):
             pass
 
     def on_export_again(self) -> None:
-        if self.result is None or self._replacement_decision is not None:
+        if self.result is None or self._workflow.phase is not WorkflowPhase.IDLE:
             return
         destination = self._choose_export_destination(self.result)
         if destination is None:
@@ -1340,12 +1502,27 @@ class MainWindow(QMainWindow):
     # Live
     # ------------------------------------------------------------------
     def on_start_live(self) -> None:
-        if self._full_reanalysis_thread is not None:
+        if self._workflow.phase is WorkflowPhase.REPLACEMENT_DECISION:
+            self._abandon_pending_replacement()
+        if self._workflow.phase not in (
+            WorkflowPhase.IDLE,
+            WorkflowPhase.REPLACEMENT_CAPTURE,
+        ):
+            return
+        if self._full_reanalysis_thread is not None or (
+            self.live_thread is not None and self.live_thread.isRunning()
+        ):
             return
         self.error_banner.clear()
         # a fresh capture ends any review of the previous take's frozen roll
         self._apply_audition_transition(self._auditions.cancel())
         self.page_live.exit_review()
+        # the take opens its OWN microphone: the calibration card's is
+        # released first (two streams on one device is a failure, and the
+        # card is off screen from here on — its flow is over)
+        if self._calibration_thread is not None or self._calibration_timer.isActive():
+            self.page_home.calibration_card.setVisible(False)
+            self._on_calibrate_toggled(False)
         self.stack.setCurrentWidget(self.page_live)
         self._live_pitch_t = []
         self._live_pitch_m = []
@@ -1360,10 +1537,16 @@ class MainWindow(QMainWindow):
         # to forget (the previous take's buffers are gone with the object)
         self._live = LiveRenderState()
         self.page_live.accuracy.reset()
-        self.page_live.set_replacement_mode(self._phrase_replacement is not None)
+        replacing = self._workflow.phase is WorkflowPhase.REPLACEMENT_CAPTURE
+        self.page_live.set_replacement_mode(replacing)
         # the audio box is read HERE (before the capture starts): the choice
         # belongs to the take, not to the moment its export happens
-        self._live.record_audio = self.page_live.chk_record_audio.isChecked()
+        replacement = self._workflow.replacement
+        self._live.record_audio = (
+            replacement.record_audio
+            if replacing and replacement is not None
+            else self.page_live.chk_record_audio.isChecked()
+        )
         # the NEW capture is the DSP priority: a replay running (its
         # real-time wait loop costs the same drain as the capture) is
         # BROKEN HERE, not joined — the worker skips the rest of its take
@@ -1375,11 +1558,11 @@ class MainWindow(QMainWindow):
             worker.stop()
         # A phrase replacement remains the SAME take: retain its export
         # identity and queued work. A fresh take starts a new controller state.
-        if self._phrase_replacement is None:
-            # a fresh take abandons an unaccepted splice and forgets the
-            # previous take's edit history (its states belong to that take);
-            # the before/after diff dies with the previous take's reading
-            self._abandon_pending_replacement()
+        if not replacing:
+            self._automatic_live_result = None
+            self._automatic_live_signal = None
+            # a fresh take abandons the previous take's edit history;
+            # its before/after diff dies with the previous take's reading
             self._edit_history.clear()
             self._sync_edit_history()
             self.page_results.clear_reading_diff()
@@ -1392,9 +1575,12 @@ class MainWindow(QMainWindow):
         # start must be the new take's fallback, not the previous take's
         self._live_grid = BeatGrid(120.0)  # until the take publishes its own
         self.page_live.announce(
-            tr("ui live progress").format(
-                t="00:00", notes=0, meter=self._live_grid.meter.label
-            )
+            tr("ui live progress").format(t="00:00", notes=0, meter=self._live_grid.meter.label)
+        )
+        self.page_live._set_input_state("ui mic waiting")
+        self.page_home.set_input_device_status(
+            self._active_input_label or tr("ui input device default name"),
+            self._input_device_fell_back,
         )
         # live pitch curve on the scrolling piano roll (drop the previous take's)
         self.page_live.begin_take_render(notation=True)
@@ -1403,7 +1589,11 @@ class MainWindow(QMainWindow):
         self._live_curve = self.page_live.piano_live.plot(
             [], [], pen=None, symbol="o", symbolSize=3, symbolBrush=(120, 200, 255, 180)
         )
-        self.live_thread = LiveThread()
+        self.live_thread = self._new_input_thread()
+        self.page_live.set_input_device_status(
+            self.live_thread.device_name, self._input_device_fell_back
+        )
+        self.page_live.set_driver_effects(False)  # the previous take's fact
         self.live_thread.blockStats.connect(self.page_live.on_block)
         # _on_live_pitch is the pitch's ONE route: cloud rendering AND the
         # calibration card's collector (a direct page connect feeds nothing)
@@ -1411,8 +1601,19 @@ class MainWindow(QMainWindow):
         self.live_thread.noteFrame.connect(self.page_live.on_note)
         self.live_thread.gridChanged.connect(self._on_live_grid)
         self.live_thread.liveNoteClosed.connect(self.page_live.on_live_note_closed)
-        self.live_thread.analysisFinished.connect(self._on_live_analysis_done)
-        self.live_thread.failed.connect(self._live_thread_failed)
+        self.live_thread.captureOpened.connect(self._on_live_capture_opened)
+        replacement = self._workflow.replacement
+        replacement_token = replacement.token if replacing and replacement is not None else None
+        self.live_thread.analysisFinished.connect(
+            lambda result, signal, token=replacement_token: self._on_live_analysis_done(
+                result, signal, token
+            )
+        )
+        self.live_thread.failed.connect(
+            lambda error, signal, token=replacement_token: self._live_thread_failed(
+                error, signal, token
+            )
+        )
         self.live_thread.start()
         self.page_live.start_timer()
         # clicking a plot point seeks the live roll to that note
@@ -1428,6 +1629,10 @@ class MainWindow(QMainWindow):
     # metronome wire-up and the tests use — thin delegations; the timer
     # itself is created and owned by the page.
     LIVE_SILENCE_WARN_S = LIVE_SILENCE_WARN_S  # re-exported for the tests
+    # a calibration round counts a pitch only this fresh: the pitch route
+    # reports ~every 50 ms while a note sounds, so anything older means the
+    # singer stopped (the tick would otherwise grade a note that ended)
+    CALIBRATION_FRESH_S = 0.25
 
     def _on_live_block(self, t: float, rms: float) -> None:
         self.page_live.on_block(t, rms)
@@ -1445,20 +1650,70 @@ class MainWindow(QMainWindow):
         self.page_live.on_pitch(t, hz)
         if self.page_home.calibration_card.isVisible():
             # a SUSTAINED pitch only: a passing glide never counts
-            self._calibration_hz = hz
+            self._remember_calibration_pitch(hz)
+
+    def _remember_calibration_pitch(self, hz: float) -> None:
+        """One heard pitch, stamped: the tick drops it once it goes stale."""
+        self._calibration_hz = hz
+        self._calibration_at = time.monotonic()
 
     def _calibration_round_started(self) -> None:
         """Arms one calibration round: the next stable pitch feeds it."""
         self._calibration_hz = None
 
     def _on_calibrate_toggled(self, on: bool) -> None:
-        """The card's open/close starts/stops the round collector."""
+        """The card's open/close starts/stops the round collector AND its mic."""
         if on:
             self.page_home.calibration_card.start()
             self._calibration_round_started()
+            self._start_calibration_capture()
             self._calibration_timer.start()
         else:
             self._calibration_timer.stop()
+            self._stop_calibration_capture()
+
+    def _start_calibration_capture(self) -> None:
+        """Open a microphone for the rounds when no take is capturing.
+
+        The rounds read the pitch of a RUNNING capture: with none, the
+        card sat on its prompt with zero input, and the user read it as a
+        microphone the app cannot find (only the record action started the
+        take's thread). A live take already running is REUSED — two
+        streams on one device is the failure this avoids.
+        """
+        if self.live_thread is not None and self.live_thread.isRunning():
+            return
+        if self._calibration_thread is not None and self._calibration_thread.isRunning():
+            return
+        thread = self._new_input_thread()
+        self.page_home.set_input_device_status(thread.device_name, self._input_device_fell_back)
+        thread.pitchFrame.connect(self._on_calibration_pitch)
+        thread.failed.connect(self._calibration_failed)
+        thread.captureOpened.connect(self._on_calibration_capture_opened)
+        self._calibration_thread = thread
+        thread.start()
+
+    def _stop_calibration_capture(self) -> None:
+        """Drop the CARD's mic (the take's own thread is never touched)."""
+        thread = self._calibration_thread
+        self._calibration_thread = None
+        self._calibration_hz = None
+        self.page_home.calibration_card.set_driver_effects(False)
+        if thread is not None and thread.isRunning():
+            thread.stop()
+            thread.wait(6000)
+
+    def _on_calibration_pitch(self, t: float, hz: float) -> None:
+        """The card's own capture: the collector's only pitch source."""
+        self._remember_calibration_pitch(hz)
+
+    def _calibration_failed(self, msg: str, signal: bytes) -> None:
+        """A microphone that never opened is SAID on the card."""
+        self._calibration_hz = None
+        card = self.page_home.calibration_card
+        if card.isVisible():
+            self._calibration_timer.stop()
+            card.set_error(tr("ui calibrate mic failed").format(error=msg))
 
     def _calibration_feed_tick(self) -> None:
         """Feed the armed round its first stable pitch (a 400 ms hold)."""
@@ -1466,9 +1721,11 @@ class MainWindow(QMainWindow):
         if not card.isVisible():
             return
         hz = self._calibration_hz
-        if hz is not None:
-            if card.feed(hz):
-                self._calibration_round_started()
+        if hz is not None and time.monotonic() - self._calibration_at > self.CALIBRATION_FRESH_S:
+            hz = None  # the note ended: a stale hold is not evidence
+        card.set_heard(hz)  # before the gate: the card shows what it hears
+        if hz is not None and card.feed(hz):
+            self._calibration_round_started()
 
     def _refresh_live_accuracy(self) -> None:
         self.page_live.refresh_accuracy()
@@ -1496,20 +1753,21 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.page_live)
             self.page_live.set_cursor(t)
 
-    def _on_live_analysis_done(self, res, signal_bytes: bytes = b"") -> None:
+    def _on_live_analysis_done(
+        self, res, signal_bytes: bytes = b"", replacement_token: int | None = None
+    ) -> None:
         """Show the completed live analysis and retain it until explicit export."""
-        # a NEW take's analysis never inherits an unaccepted splice (a
-        # pending decision belongs to the take it edited)
-        self._abandon_pending_replacement()
+        if replacement_token is not None and not self._workflow.is_current(
+            replacement_token, WorkflowPhase.REPLACEMENT_CAPTURE
+        ):
+            return
         # the live timer is the RENDER of the CURRENT capture: the take the
         # singer has ALREADY started (its analysis arrives queued) keeps
         # recording while its roll, counter and cursor must stay live. The
         # CONTROLLER decides (it also queues this take's cross-check
         # replay): the adapter applies.
         verdict = self.take_ctl.handle_analysis(
-            capture_running=(
-                self.live_thread is not None and self.live_thread.isRunning()
-            ),
+            capture_running=(self.live_thread is not None and self.live_thread.isRunning()),
             signal_bytes=signal_bytes,  # the event's bytes AS THEY ARE: an
             # EMPTY payload CLEARS the buffer (the controller's rule) —
             # `or None` here would turn an empty event into "keep the
@@ -1520,12 +1778,34 @@ class MainWindow(QMainWindow):
         else:
             self.page_live.stop_timer()
             self.page_live.clear_preview()
-        if self._phrase_replacement is not None:
+        if (
+            replacement_token is not None
+            and self._workflow.is_current(
+                replacement_token, WorkflowPhase.REPLACEMENT_CAPTURE
+            )
+        ):
             self._finish_phrase_replacement(res, signal_bytes)
+            return
+        if replacement_token is not None:
             return
         self._edit_history.clear()
         self._sync_edit_history()
         self.result = res
+        sig = self.take_ctl.signal()
+        self._live_signal = np.frombuffer(sig, dtype=np.float32).copy() if sig else None
+        self._automatic_live_signal = (
+            np.asarray(self._live_signal, dtype=np.float32).copy()
+            if self._live_signal is not None
+            else None
+        )
+        # The result object and note list stay detached from future edits.
+        automatic_result = copy.copy(res)
+        automatic_result.notes = [copy.copy(note) for note in res.notes]
+        self._automatic_live_result = automatic_result
+        if self._automatic_live_signal is not None and hasattr(automatic_result, "sr"):
+            automatic_result.duration_s = (
+                len(self._automatic_live_signal) / automatic_result.sr
+            )
         # LIVE vs FINAL, made visible: the notes the live segmenter had
         # confirmed are compared to the offline reading of the same take
         # through the ONE policy (`core.compare.match`) — every MOVED note
@@ -1539,10 +1819,6 @@ class MainWindow(QMainWindow):
             self._mark_live_final_diff()
         except Exception:  # the outlines are a nicety, never a lost take
             pass
-        sig = self.take_ctl.signal()
-        self._live_signal = (
-            np.frombuffer(sig, dtype=np.float32).copy() if sig else None
-        )
         self._signal_cache = (
             {"live": np.asarray(self._live_signal, dtype=np.float32)}
             if self._live_signal is not None
@@ -1550,11 +1826,13 @@ class MainWindow(QMainWindow):
         )
         self.source_path = "live"
         self._accuracy_plot_target = "results"
-        # Export FIRST: the take is the user's data, a cosmetic hiccup below
-        # must never cost it (it used to silently skip the export entirely).
+        # Export FIRST: presentation and playback setup must not prevent the
+        # take's data from reaching its artifact writer.
         self.stop_playback()
         self.player = NotePlayer(
-            res.notes, sr=audio_io.SR, gain=self._piano_gain(),
+            res.notes,
+            sr=audio_io.SR,
+            gain=self._piano_gain(),
             on_error=self._on_playback_error,
         )
         self.playback.set_sources(piano=self.player.signal, voice=self._live_signal)
@@ -1570,6 +1848,7 @@ class MainWindow(QMainWindow):
         )
         # A fresh live result waits for explicit export before its replay
         # enters the archive or the coherence journal.
+
     def _pump_replay_queue(self) -> None:
         """Start the next queued replay, ONLY when nothing competes for DSP.
 
@@ -1582,18 +1861,19 @@ class MainWindow(QMainWindow):
         own `finished` signal.
         """
         if (
-            self._replacement_pending_analysis
+            self._workflow.phase
+            in (
+                WorkflowPhase.SPLICE_ANALYSIS,
+                WorkflowPhase.FULL_REANALYSIS,
+                WorkflowPhase.REPLACEMENT_DECISION,
+            )
             or self._signal_analysis_thread is not None
-            or self._full_reanalysis_thread is not None
         ):
             return
         stem_name = self.take_ctl.pump_replay(
-            capture_running=self.live_thread is not None
-            and self.live_thread.isRunning(),
+            capture_running=self.live_thread is not None and self.live_thread.isRunning(),
             timer_running=self.page_live.timer_active(),
-            worker_running=(
-                self._replay_worker is not None and self._replay_worker.isRunning()
-            ),
+            worker_running=(self._replay_worker is not None and self._replay_worker.isRunning()),
         )
         if not stem_name:
             return
@@ -1603,9 +1883,7 @@ class MainWindow(QMainWindow):
         # the worker writes the sidecar from its own thread (the archive IS
         # the product); the GUI only echoes the verdict and chains the next
         self._replay_worker.done.connect(self._on_replay_done)
-        self._replay_worker.failed.connect(
-            lambda msg: self.statusBar().showMessage(msg, 4_000)
-        )
+        self._replay_worker.failed.connect(lambda msg: self.statusBar().showMessage(msg, 4_000))
         self._replay_worker.finished.connect(self._on_replay_worker_finished)
         self._replay_worker.start()
 
@@ -1640,34 +1918,28 @@ class MainWindow(QMainWindow):
             # the final reading drawn BESIDE the captured one: the notes the
             # ONE policy flagged carry the accent, so a moved note reads as
             # two bars at two heights in one glance (no outline to decode)
-            moved = {
-                i
-                for i, note in enumerate(res.notes)
-                if any(mv.final is note for mv in moves)
-            }
+            moved = {i for i, note in enumerate(res.notes) if any(mv.final is note for mv in moves)}
             self.page_live.set_comparison_notes(res.notes, moved=moved)
         except Exception:  # a display nicety must never break the results
             pass
 
     def _finish_phrase_replacement(self, replacement_result, signal_bytes: bytes) -> None:
         """Splice the sung phrase, then rebuild evidence for the whole take."""
-        context = self._phrase_replacement
-        self._phrase_replacement = None
-        self.page_live.set_replacement_mode(False)
-        self.page_results.set_replacement_analyzing(True)
+        context = self._workflow.replacement
         if context is None:
-            self._replacement_pending_analysis = False
             return
-        original, original_signal, first, last, record_audio = context
-        self._live_record_audio = record_audio
-        self._replacement_source_path = original.source
-        # the state the decision will offer to restore: the take as it was
-        # when the singer chose to re-sing (captured BEFORE the live-notes
-        # hand-over is cleared below). The action travels with the state:
-        # the history's timeline labels this row "replacement".
-        before = snapshot_state(
-            original, original_signal, self._last_take_live_notes, action="replacement"
-        )
+        context = self._workflow.begin_splice_analysis(context.token)
+        if context is None:
+            return
+        original = context.source
+        original_signal = context.signal
+        if original_signal is None:
+            return
+        first, last = context.first, context.last
+        self._live_record_audio = context.record_audio
+        self.page_live.set_replacement_mode(False)
+        self.page_results.set_replacement_active(False)
+        self.page_results.set_replacement_analyzing(True)
         self._last_take_live_notes = []
         try:
             from ..core.edits import splice_phrase
@@ -1683,19 +1955,26 @@ class MainWindow(QMainWindow):
                 original.sr,
                 replacement_sr=replacement_result.sr,
             )
-            # the audition window: where the replaced span sits in the MERGED
-            # audio (the selection's start, its span stretched by delta)
             phrase_window = (
                 original.notes[first].start,
                 original.notes[last].end + delta,
             )
         except Exception as error:
-            self.result = original
-            self._replacement_pending_analysis = False
-            self._live_signal = original_signal
-            self.take_ctl.set_signal(original_signal.tobytes())
-            self._show_result(original, original_signal)
+            transition = self._workflow.fail_replacement(context.token)
+            if transition is not None and transition.replacement is not None:
+                self._apply_edit_state(transition.replacement.before)
+                self._live_record_audio = transition.replacement.record_audio
+            self.page_results.set_replacement_analyzing(False)
             self.show_error(tr("err replacement failed").format(e=error), timeout=8_000)
+            self._pump_replay_queue()
+            return
+
+        if not self._workflow.set_splice_window(context.token, phrase_window):
+            transition = self._workflow.fail_replacement(context.token)
+            if transition is not None and transition.replacement is not None:
+                self._apply_edit_state(transition.replacement.before)
+                self._live_record_audio = transition.replacement.record_audio
+            self.page_results.set_replacement_analyzing(False)
             self._pump_replay_queue()
             return
         self.result = original
@@ -1704,19 +1983,37 @@ class MainWindow(QMainWindow):
         self._show_result(original, original_signal)
         self.page_results.label_play_pos.setText(tr("ui replacement analyzing"))
         self.page_results.set_replacement_analyzing(True)
-        self._replacement_pending_analysis = True
-        self._replacement_decision = (before, phrase_window[0], phrase_window[1])
-        # a splice awaiting its decision rewrites part of the take: the
-        # diff's ghost bars describe a reading the decision will change
         self._clear_reading_diff()
-        self._signal_analysis_thread = SignalAnalysisThread(
-            merged_signal, original.sr, source="live"
+        worker = SignalAnalysisThread(merged_signal, original.sr, source="live")
+        self._signal_analysis_thread = worker
+        token = context.token
+        worker.finishedOk.connect(
+            lambda result, signal, token=token, current=worker: self._on_replacement_analysis_done(
+                result, signal, token, current
+            )
         )
-        self._signal_analysis_thread.finishedOk.connect(self._on_replacement_analysis_done)
-        self._signal_analysis_thread.failed.connect(self._on_replacement_analysis_failed)
-        self._signal_analysis_thread.start()
+        worker.failed.connect(
+            lambda error, token=token, current=worker: self._on_replacement_analysis_failed(
+                error, token, current
+            )
+        )
+        worker.finished.connect(
+            lambda current=worker: self._on_replacement_thread_finished(current)
+        )
+        worker.start()
 
-    def _on_replacement_analysis_done(self, result, signal: np.ndarray) -> None:
+    def _on_replacement_thread_finished(self, worker: SignalAnalysisThread) -> None:
+        """Release a completed worker without clearing a newer worker reference."""
+        if self._signal_analysis_thread is worker:
+            self._signal_analysis_thread = None
+
+    def _on_replacement_analysis_done(
+        self,
+        result: AnalysisResult,
+        signal: np.ndarray,
+        token: int | None = None,
+        worker: SignalAnalysisThread | None = None,
+    ) -> None:
         """Publish the spliced take and hand the decision to the singer.
 
         The splice is NOT applied yet: the views show the spliced take and
@@ -1724,12 +2021,17 @@ class MainWindow(QMainWindow):
         the play buttons), then keeps it — the splice becomes an undoable
         edit — or cancels it — the take returns to what it was.
         """
-        self._signal_analysis_thread = None
-        self._replacement_pending_analysis = False
+        transition = (
+            self._workflow.accept_current(token, WorkflowPhase.SPLICE_ANALYSIS)
+            if token is not None
+            else None
+        )
+        if transition is None or transition.replacement is None:
+            return
+        if worker is not None and self._signal_analysis_thread is worker:
+            self._signal_analysis_thread = None
+        result.source = transition.replacement.source.source
         self.page_results.set_replacement_analyzing(False)
-        if self._replacement_source_path is not None:
-            result.source = self._replacement_source_path
-        self._replacement_source_path = None
         invalidate_breakdown(result)
         self._last_take_live_notes = []
         self.stop_playback()
@@ -1739,15 +2041,12 @@ class MainWindow(QMainWindow):
         self._signal_cache = {result.source: self._live_signal}
 
         self.player = NotePlayer(
-            result.notes, sr=result.sr, gain=self._piano_gain(),
+            result.notes,
+            sr=result.sr,
+            gain=self._piano_gain(),
             on_error=self._on_playback_error,
         )
         self.playback.set_sources(piano=self.player.signal, voice=self._live_signal)
-        if self._replacement_decision is None:
-            # no decision context (the splice came from another path): the
-            # spliced take is shown, the singer keeps or re-exports as today
-            self._show_result(result, self._live_signal)
-            return
         self.page_results.set_replacement_pending(True)
         self._show_result(result, self._live_signal)
         self.statusBar().showMessage(tr("ui replacement pending"), 8_000)
@@ -1756,12 +2055,28 @@ class MainWindow(QMainWindow):
 
     def _on_accept_replacement(self) -> None:
         """Keep the spliced take: the decision becomes an undoable edit."""
-        decision = self._replacement_decision
-        if decision is None or self.result is None:
+        transition = self._workflow.resolve_replacement(accept=True)
+        if transition is None or transition.resolution is None or self.result is None:
             return
-        self._replacement_decision = None
+        resolution = transition.resolution
         self.page_results.set_replacement_pending(False)
-        self._edit_history.record(decision[0])
+        if resolution.record_history:
+            self._edit_history.record(resolution.replacement.before)
+            self.result.manual_pitch_corrections = True
+            if self._automatic_live_result is None:
+                before = resolution.replacement.before.result
+                before = resolution.replacement.before.result
+                automatic_result = copy.copy(before)
+                automatic_result.notes = [copy.copy(note) for note in before.notes]
+                automatic_result.manual_pitch_corrections = False
+                self._automatic_live_result = automatic_result
+            if (
+                self._automatic_live_signal is None
+                and resolution.replacement.before.signal is not None
+            ):
+                self._automatic_live_signal = np.asarray(
+                    resolution.replacement.before.signal, dtype=np.float32
+                ).copy()
         self._sync_edit_history()
         self.statusBar().showMessage(
             tr("ui replacement accepted").format(n=len(self.result.notes)), 8_000
@@ -1770,12 +2085,11 @@ class MainWindow(QMainWindow):
 
     def _on_cancel_replacement(self) -> None:
         """Refuse the splice: the take returns to what it was."""
-        decision = self._replacement_decision
-        if decision is None:
+        transition = self._workflow.resolve_replacement(accept=False)
+        if transition is None or transition.resolution is None:
             return
-        self._replacement_decision = None
         self.page_results.set_replacement_pending(False)
-        self._apply_edit_state(decision[0])
+        self._apply_edit_state(transition.resolution.replacement.before)
         self._sync_edit_history()
         self.statusBar().showMessage(tr("ui replacement cancelled"), 6_000)
         self._pump_replay_queue()
@@ -1788,20 +2102,28 @@ class MainWindow(QMainWindow):
         WITHOUT refilling the views (the caller is on its way elsewhere)
         and the edit history is untouched (nothing was ever applied).
         """
-        decision = self._replacement_decision
-        if decision is None:
+        transition = self._workflow.abandon_replacement()
+        if transition is None or transition.resolution is None:
             return
-        self._replacement_decision = None
         self.page_results.set_replacement_pending(False)
-        self._apply_edit_state(decision[0], show=False)
+        self.page_results.set_replacement_active(False)
+        self.page_results.set_replacement_analyzing(False)
+        self.page_live.set_replacement_mode(False)
+        self._live_record_audio = transition.resolution.replacement.record_audio
+        self._apply_edit_state(transition.resolution.replacement.before, show=False)
 
     def on_audition_replacement(self) -> None:
         """Play the re-sung phrase, as the spliced take will sound there."""
-        decision = self._replacement_decision
+        replacement = self._workflow.replacement
         signal = self._live_signal
-        if decision is None or signal is None or self.result is None:
+        if (
+            replacement is None
+            or replacement.phrase_window is None
+            or signal is None
+            or self.result is None
+        ):
             return
-        _before, phrase_start, phrase_end = decision
+        phrase_start, phrase_end = replacement.phrase_window
         sr = self.result.sr
         lo = max(0, int(round(phrase_start * sr)))
         hi = min(len(signal), int(round(phrase_end * sr)))
@@ -1818,7 +2140,7 @@ class MainWindow(QMainWindow):
         )
         self._sync_play_buttons()  # the button state follows the sounding clip
 
-    def _submit_audition(self, request: AuditionRequest, *, show) -> None:
+    def _submit_audition(self, request: AuditionRequest, *, show) -> bool:
         """Submit-then-apply: the window resolved the clip, the controller
         decides EVERYTHING — identity, toggle, replace, silence on a failed
         start — and the returned facts name the readout to clear. The
@@ -1840,6 +2162,7 @@ class MainWindow(QMainWindow):
             # toggle-off, failure, or an idle controller: nothing to observe
             self._play_timer.stop()
         self._sync_play_buttons()  # the button state follows the sounding clip
+        return transition.active is not None
 
     def _apply_audition_transition(self, transition) -> None:
         """The ONE place the controller's facts reach the pages: the kind
@@ -1877,9 +2200,7 @@ class MainWindow(QMainWindow):
                 clips=(np.asarray(signal[lo:hi], dtype=np.float32),),
                 mode="voice",
             ),
-            show=lambda: self.page_results.show_note_audition(
-                index, note.midi, len(result.notes)
-            ),
+            show=lambda: self.page_results.show_note_audition(index, note.midi, len(result.notes)),
         )
 
     # ------------------------------------------------------------------
@@ -1938,7 +2259,7 @@ class MainWindow(QMainWindow):
             show=lambda: self.page_live.show_note_audition(index, note.midi, len(notes)),
         )
 
-    def on_audition_original(self) -> None:
+    def on_audition_original(self) -> bool:
         """Play the selected phrase's ORIGINAL audio, before re-singing it.
 
         The clip is cut from the take's CURRENT signal (the live take's, or
@@ -1948,19 +2269,19 @@ class MainWindow(QMainWindow):
         """
         signal = self._voice_signal()
         if signal is None or self.result is None:
-            return
+            return False
         indices = self.page_results._selected_note_indices()
         if not indices:
-            return
+            return False
         notes = self.result.notes
         if indices[-1] >= len(notes):
-            return
+            return False
         sr = self.result.sr
         lo = max(0, int(round(notes[indices[0]].start * sr)))
         hi = min(len(signal), int(round(notes[indices[-1]].end * sr)))
         if hi <= lo:
-            return
-        self._submit_audition(
+            return False
+        return self._submit_audition(
             AuditionRequest(
                 kind="phrase_original",
                 identity=("phrase_original", indices[0], indices[-1]),
@@ -1979,11 +2300,7 @@ class MainWindow(QMainWindow):
         res = self.result
         if res is None:
             return None
-        signal = (
-            self._live_signal
-            if res.source == "live"
-            else self._signal_cache.get(res.source)
-        )
+        signal = self._live_signal if res.source == "live" else self._signal_cache.get(res.source)
         return snapshot_state(res, signal, self._last_take_live_notes, action=action)
 
     def _sync_edit_history(self) -> None:
@@ -2005,16 +2322,12 @@ class MainWindow(QMainWindow):
         One owner of the rule, so the dropdown can never reach a state
         undo would refuse and Del can never fire where an edit cannot.
         """
-        if self.result is None or self._replacement_decision is not None:
+        if self.result is None or self._workflow.phase is not WorkflowPhase.IDLE:
             return False
         # the shortcut is window-wide: it only acts where the edits live
         if self.stack.currentWidget() is not self.page_results:
             return False
-        if (
-            self._phrase_replacement is not None
-            or self._signal_analysis_thread is not None
-            or self._full_reanalysis_thread is not None
-        ):
+        if self._signal_analysis_thread is not None:
             return False  # a capture or full reanalysis is in progress
         return True
 
@@ -2047,6 +2360,48 @@ class MainWindow(QMainWindow):
         key and the fields it formats, never a message string.
         """
         self.statusBar().showMessage(tr(key).format(**fields), 6_000)
+
+    def _publish_note_edit(
+        self,
+        intent: NoteEditIntent,
+        *,
+        acknowledgement_key: str,
+        **acknowledgement_fields,
+    ) -> EditOutcome:
+        """Commit one direct edit, then publish its result to every GUI reader.
+
+        The core transaction can fail while validating the intent or rebuilding
+        derived facts. Keep every presentation change after it returns so a
+        rejected candidate cannot clear the reading diff or disturb playback.
+        """
+        result = self.result
+        if result is None:
+            raise RuntimeError("there is no current result to edit")
+
+        outcome = apply_note_edit(
+            result,
+            self._edit_history,
+            signal=self._current_analysis_signal(),
+            live_notes=self._last_take_live_notes,
+            intent=intent,
+        )
+        self._clear_reading_diff()
+        self.stop_playback()
+        self.result = outcome.result
+        self.player = NotePlayer(
+            outcome.result.notes,
+            sr=outcome.result.sr,
+            gain=self._piano_gain(),
+            on_error=self._on_playback_error,
+        )
+        self.playback.set_sources(
+            piano=self.player.signal,
+            voice=self._voice_signal(),
+        )
+        self._show_result(outcome.result)
+        self._sync_edit_history()
+        self._ack_edit(acknowledgement_key, **acknowledgement_fields)
+        return outcome
 
     def on_undo_edit(self) -> None:
         """Restore the take as it was before the last applied note edit."""
@@ -2081,9 +2436,7 @@ class MainWindow(QMainWindow):
         self.result = res
         if res.source == "live":
             self._live_signal = (
-                np.asarray(state.signal, dtype=np.float32)
-                if state.signal is not None
-                else None
+                np.asarray(state.signal, dtype=np.float32) if state.signal is not None else None
             )
             self._signal_cache = (
                 {"live": np.asarray(self._live_signal, dtype=np.float32)}
@@ -2102,56 +2455,52 @@ class MainWindow(QMainWindow):
             )
         self._last_take_live_notes = list(state.live_notes)
         self.player = NotePlayer(
-            res.notes, sr=res.sr, gain=self._piano_gain(),
+            res.notes,
+            sr=res.sr,
+            gain=self._piano_gain(),
             on_error=self._on_playback_error,
         )
         self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
         if show:
             self._show_result(res, state.signal)
 
-
-    def _on_replacement_analysis_failed(self, error: str) -> None:
-        """Keep the original result visible if rebuilt evidence cannot be read."""
-        self._signal_analysis_thread = None
-        self._replacement_pending_analysis = False
-        self._replacement_decision = None
+    def _on_replacement_analysis_failed(
+        self,
+        error: str,
+        token: int | None = None,
+        worker: SignalAnalysisThread | None = None,
+    ) -> None:
+        """Restore the original take only for the current failed analysis."""
+        transition = self._workflow.fail_replacement(token) if token is not None else None
+        if transition is None or transition.replacement is None:
+            return
+        if worker is not None and self._signal_analysis_thread is worker:
+            self._signal_analysis_thread = None
+        replacement = transition.replacement
         self.page_results.set_replacement_analyzing(False)
-        if self.result is not None:
-            if self._replacement_source_path is not None:
-                self.result.source = self._replacement_source_path
-                self._replacement_source_path = None
-            self.take_ctl.set_signal(
-                self._live_signal.tobytes() if self._live_signal is not None else b""
-            )
-            self._show_result(self.result, self._live_signal)
-        else:
-            self._replacement_source_path = None
+        self.page_results.set_replacement_active(False)
+        self.page_live.set_replacement_mode(False)
+        self._clear_reading_diff()
+        self._live_record_audio = replacement.record_audio
+        self._apply_edit_state(replacement.before)
+        self._show_result(replacement.source, replacement.signal)
+        self.take_ctl.set_signal(
+            replacement.signal.tobytes() if replacement.signal is not None else b""
+        )
         self.show_error(tr("err replacement failed").format(e=error), timeout=8_000)
         self._pump_replay_queue()
 
     def on_correct_note(self, index: int, midi: int) -> None:
-        """Correct one selected note and refresh the score's dependent facts."""
-        if self.result is None:
+        """Correct one selected note and publish its committed take state."""
+        result = self.result
+        if result is None:
             return
-        # a manual correction rewrites the shown reading: any before/after
-        # diff would compare the old reading with a half-edited one
-        self._clear_reading_diff()
-        before = self._edit_snapshot()
         try:
-            from ..core.edits import correct_note_pitch
-
-            correct_note_pitch(self.result, index, midi)
-            self.stop_playback()
-            self.player = NotePlayer(
-                self.result.notes, sr=self.result.sr, gain=self._piano_gain(),
-                on_error=self._on_playback_error,
+            self._publish_note_edit(
+                CorrectPitchIntent(index=index, midi=midi),
+                acknowledgement_key="ui status note corrected",
+                note=note_display_pair(midi),
             )
-            self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
-            self._show_result(self.result)
-            if before is not None:
-                self._edit_history.record(before)
-            self._sync_edit_history()
-            self._ack_edit("ui status note corrected", note=note_display_pair(midi))
         except Exception as error:
             self.show_error(tr("err note correction failed").format(e=error), timeout=8_000)
 
@@ -2163,34 +2512,23 @@ class MainWindow(QMainWindow):
         answers NO where no edit may happen (another page, a splice, a
         re-singing capture) and the bar simply snaps back.
         """
-        if not self._edit_jumps_allowed():
+        current = self.result
+        if current is None or not self._edit_jumps_allowed():
             return
-        # a moved bar rewrites the shown reading: the diff dies with it
-        self._clear_reading_diff()
-        before = self._edit_snapshot(action="move")
         try:
-            from ..core.edits import move_note
-
-            move_note(self.result, index, start_s=start_s, end_s=end_s, midi=midi)
-            self.stop_playback()
-            result = self.result
-            assert result is not None  # the edit guard answered NO on None
-            self.player = NotePlayer(
-                result.notes, sr=result.sr, gain=self._piano_gain(),
-                on_error=self._on_playback_error,
+            outcome = self._publish_note_edit(
+                MoveNoteIntent(index=index, start_s=start_s, end_s=end_s, midi=midi),
+                acknowledgement_key="ui status note moved",
+                note=note_display_pair(midi),
             )
-            self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
-            self._show_result(self.result)
-            if before is not None:
-                self._edit_history.record(before)
-            self._sync_edit_history()
-            self._ack_edit("ui status note moved", note=note_display_pair(midi))
+            result = outcome.result
             # the drag's companion, LAST so the player rebuild above cannot
             # kill it: the OLD note, then the moved one — read from the
             # snapshot the edit records, so an undo-then-replay answers
             # exactly what the release played
-            if before is not None and index < len(before.result.notes):
-                self._start_move_audition(before.result.notes[index], result.notes[index])
+            before_notes = outcome.before.result.notes
+            if index < len(before_notes):
+                self._start_move_audition(before_notes[index], result.notes[index])
         except Exception as error:
             self.show_error(tr("err note move failed").format(e=error), timeout=8_000)
 
@@ -2198,33 +2536,22 @@ class MainWindow(QMainWindow):
         """Delete the selected notes as ONE undoable edit (the Del key).
 
         No selection stays silent — Del belongs to other widgets too. The
-        edit follows the correction path (snapshot, mutate, re-show,
-        record), so one undo restores every deleted note at once; a
-        deletion that would empty the take is refused by the core and
-        announced, history untouched.
+        shared edit transaction records one whole before-state, so one undo
+        restores every deleted note at once; a deletion that would empty the
+        take is refused by the core and announced without changing history.
         """
         result = self.result
         if result is None or not self._edit_jumps_allowed():
             return
-        # a deleted range rewrites the shown reading: the diff dies with it
-        self._clear_reading_diff()
         indices = self.page_results._selected_note_indices()
         if not indices:
             return
-        before = self._edit_snapshot(action="deletion")
         try:
-            delete_notes(result, indices)
-            self.stop_playback()
-            self.player = NotePlayer(
-                result.notes, sr=result.sr, gain=self._piano_gain(),
-                on_error=self._on_playback_error,
+            self._publish_note_edit(
+                DeleteNotesIntent(indices=tuple(indices)),
+                acknowledgement_key="ui status notes deleted",
+                n=len(indices),
             )
-            self.playback.set_sources(piano=self.player.signal, voice=self._voice_signal())
-            self._show_result(result)
-            if before is not None:
-                self._edit_history.record(before)
-            self._sync_edit_history()
-            self._ack_edit("ui status notes deleted", n=len(indices))
         except Exception as error:
             self.show_error(tr("err note deletion failed").format(e=error), timeout=8_000)
 
@@ -2239,27 +2566,25 @@ class MainWindow(QMainWindow):
         if not indices or indices != list(range(indices[0], indices[-1] + 1)):
             self.show_error(tr("err replacement selection"), timeout=6_000)
             return
-        self._phrase_replacement = (
-            result,
-            signal.copy(),
-            indices[0],
-            indices[-1],
-            self._live_record_audio,
+        state = snapshot_state(result, signal, self._last_take_live_notes, action="replacement")
+        replacement = self._workflow.begin_replacement(
+            state, indices[0], indices[-1], self._live_record_audio
         )
-        self._replacement_pending_analysis = True
+        if replacement is None:
+            return
         self.page_results.set_replacement_active(True)
         try:
             self.on_start_live()
         except Exception as error:
             self._cancel_phrase_replacement(str(error))
             return
-        self._live_record_audio = self._phrase_replacement[4]
+        self._live_record_audio = replacement.record_audio
         self.page_live.set_replacement_mode(True)
         self.page_live.announce(tr("ui replacement prompt"))
 
     def on_finish_phrase_replacement(self) -> None:
         """Stop singing the replacement; the live finalizer handles its audio."""
-        if self._phrase_replacement is None:
+        if self._workflow.phase is not WorkflowPhase.REPLACEMENT_CAPTURE:
             return
         self.on_stop_live()
 
@@ -2292,11 +2617,13 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.page_results)
         self.page_results.set_result(
             res,
-            signal if signal is not None
+            signal
+            if signal is not None
             else self._signal_cache.get(res.source)
             if res.source != "live"
             else self._live_signal,
         )
+        self._refresh_archive_comparison()
 
     def on_stop_live(self) -> None:
         self.page_live.exit_review()
@@ -2328,9 +2655,9 @@ class MainWindow(QMainWindow):
                 # thread sits) — `_install_console_quit` turns it into a
                 # clean window close instead of a process abort.
                 self.live_thread.wait(6000)
-            dropped = self.live_thread.take.dropped_blocks if (
-                self.live_thread.take is not None
-            ) else 0
+            dropped = (
+                self.live_thread.take.dropped_blocks if (self.live_thread.take is not None) else 0
+            )
             if dropped:
                 # the honesty counter, read where the eye is: the live note
                 # count reads hollow (blocks never reached the DSP), the WAV
@@ -2340,7 +2667,7 @@ class MainWindow(QMainWindow):
             # a take whose replay was DEFERRED (its analysis arrived while
             # the next capture was already running) starts HERE, where no
             # capture competes for the drain thread
-            if not self._replacement_pending_analysis:
+            if not self._workflow.replacement_pending:
                 try:
                     self._pump_replay_queue()
                 except Exception:
@@ -2350,24 +2677,27 @@ class MainWindow(QMainWindow):
 
     def _cancel_phrase_replacement(self, error: str) -> None:
         """Restore the original take when replacement capture cannot finish."""
-        context = self._phrase_replacement
-        self._phrase_replacement = None
-        self._replacement_pending_analysis = False
+        context = self._workflow.replacement
+        transition = self._workflow.fail_replacement(context.token) if context else None
+        if transition is None or transition.replacement is None:
+            return
+        replacement = transition.replacement
         self.page_live.set_replacement_mode(False)
         self.page_results.set_replacement_analyzing(False)
         self.page_results.set_replacement_active(False)
         self._clear_reading_diff()
-        if context is not None:
-            original, signal, _first, _last, record_audio = context
-            self.result = original
-            self._live_signal = signal
-            self._live_record_audio = record_audio
-            self.take_ctl.set_signal(signal.tobytes())
-            self._show_result(original, signal)
+        self._live_record_audio = replacement.record_audio
+        self._apply_edit_state(replacement.before, show=False)
+        self.take_ctl.set_signal(
+            replacement.signal.tobytes() if replacement.signal is not None else b""
+        )
+        self._show_result(replacement.source, replacement.signal)
         self.show_error(tr("err replacement failed").format(e=error), timeout=8_000)
         self._pump_replay_queue()
 
-    def _live_thread_failed(self, error: str, signal_bytes: bytes = b"") -> None:
+    def _live_thread_failed(
+        self, error: str, signal_bytes: bytes = b"", replacement_token: int | None = None
+    ) -> None:
         """The take's finalization failed: announce it, leave the trace.
 
         ONE place for the failure event (before, only the status label saw
@@ -2389,7 +2719,14 @@ class MainWindow(QMainWindow):
         stop-time trace would brand a healthy take failed before its
         export arrived.
         """
-        if self._phrase_replacement is not None:
+        if replacement_token is not None:
+            if not self._workflow.is_current(
+                replacement_token, WorkflowPhase.REPLACEMENT_CAPTURE
+            ):
+                return
+            self._cancel_phrase_replacement(error)
+            return
+        if self._workflow.replacement_pending:
             self._cancel_phrase_replacement(error)
             return
         self.page_live.on_failed(error)
@@ -2462,6 +2799,10 @@ class MainWindow(QMainWindow):
         if live is not None and live.isRunning():
             live.stop()
             live.wait(2_000)  # the drain is bounded; the app is quitting anyway
+        calibration = self._calibration_thread
+        if calibration is not None and calibration.isRunning():
+            calibration.stop()
+            calibration.wait(2_000)
         self.take_ctl.close()  # the session's queue dies with the window
         super().closeEvent(event)
 
@@ -2527,6 +2868,91 @@ class MainWindow(QMainWindow):
     # public method names the home button and the tests use — thin
     # delegations, no finder logic left here.
     # ------------------------------------------------------------------
+    def _read_input_device_key(self) -> str | None:
+        """Load the device preference without making startup depend on it."""
+        try:
+            value = json.loads(INPUT_DEVICE_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, str) else None
+
+    def _write_input_device_key(self, key: str | None) -> None:
+        """Persist the user's selection best-effort."""
+        try:
+            if key is None:
+                INPUT_DEVICE_FILE.unlink(missing_ok=True)
+            else:
+                INPUT_DEVICE_FILE.write_text(json.dumps(key), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _input_device_choices(self) -> list[tuple[str, str]]:
+        """Return a stable key and localized label for every input endpoint."""
+        return [(device.key, device.label) for device in audio_io.input_devices()]
+
+    def _on_input_device_changed(self, key: str | None) -> None:
+        """Keep the shared selection on the window and apply it next capture."""
+        self._selected_input_key = key
+        self._write_input_device_key(key)
+        self._refresh_input_device_status()
+
+    def _resolve_input_device(self) -> audio_io.ResolvedInputDevice:
+        return audio_io.resolve_input_device(self._selected_input_key)
+
+    def _refresh_input_device_status(self) -> None:
+        resolved = self._resolve_input_device()
+        self._active_input_label = resolved.name
+        self._input_device_fell_back = resolved.fell_back
+        self.page_home.set_input_device_status(resolved.name, resolved.fell_back)
+
+    def _on_live_capture_opened(self, raw: bool) -> None:
+        """Report the endpoint the capture ACTUALLY opened, and its processing.
+
+        A raw (exclusive) open bypasses the driver's effects chain, so nothing
+        is said; a shared one means the chain may have filtered the take
+        before the app heard it — a fact no evidence INSIDE the take carries.
+        """
+        thread = self.live_thread
+        name = thread.device_name if thread is not None else ""
+        self.page_live.set_driver_effects(not raw and driver_fx.driver_effects_active(name))
+
+    def _new_input_thread(self) -> LiveThread:
+        """Resolve and announce the endpoint once for this capture."""
+        resolved = self._resolve_input_device()
+        self._active_input_label = resolved.name
+        self._input_device_fell_back = resolved.fell_back
+        if resolved.fell_back:
+            message = tr("ui input device missing").format(device=resolved.name)
+            self.statusBar().showMessage(message, 8_000)
+        return LiveThread(
+            device=resolved.index,
+            device_name=resolved.name,
+            # a driver effects chain is bypassed by the raw mode when the
+            # endpoint offers one; a refusal falls back INSIDE the capture
+            exclusive=driver_fx.driver_effects_active(resolved.name),
+        )
+
+    def _new_finder_input_thread(self) -> LiveThread:
+        """Build the finder capture and label its actually resolved device."""
+        thread = self._new_input_thread()
+        self.page_finder.set_input_device_status(thread.device_name, self._input_device_fell_back)
+        thread.captureOpened.connect(self._on_finder_capture_opened)
+        return thread
+
+    def _on_calibration_capture_opened(self, raw: bool) -> None:
+        """The card's own capture: name its endpoint's chain only if it applied."""
+        thread = self._calibration_thread
+        name = thread.device_name if thread is not None else ""
+        self.page_home.calibration_card.set_driver_effects(
+            not raw and driver_fx.driver_effects_active(name)
+        )
+
+    def _on_finder_capture_opened(self, raw: bool) -> None:
+        """The finder's capture: a raw open already bypassed the chain."""
+        thread = self.page_finder.thread
+        name = thread.device_name if thread is not None else ""
+        self.page_finder.set_driver_effects(not raw and driver_fx.driver_effects_active(name))
+
     def on_open_finder(self) -> None:
         self.stack.setCurrentWidget(self.page_finder)
         self.page_finder.open()
@@ -2576,8 +3002,8 @@ class MainWindow(QMainWindow):
 def run_gui() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Voix → MIDI")
-    app.setStyleSheet(STYLESHEET)
     win = MainWindow()
+    app.setStyleSheet(widgets.theme_stylesheet())
     win.show()
     _install_console_quit(app, win)
     sys.exit(app.exec())

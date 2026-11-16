@@ -1,11 +1,8 @@
 """Space on the FROZEN live roll auditions the CAPTURED note.
 
-The live page's roll holds the take's captured reading (the live notes),
-a different list from the final analysis. Space there used to emit
-`audition_requested` into nothing; now the window slices the take's audio
-at the captured note's own onset/offset and shows the readout on the live
-page — the page the review is displayed on — with the results page's ONE
-stop path clearing it.
+The live page's roll holds captured notes, distinct from the final
+analysis. Space auditions the selected captured note from the take's own
+audio and shows its readout on the live page; the shared stop path clears it.
 """
 
 from __future__ import annotations

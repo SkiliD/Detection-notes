@@ -8,7 +8,7 @@ metronome).
 
 from __future__ import annotations
 
-from .grid import BeatGrid, CATALOGUE, Figure
+from .grid import CATALOGUE, BeatGrid, Figure
 
 DEFAULT_TOLERANCE = 0.18  # +/-18% around the ideal duration
 
@@ -63,8 +63,14 @@ def figures_summary(notes) -> dict[str, int]:
     return counts
 
 
-_SHORT = {"ronde": "R", "blanche": "B", "noire": "N", "croche": "C",
-          "double-croche": "DC", "trente-deuxième": "32"}
+_SHORT = {
+    "ronde": "R",
+    "blanche": "B",
+    "noire": "N",
+    "croche": "C",
+    "double-croche": "DC",
+    "trente-deuxième": "32",
+}
 
 
 def short_label(figure: str | None) -> str:
@@ -77,4 +83,4 @@ def short_label(figure: str | None) -> str:
     dots = 2 if "double-pointée" in figure else 1 if "pointée" in figure else 0
     base = figure.removesuffix(" pointée").removesuffix(" double-pointée")
     label = _SHORT.get(base, "?")
-    return f"{label}." * dots if dots else label
+    return label + "." * dots

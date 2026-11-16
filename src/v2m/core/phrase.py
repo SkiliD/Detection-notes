@@ -1,11 +1,13 @@
 """Side-by-side comparison of two takes of the same phrase: ONE engine.
 
-The user works by repetition: sing a phrase, listen, sing it again. The
-question "did the second take change anything?" used to mean opening two
-JSON reports and diffing them by eye. This module answers it with the
-ONE matching policy already shared by every live/final consumer
-(`core.compare.match`): each note of take A pairs with the NEAREST note
-of take B, and every pairing is CLASSIFIED:
+The user works by repetition: sing a phrase, listen, sing it again. This
+module compares the takes with the matching policy shared by the other
+two-reading comparison
+(`core.compare.chronological_pairs`):
+each note of take A pairs with a note of take B through one chronological
+dynamic program (an association costs its onset shift, an unpaired note
+costs a beat — so a nearest-first choice cannot spend a partner a later
+note needed), and every pairing is CLASSIFIED:
 
 - `same`: identical pitch, onset within the window — the phrase is
   stable there;
@@ -22,11 +24,9 @@ The window is the SAME rule as the live/final net: the largest of the
 take's grid sixteenth and the segmenter's 0.10 s dating lead — a
 time-shifted label under one sixteenth is the same reading, not a move.
 A pair only forms WITHIN ONE BEAT of take B (`60 / bpm_b`, the same
-bound CONTEXT.md publishes): the nearest-by-onset net alone would pair
-every A note with SOMETHING and a count imbalance would read as bogus
-`moved` pairs against the wrong notes; past a beat the two notes are
-not the same sung event (the singer restructured the phrase) and the
-note is missing/added instead.
+bound CONTEXT.md publishes): past a beat the two notes are not the same
+event (the singer restructured the phrase) and the note is
+missing/added instead.
 The onsets are compared at a COMMON TEMPO: each take has its own BPM,
 so the shift is expressed in the SECOND take's beats (`tempo-scaled`):
 the same sung phrase at a slightly different tempo must not flood the
@@ -47,7 +47,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .compare import LIVE_DATING_LEAD_S
+from .compare import LIVE_DATING_LEAD_S, chronological_pairs
 
 # The two reports' tempo disagreement that still counts as "the same
 # phrase": beyond this relative gap the timing shift is dominated by the
@@ -60,10 +60,10 @@ TEMPO_TOLERANCE = 0.05
 
 @dataclass(frozen=True)
 class Pair:
-    """One note of take A and its nearest counterpart in take B.
+    """One note of take A and its counterpart in take B.
 
     `reason` is the classification above; `shift_s` is the signed onset
-    shift (B minus A, seconds); `shift_beats` is the same shift in
+    shift (B minus tempo-scaled A, seconds of B); `shift_beats` is the same shift in
     take B's quarter beats (the tempo-scaled view the singer reads).
     """
 
@@ -90,10 +90,10 @@ class PhraseComparison:
     bpm_a: float
     bpm_b: float
     paired: list[Pair]
-    missing: list[int]      # indexes into A: no B note near enough to pair
-    added: list[int]        # indexes into B: no A note claimed them
-    tempo_ratio: float      # bpm_b / bpm_a
-    notes_a: list[dict]     # the plain report notes (the drill-down reads them)
+    missing: list[int]  # indexes into A: no B note near enough to pair
+    added: list[int]  # indexes into B: no A note claimed them
+    tempo_ratio: float  # bpm_b / bpm_a
+    notes_a: list[dict]  # the plain report notes (the drill-down reads them)
     notes_b: list[dict]
 
     @property
@@ -122,12 +122,7 @@ class PhraseComparison:
         agree: an absorbed glide on one side lands as missing/added and
         fails the verdict honestly.
         """
-        return (
-            not self.missing
-            and not self.added
-            and self.n_moved == 0
-            and self.n_shifted == 0
-        )
+        return not self.missing and not self.added and self.n_moved == 0 and self.n_shifted == 0
 
 
 def read_report(path: str | Path) -> dict | None:
@@ -160,9 +155,13 @@ def _note_list(report: dict) -> list[dict]:
     if not isinstance(notes, list):
         return []
     return sorted(
-        (n for n in notes
-         if isinstance(n, dict) and isinstance(n.get("start_s"), (int, float))
-         and isinstance(n.get("midi"), int)),
+        (
+            n
+            for n in notes
+            if isinstance(n, dict)
+            and isinstance(n.get("start_s"), (int, float))
+            and isinstance(n.get("midi"), int)
+        ),
         key=lambda n: float(n["start_s"]),
     )
 
@@ -183,54 +182,43 @@ def compare_reports(
 ) -> PhraseComparison:
     """Compare two exported reports of the same phrase, side by side.
 
-    The matching is the nearest-by-onset net over both directions at
-    once (greedy best-first, one-to-one): every candidate pair (an A
-    note, a B note) is a candidate; the closest onsets pair first, each
-    note used once. One-to-one is what the COUNTS mean: a missing note
-    is one the singer did not re-sing, and a shared note would hide it
-    (the first draft paired the nearest B note per A note without
-    exclusivity — the extra A notes read as bogus `moved` pairs against
-    the wrong B note instead of `missing`). Candidates beyond ONE BEAT
-    of take B (`60 / bpm_b`, the bound CONTEXT.md publishes) are never
-    formed: past it the two notes are not the same sung event. The
-    pairs then classify per the policy above, onsets judged at take B's
-    tempo (beats), so a slightly different tempo does not read as a
-    time shift.
+    The matching is `compare.chronological_pairs` over both onsets at
+    once (tempo-scaled to take B): a chronological dynamic program with
+    an explicit cost per association, missing note and added note. One-to-
+    one is what the COUNTS mean: a missing note is one the singer did not
+    re-sing, and a shared note would hide it (the first draft paired the
+    nearest B note per A note without exclusivity — the extra A notes read
+    as bogus `moved` pairs against the wrong B note instead of `missing`).
+    No association is ever formed beyond ONE BEAT of take B (`60 / bpm_b`,
+    the bound CONTEXT.md publishes): past it the two notes are not the
+    same sung event, and an unpaired note costs one beat while an
+    association costs its shift — so the program keeps every pairing that
+    exists instead of letting a nearest-first choice spend a partner a
+    later note needed (the reading-diff case: before 0.4/0.7 s, after
+    0/0.5 s at a 0.5 s beat pairs both ways only globally). The pairs then
+    classify per the policy above, onsets judged at take B's tempo
+    (beats), so a slightly different tempo does not read as a time shift.
     """
     notes_a = _note_list(a)
     notes_b = _note_list(b)
     bpm_a, bpm_b = _bpm_of(a), _bpm_of(b)
+    scale_a = bpm_a / bpm_b
     tol = _pairing_window(bpm_b)
     beats_s = 60.0 / bpm_b  # one quarter beat of take B, in seconds
 
-    # every candidate pair inside the bound, closest onsets first: the
-    # greedy one-to-one matching (a phrase has tens of notes, not
-    # thousands — the sort is free and the rule reads itself)
-    candidates: list[tuple[float, int, int]] = []
-    for ia, na in enumerate(notes_a):
-        start_a = float(na["start_s"])
-        for ib, nb in enumerate(notes_b):
-            d = abs(float(nb["start_s"]) - start_a)
-            if d <= beats_s:  # one beat of B: past it, not the same event
-                candidates.append((d, ia, ib))
-    candidates.sort()
-    used_a: set[int] = set()
-    chosen_b: set[int] = set()
-    pairs: dict[int, tuple[int, float]] = {}  # ia -> (ib, shift)
-    for _d, ia, ib in candidates:
-        if ia in used_a or ib in chosen_b:
-            continue
-        used_a.add(ia)
-        chosen_b.add(ib)
-        shift = float(notes_b[ib]["start_s"]) - float(notes_a[ia]["start_s"])
-        pairs[ia] = (ib, shift)
+    # the onsets both sides are judged on: A tempo-scaled to B, then ONE
+    # chronological alignment (a phrase has tens of notes, not thousands)
+    starts_a = [float(na["start_s"]) * scale_a for na in notes_a]
+    starts_b = [float(nb["start_s"]) for nb in notes_b]
+    matches, missing, added = chronological_pairs(starts_a, starts_b, beats_s)
+    pairs: dict[int, tuple[int, float]] = {
+        ia: (ib, starts_b[ib] - starts_a[ia]) for ia, ib in matches
+    }
 
     paired: list[Pair] = []
-    missing: list[int] = []
     for ia, na in enumerate(notes_a):
         if ia not in pairs:
-            missing.append(ia)  # nothing of B inside one beat: not re-sung
-            continue
+            continue  # nothing of B inside one beat: not re-sung
         ib, shift = pairs[ia]
         nb = notes_b[ib]
         same_pitch = int(nb["midi"]) == int(na["midi"])
@@ -255,7 +243,6 @@ def compare_reports(
         )
     # the reverse coverage: a B note the matching did not claim is one
     # take B sang that take A has nothing at that moment for
-    added = [ib for ib in range(len(notes_b)) if ib not in chosen_b]
     return PhraseComparison(
         stem_a=stem_a,
         stem_b=stem_b,
@@ -283,6 +270,4 @@ def compare_take_files(
     ra, rb = read_report(path_a), read_report(path_b)
     if ra is None or rb is None:
         return None
-    return compare_reports(
-        ra, rb, stem_a=Path(path_a).stem, stem_b=Path(path_b).stem
-    )
+    return compare_reports(ra, rb, stem_a=Path(path_a).stem, stem_b=Path(path_b).stem)

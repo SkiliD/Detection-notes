@@ -20,6 +20,7 @@ delivering faster than real time is MEASURED to lie (7 notes instead of
 their content). No take artifact is modified: the script only LOOKS.
 Takes without a WAV are listed as not replayable.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,10 +28,23 @@ import json
 import sys
 from pathlib import Path
 
+from v2m.core.compare import read_block
 from v2m.core.replay import REPLAY_SR, engine_fingerprint, replay_take
 from v2m.core.takes import read_sidecar
 
 DEFAULT_ROOT = "prises_live"
+
+
+def _rate_label(row: dict) -> str:
+    parsed = read_block(
+        {
+            "live": row.get("live_notes"),
+            "final": row.get("final_notes"),
+            "rate": row.get("rate"),
+        }
+    )
+    rate = parsed.comparable_rate if parsed is not None else None
+    return f"{rate * 100:.0f}%" if rate is not None else "N/A (not comparable)"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,12 +53,14 @@ def main(argv: list[str] | None = None) -> int:
         description="Replays the WAV takes through the GUI chain (a fake real-time "
         "mic) and archives the live/final gap + the contour rate per take.",
     )
-    parser.add_argument("root", nargs="?", default=DEFAULT_ROOT,
-                        help="the takes' folder (default: prises_live)")
+    parser.add_argument(
+        "root", nargs="?", default=DEFAULT_ROOT, help="the takes' folder (default: prises_live)"
+    )
     parser.add_argument("--out", help="write the JSON table to this file")
     parser.add_argument("--take", help="replay only this take (stem name)")
     parser.add_argument(
-        "--changed", action="store_true",
+        "--changed",
+        action="store_true",
         help="replay only the takes whose audit was measured by an OLDER "
         "engine version (the code hash stored in the live_vs_final "
         "sidecar) — after an engine change",
@@ -57,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Name the folder that CONTAINS the takes (one sub-folder per take).")
         return 2
 
-    wavs = sorted(root.glob("*/*.wav")) if not args.take else sorted(root.glob(f"{args.take}/*.wav"))
+    pattern = f"{args.take}/*.wav" if args.take else "*/*.wav"
+    wavs = sorted(root.glob(pattern))
     if args.take:
         wavs = [w for w in wavs if w.parent.name == args.take]
     if args.changed:
@@ -79,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         if skipped:
             print(f"[--changed] {skipped} take(s) already audited by this engine — skipped.")
     if not wavs:
-        print(f"No take WAV in \"{root}\" — tick \"Record the audio\" at the take.")
+        print(f'No take WAV in "{root}" — tick "Record the audio" at the take.')
         return 0
 
     rows: list[dict] = []
@@ -95,10 +112,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    failed: {e}")
             continue
         rows.append(row)
+        rate = _rate_label(row)
         print(
             f"    live {row['live_notes']:>3} | final {row['final_notes']:>3}"
             f" | contours {row['contours']:>3} (±1: {row['off1']},"
-            f" moved: {row['moved']}) | rate {row['rate']*100:.0f}%"
+            f" moved: {row['moved']}) | rate {rate}"
             f" | {row['duration_s']} s @ {REPLAY_SR} Hz"
         )
 
@@ -111,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             print(
                 f"{r['stem']:<34}{r['live_notes']:>5}{r['final_notes']:>6}"
-                f"{r['contours']:>8}{r['off1']:>5}{r['moved']:>5}{r['rate']*100:>5.0f}%"
+                f"{r['contours']:>8}{r['off1']:>5}{r['moved']:>5}  {_rate_label(r)}"
             )
     if args.out:
         Path(args.out).write_text(

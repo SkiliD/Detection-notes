@@ -55,38 +55,64 @@ from .compare import breakdown
 # too (LiveCapture resamples to the analysis rate exactly as for a voice).
 REPLAY_SR = 44_100
 
+# Changes to any of these sources can change a replayed live or final
+# reading. Keep the set beside the fingerprint that consumes it.
+_ENGINE_SOURCE_NAMES = (
+    "replay.py",
+    "live_session.py",
+    "liveseg.py",
+    "compare.py",
+    "meter.py",
+    "pipeline.py",
+    "audio_io.py",
+    "chords.py",
+    "figures.py",
+    "grid.py",
+    "keys.py",
+    "music.py",
+    "notes.py",
+    "observation.py",
+    "onsets.py",
+    "pitch.py",
+    "rests.py",
+    "tempo.py",
+)
+
 
 def engine_fingerprint() -> str:
     """A hash of the replay engine's OWN code: what `--changed` compares.
 
-    The sources of the modules a replay actually runs through (replay,
-    live_session, liveseg, compare, meter) are hashed together — a change
-    in ANY of them means the previous audits were measured by another
-    engine and must be re-derived. Data files are excluded on purpose:
+    The replay, capture, segmentation, interpretation and comparison source
+    files are hashed together — a change in ANY of them means previous
+    audits were measured by another engine and must be re-derived. Missing
+    source files raise instead of producing a plausible-looking fingerprint.
+    Data files are excluded on purpose:
     only CODE changes invalidate a verdict. Deterministic within a
-    checkout (sorted names, read bytes); good enough to answer "did the
-    engine change since this audit", not a security primitive.
+    checkout (fixed source order, read bytes); good enough to answer "did
+    the engine change since this audit", not a security primitive.
     """
     import hashlib
 
-    from . import __file__ as _pkg_root  # type: ignore[attr-defined]
-
-    root = Path(_pkg_root).parent  # .../core/__init__.py -> v2m/
-    names = [
-        "core/replay.py", "core/live_session.py", "core/liveseg.py",
-        "core/compare.py", "core/meter.py", "core/pipeline.py",
-    ]
+    package_dir = Path(__file__).resolve().parent
     digest = hashlib.sha256()
-    for name in names:
+    for name in _ENGINE_SOURCE_NAMES:
+        path = package_dir / name
         digest.update(name.encode("utf-8"))
         try:
-            digest.update((root / name).read_bytes())
-        except OSError:
-            digest.update(b"<missing>")  # a moved module invalidates too
+            source = path.read_bytes()
+        except OSError as exc:
+            raise FileNotFoundError(f"Cannot fingerprint replay source {path}") from exc
+        digest.update(source)
     return digest.hexdigest()[:16]
 
 
-def _fake_input_stream(audio: np.ndarray, sr: int, stop: Optional[Callable[[], bool]] = None):
+def _fake_input_stream(
+    audio: np.ndarray,
+    sr: int,
+    stop: Optional[Callable[[], bool]] = None,
+    *,
+    finished: threading.Event | None = None,
+):
     """Build a replacement `InputStream` that replays `audio` at 1x.
 
     Same shape as the test harnesses' fakes: the PortAudio callback gets
@@ -110,15 +136,14 @@ def _fake_input_stream(audio: np.ndarray, sr: int, stop: Optional[Callable[[], b
             self._thread.start()
 
         def _play(self) -> None:
-            delay = self.block / self.rate
             for i in range(0, len(self._audio), self.block):
                 if self._stop.is_set() or (self._cancel and self._cancel()):
                     return
                 blk = self._audio[i : i + self.block]
-                if len(blk) < self.block:
-                    blk = np.pad(blk, (0, self.block - len(blk)))
-                self.callback(blk.reshape(-1, 1), self.block, None, None)
-                time.sleep(delay)
+                self.callback(blk.reshape(-1, 1), len(blk), None, None)
+                time.sleep(len(blk) / self.rate)
+            if finished is not None:
+                finished.set()
 
         def stop(self) -> None:
             self._stop.set()
@@ -197,7 +222,8 @@ def replay_take(
     `stream_factory` opens the input (default: the built-in real-time
     replayer); `output_factory` opens an optional monitoring output, skipped
     when None; `stop` is an optional predicate polled between blocks so a
-    cancelled replay returns early. The row carries the same numbers as the
+    cancelled replay returns an empty dict without final analysis. The row
+    carries the same numbers as the
     script's table (live/final counts, contours, rate, tempo), the replay's
     own `dropped` honesty counter, and the error key when the take could
     not be replayed.
@@ -205,31 +231,36 @@ def replay_take(
     from .live_session import LiveTake
 
     y = audio_io.load_file(str(wav_path), sr=REPLAY_SR)
-    factory = stream_factory or _fake_input_stream(y, REPLAY_SR, stop)
+    finished = threading.Event()
+    factory = stream_factory or _fake_input_stream(y, REPLAY_SR, stop, finished=finished)
     take = LiveTake(stream_factory=factory)
-    take.start()
-    if output_factory is not None:
-        # the monitoring output is best-effort: no speaker must cost the audit
-        try:
-            output_factory(samplerate=REPLAY_SR)
-        except Exception:
-            pass
-    # LiveCapture reads the injected stream at the real clock; wait until it
-    # consumed the file (elapsed counts device samples). Delivering faster
-    # is measured to lie: the wait IS the replay's real-time cost.
     audio_s = len(y) / REPLAY_SR
     deadline = time.monotonic() + max(30.0, audio_s * 2.5)
-    while (
-        take.state == "recording"
-        and take.elapsed < audio_s * 0.98
-        and not (stop and stop())
-    ):
-        if time.monotonic() > deadline:
-            break
-        time.sleep(0.05)
+    try:
+        take.start()
+        if output_factory is not None:
+            # Monitoring is optional; a missing speaker cannot cost the audit.
+            try:
+                output_factory(samplerate=REPLAY_SR)
+            except Exception:
+                pass
+        # Injected streams publish progress through the capture's sample clock.
+        # The built-in stream additionally confirms that delivery has ended.
+        while not (finished.is_set() if stream_factory is None else take.elapsed >= audio_s):
+            if stop and stop():
+                return {}
+            if take.state != "recording":
+                raise RuntimeError("Replay capture stopped before delivery completed")
+            if time.monotonic() > deadline:
+                raise TimeoutError("Replay delivery did not complete before its deadline")
+            time.sleep(0.01)
+    finally:
+        # This drains captured blocks and flushes the held note before snapshotting.
+        signal = take.stop()
+    if stop and stop():
+        return {}
     seg_notes = list(take.segmenter.notes) if take.segmenter else []
-    take.stop()
-    result = _final_reading(take, Path(wav_path), y)
+    result = _final_reading(take, Path(wav_path), signal)
     final_notes = result.notes if result is not None else []
     block = breakdown(seg_notes, final_notes, result.grid if result else None)
     return {

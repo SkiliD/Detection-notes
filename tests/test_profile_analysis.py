@@ -21,11 +21,8 @@ a few seconds; the 2 s discarded warm-up stays (it is part of the run
 the table describes).
 
 The "Heaviest stage: …" trailer repeats one row's label on purpose; the
-body filter must drop it by its REAL prefix, else the heaviest PIPELINE
-stage (pYIN, on a loaded machine) counts twice and fails "duplicated".
-The filter used to match a French prefix the script never printed —
-dead code whose double count stayed hidden only because `file decoding`
-(a script row, not a pipeline label) kept winning.
+body filter drops it by its real prefix so each pipeline stage appears
+once in the reported table.
 """
 
 from __future__ import annotations
@@ -41,7 +38,6 @@ from types import ModuleType
 import numpy as np
 import pytest
 import soundfile as sf
-
 from conftest import SR, silence, sine_note
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "profile_analysis.py"
