@@ -19,10 +19,10 @@ py -3.12 -m venv .venv
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-pip install -e ".[dev]" -c constraints.txt
+pip install -e ".[dev]"
 ```
 
-Le fichier de contraintes épingle les versions de bibliothèques sur lesquelles les références audio ont été mesurées ; sans lui, un résolveur peut installer un librosa ou un numba plus récents et signaler un autre moteur comme une régression.
+Le dépôt s'installe depuis les plages de pyproject ; un fichier de contraintes local (gardé hors du dépôt) peut épingler les versions de bibliothèques sur lesquelles les références audio ont été mesurées, parce que sans épinglage un résolveur peut installer un librosa ou un numba plus récents et signaler un autre moteur comme une régression.
 
 Ci-dessous, `python` et `pytest` désignent cet environnement (sous Windows sans activation, utilisez `.venv/Scripts/python.exe`).
 
@@ -144,7 +144,7 @@ Outils facultatifs, lancés depuis la racine du projet dans l'environnement acti
 - `scripts/compare_takes.py` : comparer deux prises d'une même phrase ; `--json` écrit la comparaison.
 - `scripts/make_demo.py` génère le `demo.wav` ignoré par git dont le test de fumée graphique a besoin.
 - `scripts/import_bench.py` reproduit la mesure d'import WSL : il copie les paquets du venv courant sur le disque Windows et donne la médiane des imports à chaud depuis ext4 et /mnt/c.
-- `scripts/check_vendor_lock.py` : recalcule le hash du dossier vendorisé et sort en 1 quand `vendor-lock.json` ne correspond plus — hors ligne, sans pytest.
+- `scripts/lots.py` : reconstruire l'index d'un lot depuis `scripts/lots.toml` et prouver ses tests sur un export gelé de HEAD — les fichiers d'un commit, mis à l'index et vérifiés loin de l'arbre de travail, pour que « quels fichiers vont ensemble » et « cet ensemble est vert tout seul » cessent d'être des commandes tapées à la main. Il sort en 1 quand un lot est rouge ; les options qu'il prend sont listées dans sa docstring.
 
 ## Vérifications
 
@@ -162,7 +162,7 @@ La moitié Linux du garde tourne dans une distribution WSL, et son environnement
 
 ```bash
 wsl -d Ubuntu -- bash -lc 'sudo apt-get update && sudo apt-get install -y python3-venv libportaudio2 libasound2t64 libjack-jackd2-0 libegl1 libgl1 libglib2.0-0t64 libxkbcommon0 libdbus-1-3 libfontconfig1'
-wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && python3 -m venv ~/.venvs/v2m && ~/.venvs/v2m/bin/pip install -e ".[dev]" -c constraints.txt'
+wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && python3 -m venv ~/.venvs/v2m && ~/.venvs/v2m/bin/pip install -e ".[dev]"'
 wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/v2m-run LIBGL_ALWAYS_SOFTWARE=1 V2M_SUITE_BUDGET_S=900 PYTHONFAULTHANDLER=1 ~/.venvs/v2m/bin/python -m pytest tests/ -q -n 0'
 wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && ~/.venvs/v2m/bin/python scripts/make_demo.py'
 wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && install -d -m 700 /tmp/v2m-run && QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/v2m-run LIBGL_ALWAYS_SOFTWARE=1 ~/.venvs/v2m/bin/python -u scripts/gui_smoke_test.py'
@@ -173,9 +173,9 @@ La suite et le test de fumée GUI hors écran sont les deux moitiés du garde de
 
 `-n 0` est la forme série que l'intégration continue utilise aussi, pour qu'un plantage natif nomme son test au lieu d'emporter la sortie d'un processus ; `QT_QPA_PLATFORM=offscreen` parce que la distribution n'a pas d'affichage ; `XDG_RUNTIME_DIR` et `LIBGL_ALWAYS_SOFTWARE` parce que Qt et PortAudio veulent un dossier d'exécution et pas de GPU ; `V2M_SUITE_BUDGET_S` parce qu'une distribution WSL est plus lente que la machine sur laquelle le budget de 150 secondes a été calibré (mesuré 322 s) ; `PYTHONFAULTHANDLER` pour qu'un plantage natif imprime la pile de chaque fil. Mettez le chemin du dépôt entre guillemets (il contient en général une espace), et gardez les recettes en plusieurs étapes dans un script : `wsl.exe` consomme `$VAR` et `$?` avant que bash ne les voie.
 
-Pour le travail sur le dépôt, passez par les GitHub Issues ; les notes de conception derrière le code (`AGENTS.md`, `CONTEXT.md`, `SKILLS.md`, `constraints.txt`, la documentation projet sous `docs/project/` et la recette matérielle `docs/recette-materielle-navigateurs.md`) sont versionnées et suivent un clone. Les décisions sous `docs/adr/`, les rapports datés (`*_YYYY-MM-DD.md` à la racine du dépôt), les captures (`page-prise-*.png`), `docs/engine-drift.md` et `docs/superpowers/` restent locaux et ne sont pas versionnés.
+Pour le travail sur le dépôt, passez par les GitHub Issues ; les notes de travail derrière le code (`AGENTS.md`, `CONTEXT.md`, `SKILLS.md`, `constraints.txt`, les notes sous `docs/project/`, la recette matérielle `docs/recette-materielle-navigateurs.md` et `prises_verite/README.md`) restent locaux à la machine — ignorés par `.gitignore`, donc jamais proposés par git. Les décisions sous `docs/adr/`, les rapports datés (`*_YYYY-MM-DD.md` à la racine du dépôt), les captures (`page-prise-*.png`), `docs/engine-drift.md` et `docs/superpowers/` restent aussi locaux et ne sont pas versionnés.
 
-Un seul dossier tiers de fabrication d'interface est vendorisé à dessein, pour que chaque clone relise les mêmes consignes : `vendor/make-interfaces-feel-better/`, copié depuis jakubkrehel/make-interfaces-feel-better au commit épinglé par `vendor-lock.json`. Le dossier est identique octet pour octet à l'amont — le hash du verrou est celui de l'amont — et sa licence MIT voyage à côté, dans `vendor/make-interfaces-feel-better-LICENSE` (Copyright (c) 2026 Jakub Krehel) ; `.gitattributes` épingle le dossier et le verrou en LF parce que le verrou hache leurs octets : `scripts/check_vendor_lock.py` et `tests/test_docs_guard.py` vérifient ce même hash ainsi que le suivi du dossier, de la licence et du verrou et le LF du verrou sur le disque, et un déplacement amont est un re-vendor délibéré, jamais une mise à jour automatique. Rien d'autre sous `vendor/` ne suit un clone, et rien ici ne lit un dossier vendorisé à l'exécution.
+Aucun contenu tiers n'est vendorisé dans le dépôt : les consignes d'interface consultées pendant le développement, leur verrou et leur licence restent locaux à la machine (`vendor/`, ignoré par `.gitignore`), et rien ici ne les lit à l'exécution.
 
 ## Licence
 

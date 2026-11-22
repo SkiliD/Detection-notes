@@ -5,7 +5,7 @@ Contracts that require automated enforcement:
 1. **The repo tracks NO generated artifact** (the .gitignore header:
    "ignore everything that is not a source"). The only versioned JSONs
    are the tests' frozen references, the page's own table and fixtures, and
-   the vendored folder's lockfile. An artifact committed by accident
+   the page's own table and fixtures. An artifact committed by accident
    (out.mid, live_20260923_….json) is exactly the regression this test
    refuses — reviewing .gitignore at every new output path is not enough
    when it depends on memory.
@@ -83,7 +83,6 @@ from __future__ import annotations
 
 import ast
 import io
-import json
 import re
 import subprocess
 import tempfile
@@ -92,7 +91,7 @@ import tokenize
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts.check_vendor_lock import folder_files, folder_hash
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 AGENTS = REPO / "AGENTS.md"
@@ -153,178 +152,31 @@ WEB_JSON = (
 # reading, so a hand-edited WAV fails `test_web_build.py` instead of silently
 # comparing two different signals. The singer's own takes stay personal.
 PARITY_AUDIO = "tests/data/parity.wav"
-# The vendored folder's lockfile: a SOURCE that pins the upstream commit of
-# `vendor/make-interfaces-feel-better/` (MIT, license beside it). It is
-# not an analysis output; `.gitignore` whitelists it after its `*.json` rule.
-VENDORED_JSON = ("vendor-lock.json",)
-# The vendored folder itself, hashed by `computedHash` in that lock.
-VENDORED_FOLDER = "vendor/make-interfaces-feel-better"
-# Its MIT license travels BESIDE the hashed folder: inside it, the digest would
-# be ours instead of upstream's and the lock would read the copy as modified.
-VENDORED_LICENSE = "vendor/make-interfaces-feel-better-LICENSE"
+def test_the_local_vendor_material_is_never_tracked():
+    """The machine-local vendor folder, lockfile and check script stay out of git.
 
-
-def test_the_vendored_folder_matches_its_locked_hash():
-    """An edited vendored folder must fail the gate, not ship silently.
-
-    `vendor-lock.json` records the digest of the upstream copy; the suite
-    recomputes the same digest, so an in-place edit is refused on any machine.
-    Re-vendoring is deliberate: copy the folder from the upstream source
-    instead of editing it. The license is checked separately: it lives outside
-    the hashed folder, so the folder can stay byte-identical to upstream while
-    the attribution still travels with a clone. The digest has ONE owner,
-    `scripts/check_vendor_lock.py`, imported here, so the offline check and
-    this gate can never disagree about what the lock means.
+    They are local working material (interface instructions consulted while
+    building), not sources: the ignore patterns must keep them out of a fresh
+    `git add -A`, and the index must never carry them.
     """
-    # The documented vector: a one-file folder hashes as its framing
-    # says, so this test cannot pass with a differently-framed digest.
-    assert folder_hash([("SKILL.md", b"# hi\n")]) == (
-        "93c36952d8843b33e68ae970ebabcc03e1687c9bb0dd1ecaf357060318952f55"
-    ), "the vendored-folder digest no longer follows the pinned framing"
-
-    lock = json.loads((REPO / "vendor-lock.json").read_text(encoding="utf-8"))
-    locked = lock["vendored"]["make-interfaces-feel-better"]["computedHash"]
-    folder = REPO / VENDORED_FOLDER
-    assert folder.is_dir(), f"the vendored folder is gone: {VENDORED_FOLDER}"
-    assert not (folder / "LICENSE").exists(), (
-        f"{VENDORED_FOLDER} carries a LICENSE inside the hashed folder: the copy is no "
-        "longer byte-identical to upstream, and the lock would read it as modified"
-    )
-    license_file = REPO / VENDORED_LICENSE
-    assert license_file.is_file(), (
-        f"the vendored license is gone: {VENDORED_LICENSE}"
-    )
-    license_text = license_file.read_text(encoding="utf-8")
-    assert license_text.startswith("MIT License") and "Jakub Krehel" in license_text, (
-        "the vendored license is no longer the upstream MIT text with its copyright line"
-    )
-    assert locked == folder_hash(folder_files(folder)), (
-        f"{VENDORED_FOLDER} no longer matches vendor-lock.json — re-vendor it from "
-        "the upstream source instead of editing the copy, or the stored hash is stale"
-    )
-
-
-def test_the_vendored_license_and_the_lock_travel_and_stay_lf():
-    """The READMEs promise the attribution travels; only the index travels.
-
-    `git check-ignore --no-index` reads the ignore PATTERNS, so a path can pass
-    that guard and still never enter a commit — this one asks the index itself.
-    The lock is what the vendor check compares byte for byte, so it must be
-    tracked and LF on disk, not merely pinned by `.gitattributes` (checked next door).
-    """
-    tracked = set(_tracked())
-    folder_md = f"{VENDORED_FOLDER}/SKILL.md"
-    assert folder_md in tracked, (
-        f"the vendored folder is not tracked: {folder_md} would not travel with a clone"
-    )
-    assert VENDORED_LICENSE in tracked, (
-        f"its license is not tracked: {VENDORED_LICENSE} would not travel with a clone"
-    )
-    assert VENDORED_LICENSE.startswith("vendor/"), (
-        "the license moved out of vendor/: both READMEs name it there"
-    )
-    license_text = (REPO / VENDORED_LICENSE).read_text(encoding="utf-8")
-    assert license_text.startswith("MIT License") and "Jakub Krehel" in license_text, (
-        "the file the READMEs cite as the MIT license is no longer that text"
-    )
-    assert "vendor-lock.json" in tracked, (
-        "vendor-lock.json is not tracked: a clone could not pin the vendored commit and hash"
-    )
-    raw = (REPO / "vendor-lock.json").read_bytes()
-    assert b"\r\n" not in raw, (
-        "vendor-lock.json carries CRLF: the folder it pins would read as modified"
-    )
-    assert not raw.startswith(b"\xef\xbb\xbf"), (
-        "vendor-lock.json opens with a BOM: the lock stops parsing as JSON"
-    )
-
-
-def test_the_offline_lock_check_answers_0_on_a_match_and_1_when_it_moved(tmp_path, capsys):
-    """The script the READMEs tell a reader to run, on a pair it can be wrong about.
-
-    The vendored folder is pinned above; this proves the CHECK itself, against
-    a temporary folder and lock, so an edit that makes it always answer 0 (or
-    always 1) fails here. In-process: no subprocess, no network, no pytest on
-    the other side — the check exists for machines that have none of the three.
-    """
-    from scripts import check_vendor_lock
-
-    folder = tmp_path / "vendor" / "demo"
-    folder.mkdir(parents=True)
-    (folder / "SKILL.md").write_bytes(b"# demo\n")
-    expected = folder_hash(folder_files(folder))
-    lock = tmp_path / "vendor-lock.json"
-    lock.write_text(
-        json.dumps({"vendored": {"demo": {"computedHash": expected}}}),
-        encoding="utf-8",
-        newline="\n",
-    )
-
-    assert check_vendor_lock.main(folder, lock, "demo") == 0, "a matching digest failed"
-    said = capsys.readouterr()
-    assert expected in said.out, f"the success line never named the digest: {said.out!r}"
-
-    # One byte in the copy: same file name, a digest that no longer matches.
-    (folder / "SKILL.md").write_bytes(b"# demo!\n")
-    assert check_vendor_lock.main(folder, lock, "demo") == 1, "a moved digest passed"
-    said = capsys.readouterr()
-    assert "no longer matches" in said.err and expected[:12] in said.err, (
-        f"the refusal did not name the digest it expected: {said.err!r}"
-    )
-
-    # A folder outside the repository must be reported, not crash the label.
-    assert check_vendor_lock.main(tmp_path / "gone", lock, "demo") == 1, (
-        "a missing folder passed"
-    )
-    said = capsys.readouterr()
-    assert "folder is gone" in said.err, f"the refusal never named the folder: {said.err!r}"
-
-
-def test_only_the_vendored_folder_is_versioned_and_pinned_to_lf():
-    """ADR 0044 rests on two files' PATTERNS, so those patterns are pinned.
-
-    The ignore question is asked of the patterns (`--no-index`), not of the
-    index: a path that is already tracked is never reported ignored, which
-    would let a broken negation look right. `check-attr` resolves the LF pin
-    the same way a checkout would.
-    """
+    tracked = _tracked()
+    assert not any(
+        f == "vendor-lock.json"
+        or f == "scripts/check_vendor_lock.py"
+        or f.startswith("vendor/")
+        for f in tracked
+    ), "local vendor material is tracked: a clone would carry it"
 
     def ignored(path: str) -> bool:
         return subprocess.run(
             ["git", "check-ignore", "--no-index", "-q", path], cwd=REPO
         ).returncode == 0
 
-    assert not ignored("vendor/make-interfaces-feel-better/SKILL.md"), (
-        "the vendored folder is ignored again: the copy would not travel with a clone"
+    assert ignored("vendor/make-interfaces-feel-better/SKILL.md"), (
+        "the local vendor folder is no longer ignored: a fresh add would commit it"
     )
-    assert not ignored(VENDORED_LICENSE), (
-        "the vendored license is ignored: attribution would not travel with a clone"
-    )
-    assert not ignored("vendor-lock.json"), (
-        "the lock is ignored: nothing would pin the vendored commit and its hash"
-    )
-    # Every other folder under vendor/ stays machine-local.
-    assert ignored("vendor/some-other-folder/SKILL.md"), (
-        "a blanket whitelist would version any folder placed there later"
-    )
-    assert ignored("vendor/some-other-folder/notes.md")
-
-    def eol(path: str) -> str:
-        result = subprocess.run(
-            ["git", "check-attr", "eol", "--", path],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.rpartition(": ")[2].strip()
-
-    assert eol("vendor/make-interfaces-feel-better/SKILL.md") == "lf", (
-        "the vendored folder lost its LF pin: a CRLF checkout would read as modified"
-    )
-    assert eol("vendor-lock.json") == "lf", (
-        "the lock lost its LF pin: the folder hash is compared with its bytes"
-    )
+    assert ignored("vendor-lock.json")
+    assert ignored("scripts/check_vendor_lock.py")
 
 
 def test_repo_tracks_no_generated_artifacts():
@@ -343,7 +195,6 @@ def test_repo_tracks_no_generated_artifacts():
         if f.endswith(".json")
         and not f.startswith("tests/reference/")
         and f not in WEB_JSON
-        and f not in VENDORED_JSON
     ]
     assert not offenders, f"generated artifacts tracked : {offenders}"
 
@@ -893,6 +744,11 @@ SUBPROCESS_WHITELIST: dict[str, tuple[str, str]] = {
         "v2m.core.metronome ONLY (machine-checked below) — metronome "
         "imports no i18n, so nothing touches the persisted language",
     ),
+    "test_hardware_recipe.py": (
+        "git",
+        "git check-ignore plumbing only (cwd=REPO): verifies the local recipe "
+        "is ignored; no v2m code runs, no language state is read or written",
+    ),
 }
 
 
@@ -1044,6 +900,13 @@ PRODUCTION_WHITELIST: dict[str, tuple[str, str]] = {
         "runs the user's engraver (MuseScore/LilyPond) on a .musicxml — "
         "an external binary, never an interpreter: it cannot read or "
         "write ~/.v2m_lang",
+    ),
+    "scripts/lots.py": (
+        "external-tool",
+        "a checkout tool: `git` exports HEAD and stages one lot's index, then "
+        "the lot's OWN test runners (pytest's console script, `node --test`) "
+        "run inside that throwaway export — no payload is interpreted, and "
+        "none of them reads ~/.v2m_lang",
     ),
 }
 
@@ -1553,6 +1416,8 @@ def _named_web_selectors(text: str) -> list[str]:
 
 def test_agents_names_only_selectors_the_web_sheet_declares():
     """Guard 11: a renamed page control cannot leave AGENTS.md pointing at it."""
+    if not AGENTS.exists():
+        pytest.skip("AGENTS.md is local working material; a fresh clone does not carry it")
     named = _named_web_selectors(AGENTS.read_text(encoding="utf-8"))
     assert len(named) >= 8, f"AGENTS.md stopped naming web selectors: {named}"
     declared = _web_selector_tokens()

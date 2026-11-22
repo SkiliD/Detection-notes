@@ -1493,6 +1493,13 @@ def test_the_pages_workflow_tests_before_it_publishes():
     assert "node --test web/test/file.test.mjs" in verify_job, (
         "the chosen-file path does not stop a deploy"
     )
+    # The MIDI a reader downloads is written by hand, with no library to refuse
+    # a bad tick: the two rules a reader cannot see — an OFF before an ON at a
+    # shared tick, a same-pitch repeat released at its attack — are pinned by a
+    # test that needs no browser, so the deploy must stop on them.
+    assert "node --test web/test/midi.test.mjs" in verify_job, (
+        "the MIDI a reader downloads is never checked before a deploy"
+    )
     # The keyboard walk gates the deploy too: a focus chain that skips a
     # control, or a Space that does two things, is a page half the readers
     # cannot use. Its playback half needs an output device, so it runs a second
@@ -1515,6 +1522,12 @@ def test_the_pages_workflow_tests_before_it_publishes():
     # `resume()` forever on a machine with no output.
     assert "node --test web/test/playback-failure.test.mjs" in verify_job, (
         "a dead output device would leave the page on \"preparing\" again"
+    )
+    # The table's follow travels with the playhead, which only ticks once the
+    # page's audio graph runs: `verify` cannot prove it, so the null-sink job
+    # refuses the skip there.
+    assert "node --test web/test/follow.test.mjs" in capture_job, (
+        "the table's follow is never measured with a playhead that ticks"
     )
     assert "module-null-sink" in capture_job
     assert 'V2M_REQUIRE_AUDIO: "1"' in capture_job

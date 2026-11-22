@@ -1,27 +1,34 @@
 """The hardware/browser recipe is CITED, and still covers what it promises.
 
-`AGENTS.md` sends a reviewer to `docs/recette-materielle-navigateurs.md` for the
-pass a containerised matrix cannot make: the permission prompt, the sound card,
-the Files/Downloads shelf and a phone's WebKit. A citation to a document that
-was renamed, emptied or narrowed is worse than no citation — the reader is sent
-to a promise nobody keeps, and nothing in the suite notices.
-
-So the recipe's contract is pinned here: it exists, `AGENTS.md` names it, it is
-whitelisted in `.gitignore` (a clone must be able to have it), and it still
-carries SIX gestures, each with a table for the FOUR targets. What the criteria
-themselves say is the recipe's business; that they exist for every target is
-not.
+`AGENTS.md` (local working material) sends a reviewer to
+`docs/recette-materielle-navigateurs.md` for the pass a containerised matrix
+cannot make: the permission prompt, the sound card, the Files/Downloads shelf
+and a phone's WebKit. Both files are machine-local — ignored by `.gitignore`,
+so git never proposes them — and a fresh clone does not carry them, so every
+test here skips where they are absent. Where they are present, the recipe's
+contract is pinned: it exists, `AGENTS.md` names it, it is NOT addable, and it
+still carries SIX gestures, each with a table for the FOUR targets. What the
+criteria themselves say is the recipe's business; that they exist for every
+target is not.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 RECIPE = REPO / "docs" / "recette-materielle-navigateurs.md"
 AGENTS = REPO / "AGENTS.md"
-GITIGNORE = REPO / ".gitignore"
+
+
+@pytest.fixture(autouse=True)
+def _local_recipe_present():
+    if not (RECIPE.is_file() and AGENTS.is_file()):
+        pytest.skip("the recipe and AGENTS.md are local working notes; a clone does not carry them")
 
 TARGETS = ("iOS Safari", "Android Chrome", "Safari macOS", "Firefox")
 
@@ -62,12 +69,13 @@ def test_the_recipe_exists_and_agents_names_it():
     cited = f"`{RECIPE.relative_to(REPO).as_posix()}`"
     agents = AGENTS.read_text(encoding="utf-8")
     assert cited in agents, f"AGENTS.md no longer cites {cited}"
-    # The doc must be able to ship: `docs/*` is ignored, and each real document
-    # is whitelisted one by one (root-anchored, like its neighbours).
-    whitelist = f"!/{RECIPE.relative_to(REPO).as_posix()}"
-    assert whitelist in GITIGNORE.read_text(encoding="utf-8"), (
-        "the recipe is gitignored: a clone would cite a file it does not have"
-    )
+    # The doc is local working material: `docs/*` is ignored as a whole, so the
+    # recipe must be ignored too — git must never propose it as addable.
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-q", RECIPE.relative_to(REPO).as_posix()],
+        cwd=REPO,
+    ).returncode == 0
+    assert ignored, "the recipe is no longer ignored: git would propose it as addable"
 
 
 def test_the_recipe_keeps_its_six_gestures():

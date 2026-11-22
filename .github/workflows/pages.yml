@@ -57,6 +57,16 @@ jobs:
         # window is not a power of two: the page's own rule must still produce
         # those frozen windows and frames. Same skip as above without the take.
         run: node --test web/test/yin-rates.test.mjs
+      - name: The MIDI a reader downloads keeps every repeat's own length
+        # The writer is hand-written, so no library refuses a bad tick: the two
+        # rules a reader cannot see are pinned here. An OFF sorts before an ON
+        # at a shared tick, and a same-pitch repeat the analysis leaves
+        # overlapping (measured 20 ms on chant.wav and demo.wav) releases the
+        # note before it at the repeat's attack — written as it stands, that
+        # note's OFF would close the repeat at its own start and a 0.18 s note
+        # reads as 0.02 s. It needs no browser and no device, so it belongs in
+        # the job that decides what may be published.
+        run: node --test web/test/midi.test.mjs
 
       - name: The take a reader CHOOSES is read, exported and bundled
         # The decoder's own path: a real WAV through `decodeAudioData`, then the
@@ -222,7 +232,17 @@ jobs:
           V2M_REQUIRE_AUDIO: "1"
         run: node --test web/test/gestures.test.mjs
 
-      - name: The worklet's in-memory blob: module loads under the policy
+      - name: The notes table follows the row that sounds
+        # The decision (`playingRowScroll`) has its own unit test; this is the
+        # wiring that decision exists for, measured on a take longer than the
+        # window. The playhead only ticks once the page's audio graph runs, so a
+        # runner with no output device can only report — this job's null sink is
+        # what lets `V2M_REQUIRE_AUDIO` refuse that report instead.
+        env:
+          V2M_REQUIRE_AUDIO: "1"
+        run: node --test web/test/follow.test.mjs
+
+      - name: "The worklet's in-memory blob: module loads under the policy"
         # The policy's one exception is the worklet; a runner with no output
         # cannot start the graph that loads it. This job has the null sink, so
         # `V2M_REQUIRE_AUDIO` turns the skip into a failure here.

@@ -19,10 +19,10 @@ py -3.12 -m venv .venv
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-pip install -e ".[dev]" -c constraints.txt
+pip install -e ".[dev]"
 ```
 
-The constraint file pins the library versions the audio references were measured on; without it a resolver may install a newer librosa or numba and report a different engine as a regression.
+The repository installs from pyproject's ranges; a local constraint file (kept out of the repository) can pin the library versions the audio references were measured on, because without pins a resolver may install a newer librosa or numba and report a different engine as a regression.
 
 Below, `python` and `pytest` mean that environment (on Windows without activation, use `.venv/Scripts/python.exe`).
 
@@ -144,7 +144,7 @@ Optional tools, run from the project root in the activated environment. Each exp
 - `scripts/compare_takes.py`: compare two takes of one phrase; `--json` writes the comparison.
 - `scripts/make_demo.py` generates the gitignored `demo.wav` the GUI smoke test needs.
 - `scripts/import_bench.py` reproduces the WSL import measurement: it copies the current venv's packages to the Windows drive and reports the median warm import time from ext4 and /mnt/c.
-- `scripts/check_vendor_lock.py`: recompute the vendored folder's digest and exit 1 when `vendor-lock.json` no longer matches — offline, without pytest.
+- `scripts/lots.py`: rebuild one lot's index from `scripts/lots.toml` and prove its tests on a frozen export of HEAD — one commit's worth of files, staged and verified away from the working tree, so "which files belong together" and "that set is green on its own" stop being hand-run commands. It exits 1 when a lot is red; the options it takes are listed in its own docstring.
 
 ## Checks
 
@@ -162,7 +162,7 @@ The Linux half of the gate runs in a WSL distribution, and its virtualenv lives 
 
 ```bash
 wsl -d Ubuntu -- bash -lc 'sudo apt-get update && sudo apt-get install -y python3-venv libportaudio2 libasound2t64 libjack-jackd2-0 libegl1 libgl1 libglib2.0-0t64 libxkbcommon0 libdbus-1-3 libfontconfig1'
-wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && python3 -m venv ~/.venvs/v2m && ~/.venvs/v2m/bin/pip install -e ".[dev]" -c constraints.txt'
+wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && python3 -m venv ~/.venvs/v2m && ~/.venvs/v2m/bin/pip install -e ".[dev]"'
 wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/v2m-run LIBGL_ALWAYS_SOFTWARE=1 V2M_SUITE_BUDGET_S=900 PYTHONFAULTHANDLER=1 ~/.venvs/v2m/bin/python -m pytest tests/ -q -n 0'
 wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && ~/.venvs/v2m/bin/python scripts/make_demo.py'
 wsl -d Ubuntu -- bash -lc 'cd "/path/to/Detection notes" && install -d -m 700 /tmp/v2m-run && QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/v2m-run LIBGL_ALWAYS_SOFTWARE=1 ~/.venvs/v2m/bin/python -u scripts/gui_smoke_test.py'
@@ -173,9 +173,9 @@ The suite and the offscreen GUI smoke test are the two halves of the desktop gat
 
 `-n 0` is the serial form CI also runs, so a native crash names its test instead of taking a worker's output with it; `QT_QPA_PLATFORM=offscreen` because the distribution has no display; `XDG_RUNTIME_DIR` and `LIBGL_ALWAYS_SOFTWARE` because Qt and PortAudio want a runtime directory and no GPU; `V2M_SUITE_BUDGET_S` because a WSL distribution is slower than the machine the 150-second budget was calibrated on (measured 322 s); `PYTHONFAULTHANDLER` so a native crash prints every thread's stack. Quote the checkout path (it usually holds a space), and keep multi-step recipes in a script: `wsl.exe` consumes `$VAR` and `$?` before bash sees them.
 
-For repository work, use GitHub Issues; the design notes behind the code (`AGENTS.md`, `CONTEXT.md`, `SKILLS.md`, `constraints.txt`, the project docs under `docs/project/` and the hardware recipe `docs/recette-materielle-navigateurs.md`) are versioned and travel with a clone. The decisions under `docs/adr/`, dated reports (`*_YYYY-MM-DD.md` at the repository root), captures (`page-prise-*.png`), `docs/engine-drift.md` and `docs/superpowers/` stay local and are not committed.
+For repository work, use GitHub Issues; the working notes behind the code (`AGENTS.md`, `CONTEXT.md`, `SKILLS.md`, `constraints.txt`, the notes under `docs/project/`, the hardware recipe `docs/recette-materielle-navigateurs.md` and `prises_verite/README.md`) stay machine-local — ignored by `.gitignore`, so git never proposes them. The decisions under `docs/adr/`, dated reports (`*_YYYY-MM-DD.md` at the repository root), captures (`page-prise-*.png`), `docs/engine-drift.md` and `docs/superpowers/` also stay local and are not committed.
 
-One third-party UI-craft folder is vendored on purpose, so every clone reviews the same interface instructions: `vendor/make-interfaces-feel-better/`, copied from jakubkrehel/make-interfaces-feel-better at the commit `vendor-lock.json` pins. The folder is byte-identical to upstream — the lock's hash is upstream's own — and its MIT license travels beside it at `vendor/make-interfaces-feel-better-LICENSE` (Copyright (c) 2026 Jakub Krehel); `.gitattributes` pins the folder and the lock to LF because the lock hashes their bytes: `scripts/check_vendor_lock.py` and `tests/test_docs_guard.py` check that same digest and that the folder, the license and the lock are tracked with the lock LF on disk, and an upstream move is a deliberate re-vendor, never an automatic update. Nothing else under `vendor/` travels with a clone, and nothing here reads a vendored folder at runtime.
+No third-party content is vendored into the repository: the interface instructions consulted while building, their lockfile and their license stay machine-local (`vendor/`, ignored by `.gitignore`), and nothing here reads them at runtime.
 
 ## License
 

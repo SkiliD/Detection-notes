@@ -1,0 +1,34 @@
+# Which lot carries which files, and what proves it.
+#
+# `scripts/lots.py` reads this file: `files` is what one commit carries,
+# `tests` is what decides whether that commit is good (the runner is chosen by
+# the test's own suffix: `.py` through pytest, `.mjs` through `node --test`),
+# and `takes` names gitignored audio a test needs. TOML rather than JSON so the
+# manifest lives beside the code instead of under `.gitignore`'s `*.json`.
+
+[lots.midi-writer]
+files = [
+    "AGENTS.md",
+    "src/v2m/core/midi_export.py",
+    "tests/reference/artifacts.json",
+    "tests/test_midi.py",
+    "web/midi.js",
+    "web/test/midi.test.mjs",
+]
+tests = [
+    "tests/test_midi.py",
+    "tests/test_reference_artifacts.py",
+    "web/test/midi.test.mjs",
+]
+takes = ["chant.wav", "demo.wav"]
+
+[lots.gui-rings]
+files = [
+    "src/v2m/gui/widgets.py",
+    "tests/test_gui_craft_floor.py",
+    "tests/test_gui_stylesheet.py",
+]
+tests = [
+    "tests/test_gui_craft_floor.py",
+    "tests/test_gui_stylesheet.py",
+]

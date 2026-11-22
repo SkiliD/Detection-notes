@@ -756,7 +756,7 @@ class ResultsPage(QWidget):
         # rest; `_arrange_body` flips the orientation on resize.
         self.left_host.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.body = QSplitter(Qt.Orientation.Horizontal)
-        self.body.setHandleWidth(12)
+        self.body.setHandleWidth(widgets.SPLITTER_HANDLE_WIDTH)
         self.body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._refresh_theme_styles()
         self.body.setChildrenCollapsible(False)
@@ -1070,10 +1070,6 @@ class ResultsPage(QWidget):
             self.btn_open,
         ):
             link.setStyleSheet(link_button_style())
-        self.body.setStyleSheet(
-            f"QSplitter::handle:vertical {{ background: {widgets.BORDER_SOFT}; }}"
-            f"QSplitter::handle:vertical:hover {{ background: {widgets.ACCENT}; }}"
-        )
         self.piano.setBackground(widgets.BG_APP)
         self.waveform.setBackground(widgets.BG_APP)
         self.piano.set_notes(self.piano._last_notes, force=True)

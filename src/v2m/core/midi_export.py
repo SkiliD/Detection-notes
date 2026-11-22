@@ -53,33 +53,6 @@ def _mido_key(tonic: str, mode: str, transpose: int = 0) -> str:
     return _MAJOR_MIDO.get(tonic, "C")
 
 
-def _release_before_restrike(written: list[tuple[int, int, mido.Message]]) -> None:
-    """Put a note-off before a same-pitch note-on that shares its TICK.
-
-    Only the colliding pair moves: every other event keeps the time order it
-    was written in, so a file without the collision keeps its bytes.
-    """
-    index = 0
-    while index < len(written):
-        tick = written[index][0]
-        end = index
-        while end < len(written) and written[end][0] == tick:
-            end += 1
-        group = written[index:end]
-        position = 0
-        while position < len(group):
-            message = group[position][2]
-            if message.type == "note_on" and message.velocity > 0:
-                for later in range(position + 1, len(group)):
-                    other = group[later][2]
-                    if other.type == "note_off" and other.note == message.note:
-                        group.insert(position, group.pop(later))
-                        break
-            position += 1
-        written[index:end] = group
-        index = end
-
-
 def build_midi(
     notes: list[Note],
     grid: BeatGrid,
@@ -120,7 +93,7 @@ def build_midi(
     mid.tracks.append(voice)
     voice.append(mido.MetaMessage("track_name", name="Voice", time=0))
 
-    events: list[_MidiEvent] = []
+    written_notes: list[tuple[float, float, int, int]] = []
     for n in notes:
         start, end = n.start, n.end
         if quantize_s and quantize_s > 0:
@@ -128,11 +101,32 @@ def build_midi(
             end = max(start + quantize_s, round(end / quantize_s) * quantize_s)
         pitch = max(0, min(127, int(n.midi) + transpose))
         velocity = max(1, min(127, int(round(40 + 80 * n.confidence))))
+        written_notes.append((start, end, pitch, velocity))
+
+    # One key sounds one note at a time. A same-pitch repeat can start BEFORE
+    # the note before it ends — measured on chant.wav, where the analysis leaves
+    # a 20 ms window shared — and then the earlier note's OFF closes the repeat
+    # at its own attack: the repeat lasts the OVERLAP instead of its length. The
+    # earlier note is released AT the repeat's attack, so both events land on
+    # one tick, where the OFF sorts first (see the ordering below).
+    sounding: dict[int, int] = {}
+    for index in sorted(range(len(written_notes)), key=lambda i: written_notes[i][:2]):
+        start, end, pitch, velocity = written_notes[index]
+        held = sounding.get(pitch)
+        if held is not None:
+            held_start, held_end, _held_pitch, held_velocity = written_notes[held]
+            if held_end > start:
+                written_notes[held] = (held_start, start, pitch, held_velocity)
+        sounding[pitch] = index
+
+    events: list[_MidiEvent] = []
+    for start, end, pitch, velocity in written_notes:
         events.append(_MidiEvent(start, order=2, kind="note_on", pitch=pitch, value=velocity))
         events.append(_MidiEvent(end, order=1, kind="note_off", pitch=pitch))
 
-        # Quantization changes the written note duration, so its sustain
-        # window must be derived from these same written event times.
+        # Quantization (and the release above) changes the written note
+        # duration, so its sustain window must be derived from these same
+        # written event times.
         if end - start >= HELD_MIN_S:
             tail = min(PEDAL_TAIL_MAX_S, PEDAL_TAIL_FACTOR * (end - start))
             events.append(_MidiEvent(start, order=0, kind="pedal_down", value=127))
@@ -145,12 +139,14 @@ def build_midi(
     events.sort(key=lambda event: (event.time_s, event.order))
 
     # Events are given their ABSOLUTE tick first, then ordered at that tick by
-    # kind (pedal down, note off, note on, pedal up). Ordering by time alone is
-    # not enough: two events less than one tick apart share a tick in the file,
-    # and an ON written before the OFF of the same pitch closes the new note at
-    # the instant it opens — a moved note can overlap the one before it by less
-    # than a tick. A suppressed pedal edge still advances the clock, which is
-    # why the tick is carried per message instead of folded into a delta.
+    # kind (pedal down, note off, note on, pedal up). A repeat the product pins
+    # to the same instant — the live stream clamps a split to the previous end,
+    # a drag can land a bar on its neighbour's edge, and the release above moves
+    # an overlapped note's end onto the repeat's attack — gets ONE tick, so the
+    # order inside it decides: an ON written before the OFF of the same pitch
+    # would close the new note at the instant it opens. A suppressed pedal edge
+    # still advances the clock, which is why the tick is carried per message
+    # instead of folded into a delta.
     written: list[tuple[int, int, mido.Message]] = []
     last_t = 0.0
     active_pedals = 0
@@ -194,7 +190,6 @@ def build_midi(
         written.append((clock_ticks, event.order, message))
 
     written.sort(key=lambda item: item[0])  # stable: time order inside a tick
-    _release_before_restrike(written)
     cursor = 0
     for tick, _order, message in written:
         message.time = tick - cursor

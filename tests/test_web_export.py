@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -57,17 +58,19 @@ def test_the_page_can_export_the_whole_take_as_one_archive():
     order = [source.index(f"name: {name}") for name in ("AUDIO_NAME", "NOTES_NAME", "MIDI_NAME")]
     assert order == sorted(order), "the archive no longer puts the recording first"
 
-    # Both languages, or a French reader gets a notice full of keys.
+    # The two languages carry the same keys and the page's own requests are
+    # covered by `test_web_build.test_both_languages_carry_every_key_the_page_asks_for`,
+    # so one language is enough here: what this adds is that each notice key
+    # carries TEXT, since an empty value passes every key-set check.
     strings = json.loads((WEB / "strings.json").read_text(encoding="utf-8"))
-    for language in ("fr", "en"):
-        for key in (
-            "bundle",
-            "bundle_readme_intro",
-            "bundle_readme_audio",
-            "bundle_readme_notes",
-            "bundle_readme_midi",
-        ):
-            assert strings[language].get(key), f"{language}: {key} is missing or empty"
+    for key in (
+        "bundle",
+        "bundle_readme_intro",
+        "bundle_readme_audio",
+        "bundle_readme_notes",
+        "bundle_readme_midi",
+    ):
+        assert strings["fr"].get(key), f"{key} is missing or empty"
 
 
 def test_the_archive_compresses_when_the_browser_can_and_stores_when_it_cannot():
@@ -181,6 +184,7 @@ def test_the_page_reads_a_sung_phrase_as_the_desktop_live_chain_does():
     `analyze_file`, whose look-ahead the page never claims.
     """
     from scripts.export_web_fixtures import (
+        PARITY_BLOCK,
         PARITY_GOLDEN,
         PARITY_WAV,
         parity_reference,
@@ -210,9 +214,17 @@ def test_the_page_reads_a_sung_phrase_as_the_desktop_live_chain_does():
             "it lost the re-articulation, the glide or a note"
         )
 
-    # The geometry compared is the page's own feed: its file path reads
-    # 2048-sample blocks through `LivePitchStream`, so the golden must too.
-    assert checked["chain"]["block"] == 2048
+    # The geometry compared is the page's own feed, and BOTH sides declare the
+    # block size — the exporter as `PARITY_BLOCK`, the page as `FILE_BLOCK`. A
+    # golden written at one size against a page reading another would compare
+    # two FEEDS instead of two implementations of the same chain.
+    page = (WEB / "app.js").read_text(encoding="utf-8")
+    declared = re.search(r"^const FILE_BLOCK = (\d+);$", page, re.M)
+    assert declared, "web/app.js no longer declares its file block"
+    assert int(declared.group(1)) == PARITY_BLOCK, (
+        "the page reads a file in another block than the golden was written from"
+    )
+    assert checked["chain"]["block"] == PARITY_BLOCK, "the golden moved its block geometry"
     assert "LivePitchStream" in checked["chain"]["reader"]
 
     # And the browser side reads the page's RATE, with a bound in frames.
@@ -224,13 +236,15 @@ def test_the_page_reads_a_sung_phrase_as_the_desktop_live_chain_does():
 
 
 def test_every_fixture_writer_asks_for_lf():
-    """The fixtures are compared as bytes, so an OS must not rewrite them.
+    """Every fixture keeps the exporter's line endings, on every platform.
 
-    On Windows, `Path.write_text` without `newline="\\n"` turns every line
-    ending into CRLF; the golden would then be the one the writing machine
-    froze, and a clone on the other OS would read it as drift. Read from the
-    source on purpose: the defect only appears on Windows, where this suite
-    also runs.
+    On Windows, `Path.write_text` without `newline="\n"` turns every line
+    ending into CRLF: the frozen artifact would then be the one the writing
+    machine happened to produce. `web/constants.js` is compared as TEXT
+    against the regenerated source, so a CRLF copy reads as stale; the four
+    JSONs are parsed, and a checkout carrying CR is still the same divergence
+    — `.gitattributes` pins every fixture to `eol=lf` so a fresh clone cannot
+    bring one back.
     """
     source = (REPO / "scripts" / "export_web_fixtures.py").read_text(encoding="utf-8")
     calls = [
@@ -248,6 +262,16 @@ def test_every_fixture_writer_asks_for_lf():
             f"a fixture keeps the platform's line endings at line {call.lineno}"
         )
 
+    attributes = (REPO / ".gitattributes").read_text(encoding="utf-8")
+    for path in FIXTURE_TEXT:
+        raw = path.read_bytes()
+        assert b"\r" not in raw, f"{path.name} carries a CR on disk: the bytes are compared"
+        assert raw.endswith(b"\n"), f"{path.name} does not end on a line break"
+        relative = path.relative_to(REPO).as_posix()
+        assert f"{relative} text eol=lf" in attributes, (
+            f"{relative} is not pinned to LF: a Windows checkout rewrites it"
+        )
+
 
 def test_the_parity_guards_bite():
     """A tone-only reading and a phrase missing its re-attack must be refused."""
@@ -258,7 +282,13 @@ def test_the_parity_guards_bite():
 
 
 FIXTURE_JSONS = ("cases.json", "intonation.json", "yin.json", "yin-rates.json")
+FIXTURE_JSON_PATHS = tuple(WEB / "test" / name for name in FIXTURE_JSONS)
+# The text artifacts `_write_text` owns: the four JSONs plus the ported constants.
+FIXTURE_TEXT = (WEB / "constants.js", *FIXTURE_JSON_PATHS)
 FIXTURE_WRITER = "scripts/export_web_fixtures.py"
+# The parity golden is the FIFTH JSON `_write_text` writes (beside its WAV): a
+# copy naming another writer reads as fresh there too, so it carries the name.
+PARITY_JSON = REPO / "tests" / "reference" / "parity.json"
 
 
 def _fixture_names_its_writer(payload: object) -> bool:
@@ -266,19 +296,29 @@ def _fixture_names_its_writer(payload: object) -> bool:
     return isinstance(payload, dict) and payload.get("generated_by") == FIXTURE_WRITER
 
 
+def _fixture_label(path: Path) -> str:
+    """The fixture's name in a failure, repo-relative so the line stays readable."""
+    try:
+        return path.resolve().relative_to(REPO).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def test_every_fixture_names_the_one_script_that_writes_it():
     """A fixture written by another entry point reads as fresh, and the page trusts it.
 
-    The four JSONs frozen from the desktop chain each carry `generated_by`, and
-    the page loads these bytes as they are: a name that is not this file leaves
-    no way to tell a re-export from a stale copy. The path is checked on disk
-    too, so a rename fails here instead of silently blessing the old spelling.
+    The FIVE JSONs the generator writes -- the four frozen from the desktop
+    chain plus the parity golden -- each carry `generated_by`, and a reader
+    loads these bytes as they are: a name that is not this file leaves no way
+    to tell a re-export from a stale copy. The path is checked on disk too, so
+    a rename fails here instead of silently blessing the old spelling.
     """
     assert (REPO / FIXTURE_WRITER).is_file(), f"{FIXTURE_WRITER} is gone"
-    for name in FIXTURE_JSONS:
-        payload = json.loads((WEB / "test" / name).read_text(encoding="utf-8"))
+    for fixture in (*FIXTURE_JSON_PATHS, PARITY_JSON):
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
         assert _fixture_names_its_writer(payload), (
-            f"{name} says generated_by={payload.get('generated_by')!r}, "
+            f"{_fixture_label(fixture)} says "
+            f"generated_by={payload.get('generated_by')!r}, "
             f"not {FIXTURE_WRITER!r}"
         )
 

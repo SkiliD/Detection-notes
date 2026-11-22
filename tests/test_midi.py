@@ -81,29 +81,101 @@ def test_repeated_key_releases_before_restrike_at_the_same_tick(tmp_path, quanti
     assert events == ["note_off", "note_on"]
 
 
-def test_a_restrike_inside_one_tick_still_releases_first(tmp_path):
-    """Two times inside ONE tick are one tick in the file: OFF must still lead.
+def test_a_same_pitch_repeat_that_overlaps_releases_the_note_before_it(tmp_path):
+    """The earlier note lets go at the repeat's attack, so the repeat keeps its length.
 
-    The analysis clamps a note's end to the next start, so a re-attack shares
-    its time exactly (pinned above). An edit can leave a sub-tick overlap
-    instead — a note moved onto the one before it — and the two events then
-    round to the same tick, where writing them in time order puts the ON
-    first and closes the new note at once. The order is decided on the TICK.
+    One key sounds one note at a time, and the analysis can leave a same-pitch
+    repeat starting 20 ms before the note before it ends (measured on
+    chant.wav). Written as-is, that earlier note's OFF lands after the repeat's
+    ON and closes the repeat: it would last the overlap (20 ticks) instead of
+    its own 518.
     """
     notes = [
-        Note(start=0.0, end=0.5004, midi=60, confidence=0.9),
-        Note(start=0.5000, end=1.0, midi=60, confidence=0.9),
+        Note(start=0.0, end=0.98, midi=60, confidence=0.9),
+        Note(start=0.96, end=1.50, midi=60, confidence=0.9),
     ]
     mid = build_midi(notes, GRID, key=None)
-    path = tmp_path / "sub-tick.mid"
+    path = tmp_path / "overlap.mid"
     mid.save(path)
-    tick = 0
+
     events = []
+    tick = 0
     for event in mido.MidiFile(path).tracks[1]:
         tick += event.time
-        if tick == 480 and event.type in ("note_on", "note_off"):
-            events.append(event.type)
-    assert events == ["note_off", "note_on"]
+        if event.type == "note_on" and event.velocity > 0:
+            events.append(("on", tick))
+        elif event.type == "note_off":
+            events.append(("off", tick))
+
+    # GRID is 120 BPM: one beat (0.5 s) is 480 ticks, so 0.96 s is tick 922.
+    assert events == [("on", 0), ("off", 922), ("on", 922), ("off", 1440)]
+
+
+def test_notes_of_different_pitches_sharing_a_tick_keep_their_time_order(tmp_path):
+    """One written tick can hold events of DIFFERENT times: only the exact same
+    instant is ordered by kind (pedal, off, on). A note-off and the next note's
+    on 0.4 ms apart land on one tick, and the pedal edge between them keeps its
+    place by its own time — a kind sort over the whole tick would move the
+    pedal ahead of an earlier note-off and the new note's on ahead of the
+    note-off that precedes it.
+    """
+    notes = [
+        Note(start=0.30, end=0.5000, midi=60, confidence=0.9),  # short: no pedal
+        Note(start=0.5004, end=1.0, midi=64, confidence=0.9),  # held: pedal down
+    ]
+    mid = build_midi(notes, GRID, key=None)  # 480 tpq at 120 BPM: one tick = 1.04 ms
+    path = tmp_path / "shared-tick.mid"
+    mid.save(path)
+
+    written = []
+    tick = 0
+    for event in mido.MidiFile(path).tracks[1]:
+        tick += event.time
+        if tick != 480:
+            continue
+        if event.type == "control_change" and event.control == 64:
+            written.append(("pedal", event.value))
+        elif event.type == "note_on" and event.velocity > 0:
+            written.append(("on", event.note))
+        elif event.type == "note_off":
+            written.append(("off", event.note))
+
+    assert written == [("off", 60), ("pedal", 127), ("on", 64)]
+
+
+def test_a_repeat_that_overlaps_the_note_before_it_keeps_its_own_length():
+    """A repeat the analysis leaves OVERLAPPING keeps its length in the file.
+
+    The segmenter clamps a note's end to the next start, but an analysis can
+    still leave a same-pitch repeat INSIDE the note before it: measured 20 ms
+    on chant.wav (pitches 53 and 57) and on demo.wav (pitch 60, twice). Both
+    events land on one key, so the earlier note's OFF — written where the
+    analysis put it, after the repeat's attack — closes the repeat at the
+    overlap, and the repeat lasts 20 ms instead of its own length. The earlier
+    note is released AT the repeat's attack, so the two spans touch and each
+    keeps the length the analysis gave it.
+    """
+    notes = [
+        Note(start=0.0, end=0.52, midi=60, confidence=0.9),
+        Note(start=0.50, end=1.00, midi=60, confidence=0.9),
+    ]
+    mid = build_midi(notes, GRID, key=None)
+    spans: list[tuple[int, int]] = []
+    tick = 0
+    opened: int | None = None
+    for message in mid.tracks[1]:
+        tick += message.time
+        if getattr(message, "note", None) != 60 or message.type not in ("note_on", "note_off"):
+            continue
+        if message.type == "note_on" and message.velocity:
+            opened = tick
+        elif opened is not None:
+            spans.append((opened, tick))
+            opened = None
+    # 120 BPM, 480 ticks per beat: 0.50 s is tick 480, 1.00 s is tick 960.
+    assert spans == [(0, 480), (480, 960)], (
+        f"the two spans must touch at the repeat's attack, not overlap: {spans}"
+    )
 
 
 @pytest.mark.parametrize(

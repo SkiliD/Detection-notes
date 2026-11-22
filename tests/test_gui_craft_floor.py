@@ -10,8 +10,8 @@ The gaps this file closes, each one measured rather than assumed:
    which microphone a take records from was the one below the floor.
 2. **Focus ring.** The page draws 2 px of copper at 3:1 against the surface
    behind it (WCAG 1.4.11). The shell's ring was 1 px and several focusable
-   families (combo box, check box, slider, line edit, the two lists, the
-   tables) drew no ring at all: the Tab chain could reach them blind.
+   families (combo box, check box, slider, line edit, the tables) drew no
+   ring at all: the Tab chain could reach them blind.
 3. **Readable disabled states.** A disabled control keeps its word at 4.5:1 and
    is never faded with `opacity` — the page's rule, and QSS can express the same
    failure.
@@ -50,25 +50,37 @@ def qapp():
 
 
 @pytest.fixture(scope="module")
-def window(qapp):
+def app_sheet(qapp):
+    """The one application sheet every floor below is measured through.
+
+    A widget-level or page-level sheet would answer for itself; the ring's size
+    neutrality is a property of the APP's sheet, so it is installed once and
+    both scenes read it: the synthetic rig and the real results page.
+    """
+    original = widgets.current_theme()
+    widgets.set_theme("dark")
+    previous = qapp.styleSheet()
+    qapp.setStyleSheet(widgets.theme_stylesheet())
+    try:
+        yield qapp
+    finally:
+        qapp.setStyleSheet(previous)
+        widgets.set_theme(original)
+
+
+@pytest.fixture(scope="module")
+def window(app_sheet):
     """One real window, so the floors are measured on the widgets on screen."""
     from v2m.gui import main_window as mw
 
-    original = widgets.current_theme()
-    widgets.set_theme("dark")
-    app = qapp
-    previous = app.styleSheet()
-    app.setStyleSheet(widgets.theme_stylesheet())
     win = mw.MainWindow()
     win.resize(1280, 900)
     win.show()
-    app.processEvents()
+    app_sheet.processEvents()
     try:
         yield win
     finally:
         win.close()
-        app.setStyleSheet(previous)
-        widgets.set_theme(original)
 
 
 def _luminance(value: str) -> float:
@@ -90,9 +102,9 @@ CONTROL_TYPES = (
     "QCheckBox",
     "QComboBox",
     "QSpinBox",
-    "QDoubleSpinBox",
     "QSlider",
     "QLineEdit",
+    "QPlainTextEdit",
 )
 
 
@@ -137,7 +149,6 @@ FOCUS_FAMILIES = (
     "QComboBox",
     "QSpinBox",
     "QSlider",
-    "QListWidget",
     "QTableWidget",
     "QLineEdit",
 )
@@ -152,7 +163,10 @@ def test_every_focusable_family_draws_the_same_ring():
         for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", sheet)
         if ":focus" in selectors
     ]
-    assert len(rules) >= len(FOCUS_FAMILIES) - 4, "the focus rules were not found"
+    # The loop below is the contract: EVERY family must name a rule. A count
+    # constant on top of it only encodes how many families share the grouped
+    # selector list, so it says nothing the loop does not already refuse.
+    assert rules, "no focus rule was found in the sheet"
     for family in FOCUS_FAMILIES:
         ring = [body for selectors, body in rules if f"{family}:focus" in selectors]
         assert ring, f"{family} can take focus but no rule draws its ring"
@@ -180,21 +194,33 @@ def test_the_focus_ring_clears_three_to_one_in_both_palettes(window):
         widgets.set_theme(original)
 
 
-def test_focus_never_resizes_a_control(window, qapp):
+FOCUS_CONTROL_FAMILIES = (
+    "QPushButton",
+    "QCheckBox",
+    "QComboBox",
+    "QSpinBox",
+    "QSlider",
+    "QLineEdit",
+    "QPlainTextEdit",
+    "QTableWidget",
+)
+
+
+def test_focus_never_resizes_a_control(app_sheet):
     """A ring is a STATE, never a size: taking focus must not move the box.
 
-    A border drawn only on `:focus` costs the control 2 px on each side, and the
-    page reflowed under the pointer (a details scrollbar appeared and the
-    controls beside it lost 16 px). Each family is measured on a real, laid-out
-    widget with the application sheet installed, hint AND geometry, before and
-    after the focus change.
+    A border drawn only on `:focus` costs the control 2 px on each side, so
+    every family is measured on a real, laid-out widget with the application
+    sheet installed — hint AND geometry, before and after the focus change. The
+    families share one synthetic host, because a page's own layout answers for
+    its neighbours and that is the results page's subject below.
     """
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import (
         QCheckBox,
         QComboBox,
-        QDoubleSpinBox,
         QLineEdit,
-        QListWidget,
+        QPlainTextEdit,
         QPushButton,
         QSlider,
         QSpinBox,
@@ -208,12 +234,17 @@ def test_focus_never_resizes_a_control(window, qapp):
         "QCheckBox": lambda: QCheckBox("Case"),
         "QComboBox": lambda: QComboBox(),
         "QSpinBox": lambda: QSpinBox(),
-        "QDoubleSpinBox": lambda: QDoubleSpinBox(),
-        "QSlider": lambda: QSlider(),
+        # the only slider the app builds is horizontal (`ResultsPage._qt_orientation`),
+        # and the sheet's groove/handle rules are `:horizontal`: a default
+        # `QSlider()` is VERTICAL and would leave them unexercised.
+        "QSlider": lambda: QSlider(Qt.Orientation.Horizontal),
         "QLineEdit": lambda: QLineEdit("champ"),
-        "QListWidget": lambda: QListWidget(),
+        "QPlainTextEdit": lambda: QPlainTextEdit("texte"),
         "QTableWidget": lambda: QTableWidget(4, 3),
     }
+    assert tuple(builders) == FOCUS_CONTROL_FAMILIES, (
+        "the rig and the families the page walk filters on drifted"
+    )
 
     def table_facts(table: QTableWidget) -> tuple:
         return (
@@ -232,9 +263,6 @@ def test_focus_never_resizes_a_control(window, qapp):
         if name == "QComboBox":
             control.addItem("apparence sombre")
             control.addItem("apparence claire")
-        if name == "QListWidget":
-            for index in range(6):
-                control.addItem(f"ligne {index}")
         if name == "QTableWidget":
             control.setColumnWidth(0, 111)
             control.setColumnWidth(1, 74)
@@ -242,16 +270,16 @@ def test_focus_never_resizes_a_control(window, qapp):
         layout.addWidget(control)
     host.resize(640, 900)
     host.show()
-    qapp.processEvents()
+    app_sheet.processEvents()
     moved: list[str] = []
     try:
         for name, control in controls.items():
-            qapp.processEvents()
+            app_sheet.processEvents()
             hint_before = control.sizeHint()
             box_before = control.geometry()
             facts_before = table_facts(control) if isinstance(control, QTableWidget) else None
             control.setFocus()
-            qapp.processEvents()
+            app_sheet.processEvents()
             hint_after = control.sizeHint()
             box_after = control.geometry()
             if (hint_before.width(), hint_before.height()) != (
@@ -278,11 +306,84 @@ def test_focus_never_resizes_a_control(window, qapp):
         host.close()
     assert moved == [], "a focus state resized a control:\n  " + "\n  ".join(moved)
 
-    # A hint alone never showed the symptom: the control that grew made the
-    # details panel taller than its box, a scrollbar appeared, and the controls
-    # beside it lost that scrollbar's 16 px. The real results page is walked
-    # with its details open, and its surroundings must hold still; the `window`
-    # fixture already installed the dark sheet that page is built on.
+
+def test_the_slider_base_rule_pays_for_the_reserved_ring(app_sheet):
+    """The slider's hint follows the rule's ARITHMETIC, not the style's pixels.
+
+    The comment in `widgets._stylesheet` says 24 px = 20 px of body + 2 x 2 px of
+    edge; the two numbers are read from the rule before anything is measured, so
+    a change to the rule is checked against itself. The body Qt's PLATFORM STYLE
+    gives a bare slider is deliberately NOT pinned -- 15 px with offscreen Fusion
+    here, another value under 6.12 or another style. What the rule promises is
+    that one edge of `border` px costs `2 * border`, and that `min-height` lifts
+    a shorter body, so the reserved ring asks `max(body, min-height) + 2 * border`
+    and clears the 24 px floor whatever body the platform style gives. The edges
+    ALONE would clear it only while that body stays under `min-height` (15 and 16
+    px here), which is a property of the style, not of the rule: no assertion
+    below reads it.
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QSlider
+
+    def hint_height(scene: str) -> int:
+        app_sheet.setStyleSheet(scene)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        try:
+            slider.ensurePolished()
+            return slider.sizeHint().height()
+        finally:
+            slider.deleteLater()
+
+    sheet = widgets.theme_stylesheet()
+    rule = re.search(r"QSlider \{[^}]*\}", sheet)
+    assert rule is not None, "the slider's base rule is gone from the sheet"
+    declared = rule.group(0)
+
+    def declared_px(pattern: str) -> int:
+        match = re.search(pattern, declared)
+        assert match is not None, f"the base rule no longer declares {pattern!r}"
+        return int(match.group(1))
+
+    edge_px = declared_px(r"border: (\d+)px solid transparent")
+    min_height_px = declared_px(r"min-height: (\d+)px")
+    assert min_height_px + 2 * edge_px == FLOOR, (
+        f"the rule must reserve the {FLOOR} px floor: min-height {min_height_px} "
+        f"+ {2 * edge_px} px of edge"
+    )
+
+    without_rule = sheet.replace(declared, "")
+    edge_only_sheet = sheet.replace(
+        declared, declared.replace(f"min-height: {min_height_px}px; ", "")
+    )
+    previous = app_sheet.styleSheet()
+    try:
+        reserved = hint_height(sheet)
+        edge_only = hint_height(edge_only_sheet)
+        bare = hint_height(without_rule)
+    finally:
+        app_sheet.setStyleSheet(previous)
+    assert edge_only - bare == 2 * edge_px, (
+        f"the two edges must add {2 * edge_px} px to the style's own body, "
+        f"not {edge_only - bare} px"
+    )
+    assert reserved == max(bare, min_height_px) + 2 * edge_px, (
+        f"the reserved ring must ask max(body {bare}, min-height {min_height_px}) "
+        f"+ {2 * edge_px} px, not {reserved} px"
+    )
+
+
+def test_focus_never_reflows_the_results_page(app_sheet):
+    """Focus must not move the page AROUND the control that takes it.
+
+    A hint alone never shows the symptom: a control that grows makes the
+    details panel taller than its box, the panel's scrollbar appears, and the
+    controls beside it lose that scrollbar's width. The real results page is
+    walked with its details open — every child compared POSITIONALLY, and the
+    scrollbar's state re-read after each stop — because that is where a focus
+    state stops being local.
+    """
+    from PyQt6.QtWidgets import QWidget
+
     from v2m.core.notes import Note
     from v2m.core.pipeline import AnalysisResult
     from v2m.gui import main_window as mw
@@ -304,7 +405,7 @@ def test_focus_never_resizes_a_control(window, qapp):
         local.page_results.details_toggle.setChecked(True)
         local.show()
         for _ in range(4):
-            qapp.processEvents()
+            app_sheet.processEvents()
         page = local.page_results
         bar = page.details_scroll.verticalScrollBar()
         assert page.details_scroll.isVisible() and bar.maximum() > 0, (
@@ -325,11 +426,14 @@ def test_focus_never_resizes_a_control(window, qapp):
         walked = 0
         drifted: list[str] = []
         for control in page.findChildren(QWidget):
-            if type(control).__name__ not in builders or not control.isVisible():
+            if (
+                type(control).__name__ not in FOCUS_CONTROL_FAMILIES
+                or not control.isVisible()
+            ):
                 continue
             control.setFocus()
             for _ in range(2):
-                qapp.processEvents()
+                app_sheet.processEvents()
             walked += 1
             now = surroundings()
             changes = [

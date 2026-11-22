@@ -240,6 +240,9 @@ RUNTIME_ONLY = {
     # the artifacts of a run (gitignored, produced by the app or a script)
     "prises_live/",
     "prises_verite/",
+    # the format notes that sit BESIDE the takes: same ignored folder, so the
+    # README may name this one file, and a typo in its name stays visible
+    "prises_verite/README.md",
     "demo.wav",  # `scripts/make_demo.py` regenerates it
     "chant.wav",  # the reference take, documented as gitignored
     # the interpreter of a local virtualenv, named per platform
@@ -251,6 +254,17 @@ RUNTIME_ONLY = {
     "docs/adr/",
     "docs/engine-drift.md",
     "docs/superpowers/",
+    # the local working rules and notes: ignored by .gitignore, never proposed
+    # by git, absent from a fresh clone — both READMEs say they stay local
+    "AGENTS.md",
+    "CONTEXT.md",
+    "SKILLS.md",
+    "constraints.txt",
+    # the third-party interface instructions: their folder, lockfile and
+    # license are never versioned, so a clone legitimately lacks them
+    "vendor/",
+    "docs/project/",
+    "docs/recette-materielle-navigateurs.md",
 }
 
 PATH_SUFFIXES = (

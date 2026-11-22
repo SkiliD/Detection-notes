@@ -15,9 +15,10 @@
 // fold.
 //
 // Playback needs the page's audio graph: without an output device the playhead
-// never ticks, so the run reports that instead of waiting on it, and
-// `V2M_REQUIRE_AUDIO=1` (the capture job's setting) turns the report into a
-// failure.
+// never ticks, so the run reports that instead of waiting on it. The `capture`
+// job of `.github/workflows/pages.yml` runs this file on its null sink with
+// `V2M_REQUIRE_AUDIO=1`, which turns that report into a failure; the glob in
+// `tests.yml` has no output device, so there the file can only report.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";

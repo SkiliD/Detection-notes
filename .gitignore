@@ -42,16 +42,13 @@ coverage.xml
 !/.gitignore
 !/.gitattributes
 
-# --- Vendored third-party folder ---
-# ONE third-party folder is vendored on purpose, so every clone reviews the
-# same instructions: it travels with its MIT license, and `vendor-lock.json`
-# pins the upstream commit it was copied from (see AGENTS.md). Everything
-# else under vendor/ stays machine-local; the project's own rules live in
-# AGENTS.md.
-/vendor/*
-!/vendor/make-interfaces-feel-better/
-!/vendor/make-interfaces-feel-better/**
-!/vendor/make-interfaces-feel-better-LICENSE
+# --- Local vendor material (machine-local, never versioned) ---
+# Third-party interface instructions consulted while building, their lockfile
+# and the offline hash check stay LOCAL: a clone does not carry them, and
+# nothing in the repository reads them at runtime.
+/vendor/
+/vendor-lock.json
+/scripts/check_vendor_lock.py
 
 # --- Generated audio artifacts (analysis, demo, tests) ---
 # Live take folders include immutable automatic/corrected reading archives.
@@ -84,9 +81,6 @@ prises_live/
 # it is a fingerprint, not an analysis output — it must be tracked.
 !tests/data/*.wav
 !tests/reference/*.json
-# the vendored folder's lockfile (see AGENTS.md): an upstream pin, not an
-# analysis output — and it must come AFTER the `*.json` rule to win
-!/vendor-lock.json
 # the web page's own sources: its two-language labels and the frozen answers
 # the JavaScript port replays (web/, see AGENTS.md) — the segmentation cases,
 # the two YIN readings, and the intonation summary the visible line prints
@@ -134,35 +128,28 @@ docker-compose.override.yml
 /wide-*.png
 # the home page's before/after captures: evidence for a UI review, not sources
 /page-prise-*.png
-# Root docs: only the NAMED files are sources. AGENTS.md (project rules),
-# CONTEXT.md (domain glossary), SKILLS.md (procedures), the two READMEs and
-# constraints.txt travel with a clone; any other root .md/.txt — audit,
-# diagnostic or proposal reports, the throwaway notes about the problems
-# being worked on — stays local, and their conclusions live in AGENTS.md,
-# CONTEXT.md and the ADRs.
+# Root docs: only the two READMEs are sources. The local working files
+# (AGENTS.md, CONTEXT.md, SKILLS.md, constraints.txt) and any other root
+# .md/.txt — audit, diagnostic or proposal reports, the throwaway notes about
+# the problems being worked on — stay machine-local: ignored, so git never
+# proposes them (not selectable, not addable).
+/AGENTS.md
+/CONTEXT.md
+/SKILLS.md
+/constraints.txt
 /*.md
 /*.txt
-!/AGENTS.md
-!/CONTEXT.md
-!/SKILLS.md
 !/README.md
 !/README.fr.md
-!/constraints.txt
 /_dbg.log
 /out_dir
 adr/
-# Design notes that travel with the code: the docs under docs/project/ and
-# the hardware recipe are part of the project. The ADRs, dated reports, captures,
-# docs/engine-drift.md and docs/superpowers/ stay local and are ignored.
+# All of docs/ is local working material (design notes, ADRs, dated reports,
+# captures, engine-drift, superpowers): ignored, never proposed by git.
 /docs/*
-!/docs/project/
-!/docs/project/**
-!/docs/recette-materielle-navigateurs.md
 /out*
-# prises_verite: the TAKES and truths stay personal (wav/json), but the
-# README committing the format and the non-drift fingerprints are tracked
+# prises_verite: the TAKES, truths and the format README stay personal (wav/json/md)
 /prises_verite/*
-!/prises_verite/README.md
 !/prises_verite/*.fingerprint.json
 .superpowers
 # the web matrix job borrows Playwright at test time; the page stays dependency-free

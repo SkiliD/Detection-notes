@@ -19,6 +19,8 @@ Two regressions pinned here (both silent on screen, noisy on the console):
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -356,6 +358,258 @@ def test_stylesheet_actually_applies(qapp):
     expected = widgets.BG_APP.lstrip("#").lower()
     actual = f"{pixel.red():02x}{pixel.green():02x}{pixel.blue():02x}"
     assert actual == expected, f"stylesheet not applied: background {actual} != palette {BG_APP}"
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_the_text_areas_paint_the_sunken_surface(theme, qapp):
+    """The evidence and details views are this shell's surface, not the platform's.
+
+    An unstyled `QPlainTextEdit` paints the style's own base colour, which is
+    not the page's sunken surface in either palette; the rule is measured on
+    the pixels a laid-out widget produces, never on the stylesheet text.
+    """
+    from PyQt6.QtWidgets import QPlainTextEdit
+
+    previous = qapp.styleSheet()
+    original = widgets.current_theme()
+    widget = QPlainTextEdit("mesure")
+    widget.resize(160, 90)
+    try:
+        widgets.set_theme(theme)
+        qapp.setStyleSheet(widgets.theme_stylesheet())
+        widget.show()
+        qapp.processEvents()
+        pixel = widget.grab().toImage().pixelColor(140, 80)
+    finally:
+        widget.close()
+        qapp.setStyleSheet(previous)
+        widgets.set_theme(original)
+    actual = f"{pixel.red():02x}{pixel.green():02x}{pixel.blue():02x}"
+    expected = widgets.theme_colors(theme)["bg_sunken"].lstrip("#").lower()
+    assert actual == expected, (
+        f"{theme}: the text area paints {actual}, not {expected}"
+    )
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_the_splitter_handle_is_the_shells_grab_target(theme, qapp):
+    """The results divider is a drag target, so it is painted as one.
+
+    An unstyled `QSplitter` draws the platform's 2 px grip (`656a73` on the
+    page's own background here) across a 12 px handle, which reads as a seam
+    rather than as something to grab. The rule paints the whole handle in
+    `border_soft`. Both states are measured on the pixels a laid-out splitter
+    produces, at the width `setHandleWidth` owns.
+
+    The hovered state is measured by rendering its own rule as the base rule:
+    the offscreen platform keeps a handle hovered once another test has hovered
+    one at the same coordinates, and no pointer move inside the splitter clears
+    it, so a `QTest.mouseMove` measurement would report the pointer, not the
+    sheet. What the pixels prove here is which colour the hover rule declares.
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QLabel, QSplitter
+
+    previous = qapp.styleSheet()
+    original = widgets.current_theme()
+    split: QSplitter | None = None
+
+    def painted(colour: str) -> int:
+        """How many pixels of the middle row carry `colour`."""
+        assert split is not None
+        image = split.grab().toImage()
+        row = image.height() // 2
+        target = colour.lstrip("#").lower()
+        return sum(
+            1
+            for x in range(image.width())
+            if (
+                f"{image.pixelColor(x, row).red():02x}"
+                f"{image.pixelColor(x, row).green():02x}"
+                f"{image.pixelColor(x, row).blue():02x}"
+            )
+            == target
+        )
+
+    try:
+        widgets.set_theme(theme)
+        qapp.setStyleSheet(widgets.theme_stylesheet())
+        built = QSplitter(Qt.Orientation.Horizontal)
+        split = built
+        built.setHandleWidth(widgets.SPLITTER_HANDLE_WIDTH)
+        built.addWidget(QLabel("gauche"))
+        built.addWidget(QLabel("droite"))
+        built.resize(240, 48)
+        built.show()
+        qapp.processEvents()
+        built.setSizes([100, 100])
+        qapp.processEvents()
+        colours = widgets.theme_colors(theme)
+        rest = colours["border_soft"].lstrip("#").lower()
+        hot = colours["accent"].lstrip("#").lower()
+        at_rest = painted(rest)
+        qapp.setStyleSheet(
+            widgets.theme_stylesheet().replace("QSplitter::handle:hover", "QSplitter::handle")
+        )
+        qapp.processEvents()
+        hovered = painted(hot)
+    finally:
+        if split is not None:
+            split.close()
+        qapp.setStyleSheet(previous)
+        widgets.set_theme(original)
+    width = widgets.SPLITTER_HANDLE_WIDTH
+    assert at_rest == width, (
+        f"{theme}: the handle paints {at_rest} px of {rest}, not the {width} px it owns"
+    )
+    assert hovered == width, (
+        f"{theme}: the hover rule paints {hovered} px of {hot}, not {width} px"
+    )
+
+
+# A QSS type selector names a class, and a class no page ever builds is a rule
+# that styles nothing. QListWidget sat in the sheet after the last page stopped
+# using it and no test noticed, because a dead rule never warns: the widget simply
+# came back with the platform's look. These families ARE built, just not by our
+# own `Name(...)` call, so each carries the reason its rule still has an owner; a
+# family that becomes instantiated must leave this table.
+QSS_BUILT_ELSEWHERE = {
+    "QMainWindow": "the shell subclasses it (`class MainWindow(QMainWindow)`)",
+    "QGraphicsView": "pyqtgraph's `PlotWidget` subclasses it; every plot is inked through it",
+    "QHeaderView": "`QTableWidget.horizontalHeader()` creates it; the rule styles its sections",
+    "QScrollBar": "scroll areas create it; the rule is the shell's 6 px bar everywhere",
+    "QStatusBar": "`QMainWindow.statusBar()` creates it on first use",
+    "QToolTip": "Qt shows it for any widget's tooltip; no page builds one",
+    "QLineEdit": "Qt builds it inside an editable `QComboBox` or a spin box",
+}
+
+
+def _styled_classes(sheet: str) -> set[str]:
+    """The Q-classes a sheet SELECTS, never the ones a property value mentions."""
+    selectors = re.findall(r"(?m)^([^{}\n]+)\{", sheet)
+    return {name for selector in selectors for name in re.findall(r"\bQ[A-Z]\w+\b", selector)}
+
+
+def _built_classes(sources: str) -> set[str]:
+    """The Q-classes the sources INSTANTIATE themselves (`QLabel(...)`)."""
+    return set(re.findall(r"\b(Q[A-Z]\w+)\(", sources))
+
+
+def _gui_sources() -> str:
+    root = Path(__file__).resolve().parents[1] / "src" / "v2m" / "gui"
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(root.rglob("*.py")))
+
+
+def _dead_families(sheet: str, sources: str) -> list[str]:
+    """Selectors whose class is neither built here nor justified in the table."""
+    return sorted(_styled_classes(sheet) - _built_classes(sources) - set(QSS_BUILT_ELSEWHERE))
+
+
+def test_every_family_the_sheet_styles_is_built_somewhere():
+    """A family nobody builds must not keep a rule.
+
+    The purge that removed QListWidget was done by hand, and nothing would have
+    said so had it been forgotten: an unused type selector parses, applies to no
+    widget, and leaves the page in the platform's look. This net reads the sheet
+    the app really renders, collects the classes it selects, and refuses any that
+    no source under `src/v2m/gui` instantiates unless `QSS_BUILT_ELSEWHERE` gives
+    its reason. A family that becomes instantiated must leave that table, so the
+    exceptions cannot rot into a blanket whitelist.
+    """
+    sources = _gui_sources()
+    dead = _dead_families(STYLESHEET, sources)
+    assert not dead, (
+        "the sheet styles families no page builds (delete the rules, or add the "
+        f"reason to QSS_BUILT_ELSEWHERE): {dead}"
+    )
+    stale = sorted(name for name in QSS_BUILT_ELSEWHERE if name in _built_classes(sources))
+    assert not stale, (
+        f"these families are instantiated now, drop them from QSS_BUILT_ELSEWHERE: {stale}"
+    )
+
+
+def test_the_dead_family_net_refuses_a_rule_nobody_builds():
+    """The net's own bite: an unused class in a sheet is named, a used one is not."""
+    sheet = "QListWidget { color: red; }\nQSlider { min-height: 20px; }\n"
+    sources = "slider = QSlider(Qt.Orientation.Horizontal)\n"
+    assert _dead_families(sheet, sources) == ["QListWidget"]
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_the_text_area_keeps_its_inner_rect_under_the_ring(theme, qapp):
+    """The text area's inner rect is its own rule's arithmetic, in both states.
+
+    A ring that lands on a widget Qt re-lays-out would shave the evidence text
+    every time the Tab chain arrives. This widget does not: the edge and the
+    padding the base rule declares are the whole story, so the first glyph and
+    the inner rect are read BEFORE and AFTER focus and must not move. The rule's
+    numbers come from the sheet, so a changed padding is caught by the measured
+    origin disagreeing with the declaration.
+    """
+    import re
+
+    from PyQt6.QtWidgets import QPlainTextEdit
+
+    sheet = widgets.theme_stylesheet()
+    rule = re.search(r"QPlainTextEdit \{[^}]*\}", sheet)
+    assert rule is not None, "the text area's base rule is gone from the sheet"
+    declared = rule.group(0)
+    border = re.search(r"border: (\d+)px solid", declared)
+    padding = re.search(r"padding: (\d+)px (\d+)px", declared)
+    assert border is not None and padding is not None, (
+        f"the base rule no longer declares an edge and a padding: {declared!r}"
+    )
+    edge = int(border.group(1))
+    pad_x, pad_y = int(padding.group(2)), int(padding.group(1))
+
+    previous = qapp.styleSheet()
+    original = widgets.current_theme()
+    area: QPlainTextEdit | None = None
+    try:
+        widgets.set_theme(theme)
+        qapp.setStyleSheet(sheet)
+        text_colour = widgets.theme_colors(theme)["text"].lstrip("#").lower()
+        ink = tuple(int(text_colour[i : i + 2], 16) for i in (0, 2, 4))
+        built = QPlainTextEdit("MMMM")
+        area = built
+        built.resize(160, 90)
+        built.show()
+        qapp.processEvents()
+
+        def first_ink() -> tuple[int, int] | None:
+            image = built.grab().toImage()
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    pixel = image.pixelColor(x, y)
+                    if (pixel.red(), pixel.green(), pixel.blue()) == ink:
+                        return x, y
+            return None
+
+        resting_rect = built.contentsRect()
+        resting_ink = first_ink()
+        built.setFocus()
+        qapp.processEvents()
+        focused_rect = built.contentsRect()
+        focused_ink = first_ink()
+    finally:
+        if area is not None:
+            area.close()
+        qapp.setStyleSheet(previous)
+        widgets.set_theme(original)
+
+    origin_x, origin_y = edge + pad_x, edge + pad_y
+    assert (resting_rect.left(), resting_rect.top()) == (origin_x, origin_y), (
+        f"{theme}: the rule declares {edge} px of edge and {pad_x}/{pad_y} px of "
+        f"padding, so the text starts at ({origin_x}, {origin_y}); measured "
+        f"({resting_rect.left()}, {resting_rect.top()})"
+    )
+    assert focused_rect == resting_rect, (
+        f"{theme}: focus moved the inner rect from {resting_rect.getRect()} to "
+        f"{focused_rect.getRect()}"
+    )
+    assert focused_ink == resting_ink, (
+        f"{theme}: focus moved the first glyph from {resting_ink} to {focused_ink}"
+    )
 
 
 def test_no_hash_line_comment_in_the_qss():

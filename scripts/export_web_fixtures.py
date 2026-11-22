@@ -829,10 +829,10 @@ def parity_reference() -> dict:
 def _write_text(path: Path, text: str) -> None:
     """Write a fixture with LF on every platform.
 
-    The fixtures are compared as bytes by both halves of the gate: the browser
-    parses these files and `tests/test_web_export.py` re-derives the golden
-    from the Python engine. Windows' text mode (CRLF) would leave one
-    checkout matching and the other reading as drift.
+    The committed file must be the one this writer produced: Windows' text mode
+    turns every ending into CRLF, so a checkout would hold a file this exporter
+    never wrote. `web/constants.js` is compared as TEXT against the regenerated
+    source, and `tests/test_web_export.py` refuses a CR in any of them on disk.
     """
     path.write_text(text, encoding="utf-8", newline="\n")
 

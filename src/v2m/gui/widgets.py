@@ -2103,6 +2103,10 @@ NOTE_TEXT_COLOR = "#E9C99B"
 KEY_WHITE = "#F1EADB"
 KEY_BLACK = "#101924"
 KEY_LABEL = "#5A5347"
+# The splitter's grab target, in px. `setHandleWidth` owns the GEOMETRY: a QSS
+# `width` alone shrank the handle to 5 px on a 12 px splitter (measured), so the
+# rule below paints the surface this number sizes.
+SPLITTER_HANDLE_WIDTH = 12
 STYLESHEET = ""
 HINT_CARD_STYLE = ""
 
@@ -2409,16 +2413,16 @@ QCheckBox, QSpinBox {{ color: {TEXT}; background: transparent; }}
 /* The click target is the whole label, not the 14 px indicator — the page's
    file input has the same shape (a hidden field, its label is the target). */
 QCheckBox {{ min-height: 24px; }}
-/* The ring's 2 px are reserved in BOTH states: a border drawn only on :focus
-   moved the slider's hint by 4 px (84x24 -> 88x28). 20 px of body plus the two
-   2 px edges is the same 24 px target. */
+/* The ring's 2 px are reserved in BOTH states, so taking focus swaps a
+   transparent edge for the dashed one instead of adding one: 20 px of body
+   plus those two edges is the same 24 px target either way. */
 QSlider {{ border: 2px solid transparent; min-height: 20px; }}
 QCheckBox:hover {{ color: {TEXT}; }}
 /* Every family that can take keyboard focus draws the SAME ring: 2 px of
    copper, dashed so it reads as focus rather than as the control's edge, and
    measured at 3:1 against the surface behind it (WCAG 1.4.11). A family that
    gains a focus rule here is one the Tab chain can never leave blind. */
-QCheckBox:focus, QSlider:focus, QListWidget:focus, QTableWidget:focus {{
+QCheckBox:focus, QSlider:focus, QTableWidget:focus {{
     border: 2px dashed {ACCENT};
 }}
 QComboBox {{ min-height: 26px; }}
@@ -2432,6 +2436,18 @@ QLineEdit {{
    keeps the same size hint: measured 137x25 in both states. */
 QLineEdit:focus {{ border: 2px dashed {ACCENT}; padding: 2px 5px; }}
 QLineEdit:disabled {{ color: {TEXT_FAINT}; }}
+QPlainTextEdit {{
+    background: {BG_SUNKEN}; color: {TEXT};
+    border: 1px solid {BORDER_SOFT}; border-radius: 3px; padding: 3px 6px;
+}}
+/* The field's ring and the field's corner (3 px), without the field's padding
+   swap: this widget lays its document out from the frame, and a focus rule that
+   changes only the edge leaves the inner rect and the first glyph where they
+   were — the measured 146x82 at (7, 4), ink at (12, 8) is what
+   `test_the_text_area_keeps_its_inner_rect_under_the_ring` pins, in both
+   palettes, so there is no padding to pay back. */
+QPlainTextEdit:focus {{ border: 2px dashed {ACCENT}; }}
+QPlainTextEdit:disabled {{ color: {TEXT_FAINT}; }}
 QCheckBox::indicator {{
     width: 14px; height: 14px; border-radius: 2px;
     border: 1px solid {BORDER}; background: transparent;
@@ -2453,10 +2469,6 @@ QGroupBox::title {{
     font-family: "{display_font_family()}"; font-size: 12pt; color: {TEXT};
     background: transparent;
 }}
-QListWidget {{ background: transparent; border: none; padding: 2px 0; }}
-QListWidget::item {{ border-radius: 3px; padding: 3px 6px; color: {TEXT_DIM}; }}
-QListWidget::item:hover {{ background: {ACCENT_SOFT}; color: {TEXT}; }}
-QListWidget::item:selected {{ background: {ACCENT_SOFT}; color: {TEXT}; }}
 QTableWidget {{
     background: transparent; alternate-background-color: {BG_SUNKEN};
     gridline-color: transparent; border: none;
@@ -2477,6 +2489,15 @@ QScrollBar:horizontal {{ background: transparent; height: 6px; margin: 1px 2px; 
 QScrollBar::handle:horizontal {{ background: {BORDER_SOFT}; border-radius: 3px; min-width: 28px; }}
 QScrollBar::handle:horizontal:hover {{ background: {ACCENT}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+/* The divider of the results body, in BOTH orientations (`_arrange_body`
+   flips it on a narrow window). Left to the platform it painted a 2 px grip
+   (`656a73`) on the page's own background, which reads as a seam, not as a
+   handle; the rule paints the whole drag surface and lights it under the
+   pointer, the same two states as the scroll bar's handle. */
+QSplitter::handle {{
+    width: {SPLITTER_HANDLE_WIDTH}px; background: {BORDER_SOFT};
+}}
+QSplitter::handle:hover {{ background: {ACCENT}; }}
 QProgressBar {{
     background: {BG_SUNKEN}; border: none; border-radius: 2px;
     text-align: center; color: {TEXT_DIM}; height: 16px; font-size: 9pt;

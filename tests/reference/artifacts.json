@@ -4,7 +4,7 @@
     "n_rests": 4,
     "sha256": {
       "score.json": "a68a20e1a9393665bfeaaae3109dcb1e1f4e7cc446843ad1df867dbd3e601949",
-      "score.mid": "149ec58828344325805b6394f13d6af4ffb73396f851248a163374735bc9351c",
+      "score.mid": "6d8cc5b5d84aafa812140963609b4db5af25628c2aba2e0b5440cf108dcfdf0b",
       "score.musicxml": "9199882cfcfa7af88fc100c59127bb8baa503f5b286582c19f68f82d38ef2a49"
     },
     "tempo_bpm": 170.98
@@ -14,7 +14,7 @@
     "n_rests": 0,
     "sha256": {
       "score.json": "b27295a2ff2294520cd20236290f4e81db3733013f9ff3605c3307ca746186e2",
-      "score.mid": "ef6f324ba8551b551c1e1b742acf82feb80be5c502acc2a41f987503c9998909",
+      "score.mid": "11dfe64a2e7509962f98a017ba5d23cba63841959a0b95d62faaaf308bbdcdad",
       "score.musicxml": "9138d90642d87aa63743e4a69f6684aea2d260f0aa0ed7f153268670f1ee0523"
     },
     "tempo_bpm": 119.78

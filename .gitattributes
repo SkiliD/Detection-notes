@@ -3,10 +3,19 @@
 # Shell scripts run inside the Linux container: a CRLF checkout would
 # break bash (`env: '\r': No such file or directory`). Keep them LF.
 *.sh text eol=lf
-# The vendored folder is hashed by its own lock, byte for byte: a checkout that
-# rewrote these files to CRLF would read as a modified copy. Same for the lock.
-vendor/make-interfaces-feel-better/** text eol=lf
-vendor-lock.json text eol=lf
-# The parity golden is read by the browser and re-derived by the Python guard:
-# both halves of the gate must see the same bytes on either OS.
+# A WAV is opaque bytes: never converted, diffed as text or merged, and
+# `tests/data/parity.wav` is the half of the parity pair compared with a fresh
+# export byte for byte.
+tests/data/parity.wav binary
+# The parity golden is the exporter's own text (`newline="\n"`), so a checkout
+# hands back what `scripts/export_web_fixtures.py` wrote: the guard parses it,
+# and the WAV beside it is what a byte comparison covers.
 tests/reference/parity.json text eol=lf
+# `scripts/export_web_fixtures.py` writes these: `web/constants.js` is compared
+# as TEXT against the regenerated source, the four JSONs are parsed, and a CR
+# on disk is refused — a checkout must not hand back the platform's endings.
+web/constants.js text eol=lf
+web/test/cases.json text eol=lf
+web/test/intonation.json text eol=lf
+web/test/yin.json text eol=lf
+web/test/yin-rates.json text eol=lf

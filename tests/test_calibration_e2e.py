@@ -9,6 +9,7 @@ Runs in-process like test_live_gui.py.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import types
@@ -23,10 +24,12 @@ pytestmark = pytest.mark.slow
 
 
 class HeldMic:
-    """A fake `sd.InputStream` that SINGS one held tone at a time.
+    """A fake `sd.InputStream` that SINGS, one part at a time.
 
-    `sing(hz, cents)` queues the next tone; silence in between, so a
-    round advances only on a held note.
+    `sing(hz, cents)` queues a held tone and `fade(hz_from, hz_to)` a REAL
+    crossfade between two tones — both summed sample by sample, the shape a
+    chord change puts in one analysis window. Silence in between, so a round
+    advances only on a held note.
     """
 
     instances: list = []
@@ -35,7 +38,7 @@ class HeldMic:
         self.rate = samplerate
         self.block = blocksize
         self.callback = callback
-        self._tones: list[tuple[float, float, float]] = []
+        self._parts: list[tuple] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         HeldMic.instances.append(self)
@@ -47,18 +50,17 @@ class HeldMic:
     def _drain(self) -> None:
         quiet = np.zeros(self.block, np.float32).reshape(-1, 1)
         while not self._stop.is_set():
-            if self._tones:
-                hz, cents, seconds = self._tones.pop(0)
-                self._emit(hz, cents, seconds)
+            if self._parts:
+                kind, first, second, seconds = self._parts.pop(0)
+                if kind == "tone":
+                    self._emit(first, second, seconds)  # first = hz, second = cents
+                else:
+                    self._fade(first, second, seconds)  # first/second = the tones
             else:
                 self.callback(quiet, self.block, None, None)
                 time.sleep(0.005)
 
-    def _emit(self, hz: float, cents: float, seconds: float) -> None:
-        n = int(self.rate * seconds)
-        t = np.arange(n) / self.rate
-        f = hz * (2.0 ** (cents / 1200.0))
-        tone = (0.35 * np.sin(2 * np.pi * f * t)).astype(np.float32)
+    def _push(self, tone: np.ndarray) -> None:
         for i in range(0, len(tone), self.block):
             if self._stop.is_set():
                 return
@@ -67,6 +69,21 @@ class HeldMic:
                 blk = np.pad(blk, (0, self.block - len(blk)))
             self.callback(blk.reshape(-1, 1), self.block, None, None)
             time.sleep(0.005)
+
+    def _emit(self, hz: float, cents: float, seconds: float) -> None:
+        n = int(self.rate * seconds)
+        t = np.arange(n) / self.rate
+        f = hz * (2.0 ** (cents / 1200.0))
+        self._push((0.35 * np.sin(2 * np.pi * f * t)).astype(np.float32))
+
+    def _fade(self, hz_from: float, hz_to: float, seconds: float) -> None:
+        n = int(self.rate * seconds)
+        t = np.arange(n) / self.rate
+        ramp = t / seconds
+        blended = (1.0 - ramp) * np.sin(2 * np.pi * hz_from * t) + ramp * np.sin(
+            2 * np.pi * hz_to * t
+        )
+        self._push((0.35 * blended).astype(np.float32))
 
     def stop(self) -> None:
         self._stop.set()
@@ -78,7 +95,11 @@ class HeldMic:
 
     def sing(self, hz: float, cents: float = 0.0, seconds: float = 4.0) -> None:
         """Queue one held tone the collector will hear."""
-        self._tones.append((hz, cents, seconds))
+        self._parts.append(("tone", hz, cents, seconds))
+
+    def fade(self, hz_from: float, hz_to: float, seconds: float = 0.15) -> None:
+        """Queue a continuous change between two tones, summed in one window."""
+        self._parts.append(("fade", hz_from, hz_to, seconds))
 
 
 def _fake_sd(monkeypatch) -> None:
@@ -489,6 +510,161 @@ def test_a_single_frame_is_not_a_held_note(qapp, monkeypatch, isolated_cal):
             win.live_thread.wait(3000)
 
 
+def test_a_real_crossfade_between_two_tones_never_sets_a_round(qapp, monkeypatch, isolated_cal):
+    """The guard holds on a SIGNAL, not on an injected pitch.
+
+    The fake mic crossfades between two real tones sample by sample — a chord
+    change summed in one analysis window, the shape a singer produces moving
+    between two notes — and nothing bypasses the capture -> segmenter ->
+    `pitchFrame` chain. The window that straddles the change blends both tones,
+    so the frames just before the new tone read far from the round's target;
+    a round may only take the tone the singer then HOLDS, and its value must
+    be that tone's own reading.
+    """
+    import sounddevice  # noqa: F401  (the patch target must be importable)
+
+    from v2m.gui import main_window as mw
+
+    OFFSET = -22.0  # the device's own reading
+    AWAY_CENTS = -200.0  # the note before the target: two semitones below
+    _fake_sd(monkeypatch)
+
+    win = mw.MainWindow()
+    try:
+        win.show()
+        win.on_start_live()
+        live = win.live_thread
+        assert live is not None
+        assert _pump_until(
+            qapp, lambda: bool(HeldMic.instances) and live.elapsed() >= 0.4, timeout=30
+        ), "the fake mic delivered nothing to the live capture"
+        mic = _mic_of(win)
+
+        win.stack.setCurrentWidget(win.page_home)
+        win.page_home.btn_calibrate.click()  # opens the card + arms the collector
+        card = win.page_home.calibration_card
+        mic.sing(card._targets[-1], cents=OFFSET, seconds=4.0)
+        assert _pump_until(qapp, lambda: card._round == 1, timeout=30), (
+            "a held tone must set the first round"
+        )
+
+        # the passage: a note two semitones below, then a continuous change
+        # into the target the card asks for, then that target held
+        target = card._targets[-1]
+        away = target * 2.0 ** (AWAY_CENTS / 1200.0)
+        mic.sing(away, seconds=0.6)
+        mic.fade(away, target, seconds=0.15)
+        mic.sing(target, cents=OFFSET, seconds=4.0)
+
+        # what the card hears, sampled while the passage plays
+        seen_away = False
+        rounds_at_target = None
+        since_jump = None
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and card._round < 2:
+            qapp.processEvents()
+            hz = win._calibration_hz
+            if hz is not None and np.isfinite(hz) and hz > 0:
+                cents = 1200.0 * math.log2(hz / target)
+                if cents < AWAY_CENTS / 2.0:
+                    seen_away = True
+                if rounds_at_target is None and abs(cents - OFFSET) < 10.0:
+                    rounds_at_target = card._round
+                    since_jump = time.monotonic() - win._calibration_stable_since
+            time.sleep(0.01)
+        assert seen_away, "the crossfade never reached the card: nothing was sung"
+        assert rounds_at_target == 1, "a round was set on a frame of the change itself"
+        assert since_jump is not None and since_jump < mw.MainWindow.CALIBRATION_HOLD_S, (
+            "the target's first frame lands after the hold expired: a seam frame could be graded"
+        )
+        assert card._round == 2, "the held tone must set the second round"
+        heard = 1200.0 * math.log2(card._heard[-1] / target)
+        assert heard == pytest.approx(OFFSET, abs=5.0), (
+            f"the second round was charged {heard:+.1f} cents, not the held tone's {OFFSET:+.1f}"
+        )
+    finally:
+        if win.live_thread is not None and win.live_thread.isRunning():
+            win.live_thread.stop()
+            win.live_thread.wait(3000)
+        if win._calibration_thread is not None and win._calibration_thread.isRunning():
+            win._calibration_thread.stop()
+            win._calibration_thread.wait(3000)
+
+
+def test_a_150_ms_crossfade_reads_minus_36_42_cents_on_its_seam_frame():
+    """The 150 ms crossfade's seam frame is a MEASUREMENT the suite holds.
+
+    A voice moving between two notes sums both tones in one analysis window, and
+    the window that straddles the change reads neither note: on a passage from a
+    tone 122 c flat to one 22 c flat, that frame reads far inside the band while
+    both held tones read their own cents. ADR 0040 cites -36.42 c for the 150 ms
+    crossfade, and that number used to live in `build/probe_calibration.py` —
+    a file no clone carries.
+
+    WHICH 23 ms window straddles the fade depends on the alignment between the
+    block grid and the fade, and the window slides in ~6 ms hops: the value
+    sweeps roughly -47 .. -28 c as the passage's alignment slides, so the offset
+    below is the alignment the figure was measured at. Real-time capture cannot
+    hold that alignment — a dropped hop takes the straddling window away and the
+    nearest frame then read -41.80 c in 3 of 5 measured runs — so the passage is
+    fed to `LivePitchStream` block by block instead: the same pitch chain the
+    card reads (YIN, the silence gate, the segmenter), without a device clock
+    deciding which hops survive.
+    """
+    from v2m.core import audio_io
+    from v2m.core.liveseg import LivePitchStream
+
+    BASE = 440.0
+    OLD = BASE * 2.0 ** (-122.0 / 1200.0)
+    NEW = BASE * 2.0 ** (-22.0 / 1200.0)
+    SEAM_CENTS = -36.42
+    TOLERANCE_CENTS = 0.5
+    RATE = 44_100  # the figure was measured at this rate
+    BLOCK = 1024  # the capture's own block size
+    FADE_S = 0.15
+    # the passage starts this many samples into the buffer: the alignment that
+    # puts the straddling window where -36.42 c was measured
+    OFFSET = 800
+
+    def tone(hz: float, seconds: float) -> np.ndarray:
+        t = np.arange(int(RATE * seconds)) / RATE
+        return 0.35 * np.sin(2 * np.pi * hz * t)
+
+    def crossfade() -> np.ndarray:
+        t = np.arange(int(RATE * FADE_S)) / RATE
+        ramp = t / FADE_S
+        return 0.35 * (
+            (1.0 - ramp) * np.sin(2 * np.pi * OLD * t)
+            + ramp * np.sin(2 * np.pi * NEW * t)
+        )
+
+    signal = np.concatenate([tone(OLD, 1.0), crossfade(), tone(NEW, 1.6)])[OFFSET:]
+    signal = signal.astype(np.float32)
+
+    stream = LivePitchStream(RATE, gate_rms=audio_io.GATE_RMS)
+    frames: list[tuple[float, float]] = []
+    for start in range(0, len(signal) - BLOCK + 1, BLOCK):
+        _, emitted = stream.feed(signal[start : start + BLOCK], (start + BLOCK) / RATE)
+        frames.extend(emitted)
+
+    values = [
+        (t, 1200.0 * math.log2(hz / BASE))
+        for t, hz in frames
+        if math.isfinite(hz) and hz > 0
+    ]
+    assert values, (
+        f"the {FADE_S * 1000:.0f} ms fade produced no frame at all: "
+        f"{SEAM_CENTS:+.2f} c cannot be checked"
+    )
+    instant, measured = min(values, key=lambda item: abs(item[1] - SEAM_CENTS))
+    gap = measured - SEAM_CENTS
+    assert abs(gap) <= TOLERANCE_CENTS, (
+        f"the {FADE_S * 1000:.0f} ms fade has no frame within "
+        f"{TOLERANCE_CENTS:.1f} c of {SEAM_CENTS:+.2f}: closest is "
+        f"{measured:+.2f} c at t={instant:.3f} s, gap {gap:+.2f} c"
+    )
+
+
 def test_the_frame_between_two_tones_never_sets_a_round(qapp, monkeypatch, isolated_cal):
     """The splice frame of a note change must never be graded.
 
@@ -497,10 +673,15 @@ def test_the_frame_between_two_tones_never_sets_a_round(qapp, monkeypatch, isola
     window at that passage blends both. On the real chain at 44.1 kHz the
     abrupt switch reads -14.19 cents from the NEW target where the tone sits
     at -22, and a CONTINUOUS change reads further out still — a 150 ms
-    crossfade produced -36.42 (a 200 ms glide -34.84), the value injected
-    here because it is the worst a real passage produces. Grading it once
-    moves a five-round mean to -24.9. The hold clock restarts on the jump,
-    so the seam cannot count.
+    crossfade produced -36.42 (a 200 ms glide -34.84). -36.42 is injected
+    because it is the measured frame nearest -36.05, the figure this value
+    replaces; the passage crosses far less forgiving frames (-113 cents), so
+    it probes the rule rather than bounding it. The figure is the VALUE the
+    passage reproduces, not one sample of it: whichever block carries the
+    seam, the crossfade reads -36.42 and the glide -34.84, and only the
+    frame's timestamp moves by a few ms. Grading it once moves a five-round
+    mean to -24.9. The hold clock restarts on the jump, so the seam cannot
+    count.
     """
     from v2m.gui import main_window as mw
 
