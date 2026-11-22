@@ -1,0 +1,437 @@
+{
+ "cases": [
+  {
+   "name": "fewer_than_four_notes_never_leans",
+   "notes": [
+    {
+     "dev": 0.3,
+     "midi": 60
+    },
+    {
+     "dev": 0.3,
+     "midi": 62
+    },
+    {
+     "dev": 0.3,
+     "midi": 64
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 30.0,
+    "by_position": {
+     "end": null,
+     "start": null
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.0,
+    "in_tune_share": 0.0,
+    "mean_cents": 30.0,
+    "median_cents": 30.0,
+    "n_notes": 3,
+    "sharp_share": 1.0,
+    "tendency": null
+   }
+  },
+  {
+   "name": "a_mean_under_twelve_cents_is_not_a_habit",
+   "notes": [
+    {
+     "dev": 0.07,
+     "midi": 60
+    },
+    {
+     "dev": 0.07,
+     "midi": 60
+    },
+    {
+     "dev": 0.07,
+     "midi": 60
+    },
+    {
+     "dev": 0.07,
+     "midi": 60
+    },
+    {
+     "dev": 0.07,
+     "midi": 61
+    },
+    {
+     "dev": 0.07,
+     "midi": 62
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 7.0,
+    "by_position": {
+     "end": null,
+     "start": null
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.0,
+    "in_tune_share": 1.0,
+    "mean_cents": 7.0,
+    "median_cents": 7.0,
+    "n_notes": 6,
+    "sharp_share": 0.0,
+    "tendency": "even"
+   }
+  },
+  {
+   "name": "identical_pitches_divide_no_register",
+   "notes": [
+    {
+     "dev": 0.2,
+     "midi": 67
+    },
+    {
+     "dev": 0.2,
+     "midi": 67
+    },
+    {
+     "dev": 0.2,
+     "midi": 67
+    },
+    {
+     "dev": 0.2,
+     "midi": 67
+    },
+    {
+     "dev": -0.2,
+     "midi": 67
+    },
+    {
+     "dev": -0.2,
+     "midi": 67
+    },
+    {
+     "dev": -0.2,
+     "midi": 67
+    },
+    {
+     "dev": -0.2,
+     "midi": 67
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 20.0,
+    "by_position": {
+     "end": {
+      "mean_cents": -20.0,
+      "n": 4
+     },
+     "start": {
+      "mean_cents": 20.0,
+      "n": 4
+     }
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.5,
+    "in_tune_share": 0.0,
+    "mean_cents": 0.0,
+    "median_cents": 0.0,
+    "n_notes": 8,
+    "sharp_share": 0.5,
+    "tendency": "even"
+   }
+  },
+  {
+   "name": "an_odd_count_gives_its_extra_note_to_the_end",
+   "notes": [
+    {
+     "dev": 0.2,
+     "midi": 60
+    },
+    {
+     "dev": 0.2,
+     "midi": 61
+    },
+    {
+     "dev": 0.2,
+     "midi": 62
+    },
+    {
+     "dev": 0.2,
+     "midi": 63
+    },
+    {
+     "dev": -0.2,
+     "midi": 64
+    },
+    {
+     "dev": -0.2,
+     "midi": 65
+    },
+    {
+     "dev": -0.2,
+     "midi": 66
+    },
+    {
+     "dev": -0.2,
+     "midi": 67
+    },
+    {
+     "dev": -0.2,
+     "midi": 68
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 20.0,
+    "by_position": {
+     "end": {
+      "mean_cents": -20.0,
+      "n": 5
+     },
+     "start": {
+      "mean_cents": 20.0,
+      "n": 4
+     }
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.56,
+    "in_tune_share": 0.0,
+    "mean_cents": -2.2,
+    "median_cents": -20.0,
+    "n_notes": 9,
+    "sharp_share": 0.44,
+    "tendency": "even"
+   }
+  },
+  {
+   "name": "the_three_registers_split_the_extent",
+   "notes": [
+    {
+     "dev": -0.2,
+     "midi": 60
+    },
+    {
+     "dev": -0.2,
+     "midi": 60
+    },
+    {
+     "dev": -0.2,
+     "midi": 60
+    },
+    {
+     "dev": -0.2,
+     "midi": 60
+    },
+    {
+     "dev": 0.0,
+     "midi": 66
+    },
+    {
+     "dev": 0.0,
+     "midi": 66
+    },
+    {
+     "dev": 0.0,
+     "midi": 66
+    },
+    {
+     "dev": 0.0,
+     "midi": 66
+    },
+    {
+     "dev": 0.2,
+     "midi": 72
+    },
+    {
+     "dev": 0.2,
+     "midi": 72
+    },
+    {
+     "dev": 0.2,
+     "midi": 72
+    },
+    {
+     "dev": 0.2,
+     "midi": 72
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 13.3,
+    "by_position": {
+     "end": {
+      "mean_cents": 13.3,
+      "n": 6
+     },
+     "start": {
+      "mean_cents": -13.3,
+      "n": 6
+     }
+    },
+    "by_register": {
+     "high": {
+      "mean_cents": 20.0,
+      "n": 4
+     },
+     "low": {
+      "mean_cents": -20.0,
+      "n": 4
+     },
+     "mid": null
+    },
+    "flat_share": 0.33,
+    "in_tune_share": 0.33,
+    "mean_cents": 0.0,
+    "median_cents": 0.0,
+    "n_notes": 12,
+    "sharp_share": 0.33,
+    "tendency": "even"
+   }
+  },
+  {
+   "name": "exactly_twelve_cents_is_a_habit",
+   "notes": [
+    {
+     "dev": 0.12,
+     "midi": 60
+    },
+    {
+     "dev": 0.12,
+     "midi": 62
+    },
+    {
+     "dev": 0.12,
+     "midi": 64
+    },
+    {
+     "dev": 0.12,
+     "midi": 65
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 12.0,
+    "by_position": {
+     "end": null,
+     "start": null
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.0,
+    "in_tune_share": 0.0,
+    "mean_cents": 12.0,
+    "median_cents": 12.0,
+    "n_notes": 4,
+    "sharp_share": 1.0,
+    "tendency": "sharp"
+   }
+  },
+  {
+   "name": "exactly_ten_cents_is_in_tune",
+   "notes": [
+    {
+     "dev": 0.1,
+     "midi": 60
+    },
+    {
+     "dev": 0.1,
+     "midi": 62
+    },
+    {
+     "dev": 0.1,
+     "midi": 64
+    },
+    {
+     "dev": 0.1,
+     "midi": 65
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 10.0,
+    "by_position": {
+     "end": null,
+     "start": null
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.0,
+    "in_tune_share": 1.0,
+    "mean_cents": 10.0,
+    "median_cents": 10.0,
+    "n_notes": 4,
+    "sharp_share": 0.0,
+    "tendency": "even"
+   }
+  },
+  {
+   "name": "no_notes_says_nothing",
+   "notes": [],
+   "summary": {
+    "abs_mean_cents": null,
+    "by_position": null,
+    "by_register": null,
+    "flat_share": null,
+    "in_tune_share": null,
+    "mean_cents": null,
+    "median_cents": null,
+    "n_notes": 0,
+    "sharp_share": null,
+    "tendency": null
+   }
+  },
+  {
+   "name": "a_note_without_a_measurement_is_not_in_tune",
+   "notes": [
+    {
+     "dev": 0.2,
+     "midi": 60
+    },
+    {
+     "dev": null,
+     "midi": 62
+    },
+    {
+     "dev": 0.2,
+     "midi": 64
+    },
+    {
+     "dev": 0.2,
+     "midi": 65
+    }
+   ],
+   "summary": {
+    "abs_mean_cents": 20.0,
+    "by_position": {
+     "end": null,
+     "start": null
+    },
+    "by_register": {
+     "high": null,
+     "low": null,
+     "mid": null
+    },
+    "flat_share": 0.0,
+    "in_tune_share": 0.0,
+    "mean_cents": 20.0,
+    "median_cents": 20.0,
+    "n_notes": 3,
+    "sharp_share": 1.0,
+    "tendency": null
+   }
+  }
+ ],
+ "generated_by": "scripts/export_web_fixtures.py"
+}

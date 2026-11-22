@@ -20,9 +20,11 @@ from v2m.core import audio_io
 from v2m.core import take_export as te
 from v2m.core.grid import BeatGrid
 from v2m.core.keys import KeyCandidate, KeyResult
+from v2m.core.musicxml import save_musicxml
 from v2m.core.notes import Note
 from v2m.core.pdf_export import PdfExportError, PdfToolMissing
 from v2m.core.pipeline import AnalysisResult
+from v2m.core.report import export_result
 from v2m.core.takes import SIDECAR_SUFFIX
 from v2m.core.tempo import TempoResult
 
@@ -71,6 +73,43 @@ def test_successful_export_orders_and_announces_every_file(tmp_path, monkeypatch
     assert receipt.wav_written and receipt.pdf_status == te.PDF_WRITTEN
     assert ".wav" in receipt.suffixes and ".pdf" in receipt.suffixes
     checks.assert_announcement_matches_disk(receipt.file_names(), tmp_path / "take")
+
+
+def test_both_text_writers_ask_for_lf_on_every_platform(tmp_path, monkeypatch):
+    """`export_result` and `save_musicxml` opt OUT of the platform's newline.
+
+    The reference hashes are the artifact BYTES, so a CRLF writer would leave
+    one reference matching only the OS it was frozen on. Reading the bytes
+    alone cannot pin that on a POSIX checkout — text mode only translates `\n`
+    on Windows — so this also records what each writer ASKED the file for:
+    both must pass `newline="\n"`. It uses a synthetic result, so the rule
+    stays guarded where the reference takes are absent.
+    """
+    opened: list[tuple[str, object]] = []
+    real_open = open
+
+    def recording_open(file, mode="r", *args, **kwargs):
+        if "w" in mode and str(file).endswith((".json", ".musicxml")):
+            opened.append((str(file), kwargs.get("newline")))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", recording_open)
+    stem = tmp_path / "score"
+    export_result(_result("live"), stem)
+    direct = tmp_path / "direct.musicxml"
+    save_musicxml(
+        _result("live").notes,
+        BeatGrid(120.0),
+        KeyResult(KeyCandidate("C", "major", 0.9), []),
+        str(direct),
+    )
+
+    assert {Path(path).suffix for path, _ in opened} == {".json", ".musicxml"}
+    assert {newline for _path, newline in opened} == {"\n"}, opened
+    for path in (Path(f"{stem}.json"), Path(f"{stem}.musicxml"), direct):
+        data = path.read_bytes()
+        assert data, f"{path.name} is empty"
+        assert b"\r\n" not in data, f"{path.name} was written with CRLF"
 
 
 def test_live_reading_archives_keep_the_automatic_and_number_corrected_exports(tmp_path):

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import mic_cal
-from ..core.i18n import note_display, tr
+from ..core.i18n import format_number, note_display, tr
 from ..core.music import hz_to_midi
 from .widgets import (
     BG_SUNKEN,
@@ -169,7 +169,9 @@ class CalibrationCard(QWidget):
         import time
 
         age_s = time.time() - float(saved["date_s"])
-        return tr("ui calibrate saved").format(cents=saved["offset_cents"], age_s=int(age_s))
+        return tr("ui calibrate saved").format(
+            cents=format_number(float(saved["offset_cents"]), 1, sign=True), age_s=int(age_s)
+        )
 
     def feed(self, hz: float | None) -> bool:
         """One heard round; False while the held pitch is not the target.
@@ -200,7 +202,11 @@ class CalibrationCard(QWidget):
         verdict = collect(self._heard, self._targets)
         self._verdict = verdict
         if verdict.recordable:
-            self.prompt.setText(tr("ui calibrate found").format(cents=verdict.offset_cents))
+            self.prompt.setText(
+                tr("ui calibrate found").format(
+                    cents=format_number(verdict.offset_cents or 0.0, 1, sign=True)
+                )
+            )
             self.btn_save.setVisible(True)
         else:
             self.prompt.setText(tr("ui calibrate none"))

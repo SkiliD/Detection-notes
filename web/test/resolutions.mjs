@@ -17,6 +17,7 @@
 // that pins 46ch in pixels would fail on Linux for no reason.
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pressDemo, sleep, startBrowser } from "./browser.mjs";
+import { VISIBLE_CONTROLS } from "./controls.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 
@@ -54,20 +55,14 @@ const MEASURE = `(() => {
     const element = document.querySelector(selector);
     return element ? Math.round(element.getBoundingClientRect().height) : -1;
   };
-  // The file input is the reader's choice of a file, painted by its label: it
-  // is hidden ON PURPOSE, so its 1 px box is not a control under the floor.
-  const controls = [...document.querySelectorAll("button, a, input")]
-    .filter((element) => element.id !== "file")
-    .map((element) => {
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      return {
-        name: element.id || element.tagName.toLowerCase(),
-        box: Math.round(rect.height),
-        visible: rect.width > 2 && rect.height > 0 && style.visibility !== "hidden",
-      };
-    })
-    .filter((control) => control.visible);
+  // The controls are the SHARED enumeration in controls.mjs: the same list
+  // pins the floor in craft-floor.test.mjs, including the notes scroller's
+  // tabindex, which a hand-copied list had left behind here. The hidden file
+  // input stays out; its label is the target a thumb hits.
+  const controls = ${VISIBLE_CONTROLS}.map((control) => ({
+    name: control.name,
+    box: control.height,
+  }));
   const table = document.querySelector(".table-scroll");
   // Elements that stick out of the window — the notes table is ALLOWED to be
   // one, because it scrolls inside its own box; nothing else is.

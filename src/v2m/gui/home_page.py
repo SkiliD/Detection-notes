@@ -10,6 +10,7 @@ under it (a column when the translated labels do not fit).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Callable
 
 import pyqtgraph as pg
@@ -29,7 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import coherence as coh
-from ..core.i18n import tr
+from ..core.i18n import format_number, tr
 from . import widgets
 from .calibration_card import CalibrationCard
 from .widgets import action_button_style, page_scroll, quiet_button_style
@@ -39,6 +40,29 @@ from .widgets import action_button_style, page_scroll, quiet_button_style
 # headline to break on a phrase, narrow enough that the eye returns to the
 # left edge without hunting — a column, not a full-width form.
 ACTION_COLUMN_MAX = 640
+
+# What `action_button_style` adds to a label's own width: 22 px of side padding
+# plus the 1 px border, on each side.
+ACTION_BUTTON_PADDING = 46
+
+# What `quiet_button_style` adds to a label's own width: 14 px of side padding
+# plus the 1 px border, on each side.
+QUIET_BUTTON_PADDING = 30
+
+
+def action_pair_fits(measure: int, button_widths: Sequence[int], spacing: int) -> bool:
+    """Whether both secondary actions and their grid gap fit in `measure`."""
+    return sum(button_widths) + spacing <= measure
+
+
+def quiet_footer_fits(
+    available: int,
+    button_widths: Sequence[int],
+    theme_width: int,
+    spacing: int,
+) -> bool:
+    """Whether the quiet footer's four controls and three gaps fit in `available`."""
+    return sum(button_widths) + theme_width + spacing * 3 <= available
 
 
 def _rule(object_name: str, thickness: int) -> QFrame:
@@ -349,16 +373,10 @@ class HomePage(QWidget):
             (self.btn_coherence, tr("ui coherence sessions btn")),
             (self.btn_calibrate, tr("ui calibrate mic button")),
         )
-        # quiet_button_style's 14 px side padding plus its 1 px border.
         button_widths = [
-            QFontMetrics(button.font()).horizontalAdvance(label) + 30
+            QFontMetrics(button.font()).horizontalAdvance(label) + QUIET_BUTTON_PADDING
             for button, label in labels
         ]
-        required = (
-            sum(button_widths)
-            + self.theme_selector.sizeHint().width()
-            + self._footer.spacing() * 3
-        )
         # Measure the page, not the scroll viewport: during a resize Qt may
         # still report the previous (narrower) viewport, which stacked the row
         # on a wide window and never re-ran once the layout settled.
@@ -367,7 +385,12 @@ class HomePage(QWidget):
             self.width() - 18 - self.scroll.verticalScrollBar().sizeHint().width(),
         )
         measure = min(ACTION_COLUMN_MAX, available)
-        stacked = available < required
+        stacked = not quiet_footer_fits(
+            available,
+            button_widths,
+            self.theme_selector.sizeHint().width(),
+            self._footer.spacing(),
+        )
         # The strip spans the measure whether it folds or not: the settings
         # start on the headline's own left edge instead of drifting to the
         # centre of the page.
@@ -448,15 +471,19 @@ class HomePage(QWidget):
         its English twin, so a fixed breakpoint would overflow the measure on
         one language and waste a row on the other.
         """
-        padding = 46  # action_button_style's 22 px side padding + 1 px border
-        needed = (
-            sum(
-                QFontMetrics(button.font()).horizontalAdvance(button.text()) + padding
-                for button in (self.btn_file, self.btn_finder)
-            )
-            + self._actions_grid.horizontalSpacing()
+        button_widths = [
+            QFontMetrics(button.font()).horizontalAdvance(button.text()) + ACTION_BUTTON_PADDING
+            for button in (self.btn_file, self.btn_finder)
+        ]
+        paired = action_pair_fits(
+            measure,
+            button_widths,
+            self._actions_grid.horizontalSpacing(),
         )
-        paired = needed <= measure
+        self._set_action_pair(paired)
+
+    def _set_action_pair(self, paired: bool) -> None:
+        """Apply the row or column layout chosen by `action_pair_fits`."""
         if paired == self._actions_paired:
             return
         self._actions_paired = paired
@@ -549,9 +576,15 @@ class HomePage(QWidget):
         self.btn_lang.setStyleSheet(quiet_button_style())
         self.btn_coherence.setStyleSheet(quiet_button_style())
         self.btn_calibrate.setStyleSheet(quiet_button_style())
+        # The selector paints itself, and a widget-level sheet wins over the
+        # application one for every property it names: without its own `:focus`
+        # rule the shared `QComboBox:focus` ring never reached this Tab stop.
+        # The ring pays for itself out of the padding (1 + 4 = 2 + 3), so the
+        # box keeps its size hint while it holds focus.
         self.theme_selector.setStyleSheet(
-            f"background: {widgets.BG_SUNKEN}; color: {widgets.TEXT}; "
-            f"border: 1px solid {widgets.BORDER}; border-radius: 6px; padding: 4px;"
+            f"QComboBox {{ background: {widgets.BG_SUNKEN}; color: {widgets.TEXT}; "
+            f"border: 1px solid {widgets.BORDER}; border-radius: 6px; padding: 4px; }}"
+            f"QComboBox:focus {{ border: 2px dashed {widgets.ACCENT}; padding: 3px; }}"
         )
 
     def set_theme(self, theme: str) -> None:
@@ -640,10 +673,12 @@ class HomePage(QWidget):
             text += "\n" + tr("ui practice windows title") + "\n"
             for window in snapshot.practice_windows:
                 rate = (
-                    f"{window['suspect_rate']:.1f}" if window["suspect_rate"] is not None else "-"
+                    format_number(window["suspect_rate"], 1)
+                    if window["suspect_rate"] is not None
+                    else "-"
                 )
                 contours = (
-                    f"{window['contour_rate'] * 100:.0f}%"
+                    f"{format_number(round(window['contour_rate'] * 100), 0)}%"
                     if window["contour_rate"] is not None
                     else "-"
                 )
@@ -710,7 +745,11 @@ class HomePage(QWidget):
         lines = [tr("ui health click").format(week=week["week"], n=len(stems)), ""]
         for take in week_takes:
             checked = f"{take.checked}" if take.checked is not None else "-"
-            rate = f"{take.contour_rate * 100:.0f}%" if take.contour_rate is not None else "-"
+            rate = (
+                f"{format_number(round(take.contour_rate * 100), 0)}%"
+                if take.contour_rate is not None
+                else "-"
+            )
             if take.verify_ok is False:
                 lines.append(
                     tr("coh take divergent").format(stem=take.stem, checked=checked, rate=rate)
@@ -729,15 +768,20 @@ class HomePage(QWidget):
                 lines.append(
                     tr("coh suspect row").format(
                         midi=suspect["midi"],
-                        span=suspect["inner_range_st"],
-                        dur=suspect["secondary_plateau_s"],
+                        span=format_number(suspect["inner_range_st"], 2),
+                        dur=format_number(suspect["secondary_plateau_s"], 2),
                         at=(
-                            tr("coh plateau at").format(t=suspect["secondary_plateau_start_s"])
+                            tr("coh plateau at").format(
+                                t=format_number(suspect["secondary_plateau_start_s"], 2)
+                            )
                             if suspect.get("secondary_plateau_start_s") is not None
                             else ""
                         ),
                         offset=(
-                            f"{suspect['secondary_plateau_offset_st']:+.2f}st"
+                            format_number(
+                                suspect["secondary_plateau_offset_st"], 2, sign=True
+                            )
+                            + "st"
                             if suspect.get("secondary_plateau_offset_st") is not None
                             else "?"
                         ),

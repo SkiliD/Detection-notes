@@ -43,6 +43,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The suite imports its own helpers as `tests.<module>`; the repo root must be
+# importable whatever the entry point is. `python -m pytest` adds the working
+# directory, the `pytest` console script does NOT — which is how a whole
+# machine's run differs from a developer's.
+pythonpath = ["."]
 addopts = ["-n", "2"]
 markers = [
     "slow: takes >= 2 s (golden fingerprints replay real takes) — deselect with `-m 'not slow'` for a quick loop",

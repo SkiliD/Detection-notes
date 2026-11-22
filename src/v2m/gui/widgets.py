@@ -12,6 +12,7 @@ from ..core.accuracy import AccuracyHistory  # noqa: F401 — compatibility impo
 from ..core.continuity import coherence_report
 from ..core.figures import figures_summary, short_label
 from ..core.i18n import (
+    format_number,
     note_display,
     note_display_pair,
     tr,
@@ -343,6 +344,23 @@ def ink_plot(widget: pg.PlotWidget) -> None:
         axis.setTextPen(pg.mkPen(TEXT_DIM))
 
 
+class SecondAxis(pg.AxisItem):
+    """The timeline's seconds, written in the window's language.
+
+    pyqtgraph formats its own tick strings with `%.*f`, which writes a dot in
+    every language: a French roll read "0.5 / 1.0" beside a French table
+    reading "0,5 s / 1,0 s". The page's floor has ONE number formatter; this
+    is the tick that calls it, so the painted seconds follow a language
+    switch with every label around them.
+    """
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802 (pyqtgraph API)
+        # The precision follows pyqtgraph's own spacing rule: whole seconds on
+        # a wide view, then tenths, then hundredths as the view zooms in.
+        digits = 0 if spacing >= 1.0 else (1 if spacing >= 0.1 else 2)
+        return [format_number(v, digits) for v in values]
+
+
 class PianoRoll(pg.PlotWidget):
     """Piano roll: rectangles = notes, curve = fine pitch.
 
@@ -370,7 +388,13 @@ class PianoRoll(pg.PlotWidget):
     LIVE_Y_MIN = 14.0  # minimum visible pitch band, in semitones
 
     def __init__(self, parent=None, *, selectable: bool = False):
-        super().__init__(parent, axisItems={"left": PitchAxis(orientation="left")})
+        super().__init__(
+            parent,
+            axisItems={
+                "left": PitchAxis(orientation="left"),
+                "bottom": SecondAxis(orientation="bottom"),
+            },
+        )
         self.setBackground(BG_APP)
         ink_plot(self)
         self.getPlotItem().showGrid(x=True, y=True, alpha=0.12)
@@ -1059,7 +1083,7 @@ class WaveformView(pg.PlotWidget):
     MAX_POINTS = 50_000  # plenty at screen resolution
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, axisItems={"bottom": SecondAxis(orientation="bottom")})
         self.setBackground(BG_APP)
         ink_plot(self)
         self.getPlotItem().hideAxis("left")
@@ -1261,8 +1285,10 @@ class ResultsPanel(pg.LayoutWidget):
                 vl.setText("—")
             return
         self._values["key source"].setText(Path(res.source).name)
-        self._values["key duration"].setText(f"{res.duration_s:.2f} s")
-        self._values["key tempo"].setText(f"{res.tempo.bpm:.1f} BPM" if res.tempo else "—")
+        self._values["key duration"].setText(f"{format_number(res.duration_s, 2)} s")
+        self._values["key tempo"].setText(
+            f"{format_number(res.tempo.bpm, 1)} BPM" if res.tempo else "—"
+        )
         self._values["key meter"].setText(
             res.meter.label if getattr(res, "meter", None) else tr("key default meter")
         )
@@ -1275,7 +1301,9 @@ class ResultsPanel(pg.LayoutWidget):
         # display translates the stored canonical labels ('C major' ->
         # 'C majeur'), like the staff header already does
         self._values["key key"].setText(tr_key_label(res.key.best.label) if res.key else "—")
-        self._values["key key score"].setText(f"{res.key.best.score:.2f}" if res.key else "—")
+        self._values["key key score"].setText(
+            format_number(res.key.best.score, 2) if res.key else "—"
+        )
         alts = (
             ", ".join(tr_key_label(a.label) for a in res.key.alternatives)
             if res.key and res.key.alternatives
@@ -1307,7 +1335,9 @@ class ResultsPanel(pg.LayoutWidget):
             self._values["key tuning offset"].setText("—")
         else:
             c = float(cents)
-            self._values["key tuning offset"].setText(f"{c:+.1f} c — {tuning_advice(c)}")
+            self._values["key tuning offset"].setText(
+                f"{format_number(c, 1, sign=True)} c — {tuning_advice(c)}"
+            )
         # The take's per-note intonation report: the SAME `intonation.
         # summarize` the JSON block carries, through the SAME rendering the
         # live feedback shows while singing — one writer of the words.
@@ -1432,11 +1462,11 @@ class ResultsPanel(pg.LayoutWidget):
             suspects_line = tr("ui diff suspect row").format(
                 midi=note_display_pair(row.midi),
                 plateau=note_display_pair(row.plateau_midi),
-                dur=row.plateau_s,
-                offset=f"{row.plateau_offset_st:+.2f} st",
+                dur=format_number(row.plateau_s, 2),
+                offset=f"{format_number(row.plateau_offset_st, 2, sign=True)} st",
                 tag=tag,
                 conf=(
-                    tr("ui diff confidence").format(c=row.confidence)
+                    tr("ui diff confidence").format(c=format_number(row.confidence, 2))
                     if row.confidence is not None
                     else ""
                 ),
@@ -1446,7 +1476,7 @@ class ResultsPanel(pg.LayoutWidget):
             suspect_rows.append(
                 tr("ui diff suspect resolved").format(
                     midi=note_display_pair(row.midi),
-                    dur=row.duration_s,
+                    dur=format_number(row.duration_s, 2),
                 )
             )
         self._diff_suspect_lines = tuple(suspect_rows)
@@ -1499,7 +1529,11 @@ class ResultsPanel(pg.LayoutWidget):
             self._seg_table.setRowCount(len(segs))
             for r, (t0, t1, c) in enumerate(segs):
                 self._seg_table.setItem(
-                    r, 0, pg.QtWidgets.QTableWidgetItem(f"{t0:.1f} – {t1:.1f} s")
+                    r,
+                    0,
+                    pg.QtWidgets.QTableWidgetItem(
+                        f"{format_number(t0, 1)} – {format_number(t1, 1)} s"
+                    ),
                 )
                 self._seg_table.setItem(
                     r, 1, pg.QtWidgets.QTableWidgetItem(tr_chord_label(c.label))
@@ -1977,7 +2011,7 @@ class LiveIndicator(pg.QtWidgets.QWidget):
             return
         nearest = int(round(midi_float))
         self.label_note.setText(note_display_pair(nearest))
-        self.label_hz.setText(f"{hz:.1f} Hz")
+        self.label_hz.setText(f"{format_number(hz, 1)} Hz")
         # the sung pitch vs its NEAREST piano note, in cents — the number a
         # singer works with when practicing intonation
         deviation = cents_deviation(midi_float) if cents is None else cents
@@ -2236,6 +2270,8 @@ def action_button_style(primary: bool = False) -> str:
             f"QPushButton:hover {{ background: {hover}; border-color: {hover}; }}"
             f"QPushButton:pressed {{ background: {pressed};"
             f"  border-top-color: {lo}; border-bottom-color: {hi}; }}"
+            # the ring is the plate's own ink: a copper ring on a copper plate
+            # would disappear at exactly the moment focus matters
             f"QPushButton:focus {{ border: 2px dashed {BG_APP}; }}"
             f"QPushButton:disabled {{ background: transparent; color: {TEXT_FAINT};"
             f"  border: 1px solid {BORDER_SOFT}; }}"
@@ -2251,9 +2287,9 @@ def action_button_style(primary: bool = False) -> str:
         f"  background: {ACCENT_SOFT}; }}"
         f"QPushButton:pressed {{ background: {BG_SUNKEN};"
         f"  border-top-color: {edge_low}; border-bottom-color: {edge_high}; }}"
-        f"QPushButton:focus {{ border: 1px dashed {ACCENT}; }}"
+        f"QPushButton:focus {{ border: 2px dashed {ACCENT}; }}"
         f"QPushButton:disabled {{ color: {TEXT_FAINT}; border-color: {BORDER_SOFT};"
-        "  background: transparent; }}"
+        f"  background: transparent; }}"
     )
 
 
@@ -2266,10 +2302,11 @@ def link_button_style() -> str:
     """
     return (
         "QPushButton { background: transparent; border: none; padding: 5px 2px;"
+        "  min-height: 24px;"
         f" color: {TEXT_DIM}; font-size: 10pt; }}"
         f"QPushButton:hover {{ color: {ACCENT}; }}"
         f"QPushButton:checked {{ color: {TEXT}; font-weight: 600; }}"
-        f"QPushButton:focus {{ border: 1px dashed {ACCENT}; }}"
+        f"QPushButton:focus {{ border: 2px dashed {ACCENT}; }}"
         f"QPushButton:disabled {{ color: {TEXT_FAINT}; }}"
     )
 
@@ -2286,7 +2323,7 @@ def quiet_button_style() -> str:
         f" border: 1px solid {BORDER_SOFT}; background: transparent; color: {TEXT_DIM}; }}"
         f"QPushButton:hover {{ border-color: {ACCENT}; color: {TEXT};"
         f"  background: {ACCENT_SOFT}; }}"
-        f"QPushButton:focus {{ border: 1px dashed {ACCENT}; }}"
+        f"QPushButton:focus {{ border: 2px dashed {ACCENT}; }}"
         f"QPushButton:disabled {{ color: {TEXT_FAINT}; }}"
     )
 
@@ -2358,7 +2395,7 @@ QPushButton:pressed {{
     border-bottom-color: {edge_high};
 }}
 QPushButton:checked {{ background: {ACCENT_SOFT}; border-color: {ACCENT}; }}
-QPushButton:focus {{ border: 1px dashed {ACCENT}; }}
+QPushButton:focus {{ border: 2px dashed {ACCENT}; }}
 QPushButton:disabled {{ color: {TEXT_FAINT}; border-color: {BORDER_SOFT}; }}
 QPushButton:flat {{ border: none; background: transparent; }}
 QSlider::groove:horizontal {{ height: 3px; background: {BG_SUNKEN}; border-radius: 2px; }}
@@ -2369,7 +2406,32 @@ QSlider::handle:horizontal {{
 }}
 QSlider::handle:horizontal:hover {{ background: {TEXT}; }}
 QCheckBox, QSpinBox {{ color: {TEXT}; background: transparent; }}
+/* The click target is the whole label, not the 14 px indicator — the page's
+   file input has the same shape (a hidden field, its label is the target). */
+QCheckBox {{ min-height: 24px; }}
+/* The ring's 2 px are reserved in BOTH states: a border drawn only on :focus
+   moved the slider's hint by 4 px (84x24 -> 88x28). 20 px of body plus the two
+   2 px edges is the same 24 px target. */
+QSlider {{ border: 2px solid transparent; min-height: 20px; }}
 QCheckBox:hover {{ color: {TEXT}; }}
+/* Every family that can take keyboard focus draws the SAME ring: 2 px of
+   copper, dashed so it reads as focus rather than as the control's edge, and
+   measured at 3:1 against the surface behind it (WCAG 1.4.11). A family that
+   gains a focus rule here is one the Tab chain can never leave blind. */
+QCheckBox:focus, QSlider:focus, QListWidget:focus, QTableWidget:focus {{
+    border: 2px dashed {ACCENT};
+}}
+QComboBox {{ min-height: 26px; }}
+QComboBox:focus {{ border: 2px dashed {ACCENT}; }}
+QComboBox:disabled {{ color: {TEXT_FAINT}; }}
+QLineEdit {{
+    background: {BG_SUNKEN}; color: {TEXT};
+    border: 1px solid {BORDER_SOFT}; border-radius: 3px; padding: 3px 6px;
+}}
+/* The ring pays for itself out of the padding (1 + 3 = 2 + 2), so the field
+   keeps the same size hint: measured 137x25 in both states. */
+QLineEdit:focus {{ border: 2px dashed {ACCENT}; padding: 2px 5px; }}
+QLineEdit:disabled {{ color: {TEXT_FAINT}; }}
 QCheckBox::indicator {{
     width: 14px; height: 14px; border-radius: 2px;
     border: 1px solid {BORDER}; background: transparent;
@@ -2379,7 +2441,7 @@ QSpinBox {{
     background: {BG_SUNKEN}; border: 1px solid {BORDER_SOFT}; border-radius: 3px;
     padding: 2px 6px;
 }}
-QSpinBox:focus {{ border-color: {ACCENT}; }}
+QSpinBox:focus {{ border: 2px dashed {ACCENT}; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; background: transparent; border: none; }}
 QGroupBox {{
     background: transparent; border: none;

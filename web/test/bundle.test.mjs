@@ -4,8 +4,8 @@
 // the checks below are independent: the checksums are compared with the
 // PUBLISHED CRC-32 vectors, and the archive is walked through its raw headers
 // (end record -> central directory -> local header -> data) exactly the way an
-// unzip tool does. If our layout drifts, these tests fail even where our own
-// parser would still say yes.
+// unzip tool does. These checks read the BYTES a reader gets, so a layout that
+// drifts fails here even while the writer still agrees with itself.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
@@ -173,9 +173,8 @@ test("a deflated entry carries raw DEFLATE and the CRC of the original", async (
 
 test("the stored fallback is the archive this page always wrote", async () => {
   // A browser without `CompressionStream` must still get a valid ZIP, and the
-  // promise made to every reader is the OLD one: the same bytes as before
-  // compression existed, so an archive written yesterday and one written in
-  // that browser are the same file.
+  // stored path writes the same bytes as `zipStore` always has: an archive does
+  // not depend on whether the browser can compress.
   const entries = [
     { name: "a.txt", bytes: "first" },
     { name: "dossier/b.bin", bytes: new Uint8Array([0, 1, 2, 250]) },
@@ -206,8 +205,8 @@ test("a compressor that throws costs the compression, not the archive", async ()
 test("the deflate reads a stream that has no async iterator", async () => {
   // WebKit's `ReadableStream` is not async-iterable: `for await` over the
   // compressor throws there, the failure is caught as designed, and every
-  // entry is stored — a valid archive at 1.5x the size. The loop must use a
-  // reader, so the archive compresses in every engine that has raw DEFLATE.
+  // entry is stored — still a valid archive. The loop must use a reader, so
+  // the archive compresses in every engine that has raw DEFLATE.
   const native = globalThis.CompressionStream;
   globalThis.CompressionStream = class extends native {
     constructor(format) {

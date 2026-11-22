@@ -24,7 +24,8 @@ import { centsVerdict, formatCents } from "./cents.js";
 import { GATE_RMS } from "./constants.js";
 import { DEMO_SR, demoLoopsAfterSeek, demoRepeats, demoTake } from "./demo.js";
 import { summarizeIntonation } from "./intonation.js";
-import { formatClock, noteIndexAt, playheadX, timeAtX } from "./playhead.js";
+import { noteIndexAt, playheadX, playingRowScroll, timeAtX } from "./playhead.js";
+import { formatClock, formatHz, formatNumber, intonationNumbers } from "./readout.js";
 import { spaceTogglesPlayback } from "./shortcuts.js";
 
 const BLOCK = 1024; // capture tap block (~21 ms at 48 kHz)
@@ -87,6 +88,10 @@ let media = null;
 let drawing = false;
 let rowsSignature = "";
 let listening = null; // null | "piano" | "mix"
+// One restart at a time: `seekTo` is async (the output graph may have to
+// start), so a second seek arriving meanwhile would stop the first take again
+// and race its start. Held arrows and a click during a restart are dropped.
+let seeking = false;
 let player = null; // the longer source: it decides when the take ends
 let voicePlayer = null;
 let playbackContext = null;
@@ -147,6 +152,7 @@ function applyLanguage() {
   rowsSignature = "";
   updateListenLabels();
   draw();
+  updateSeekSurface();
 }
 
 function setTheme(next) {
@@ -199,6 +205,22 @@ function takeVoice() {
   return takeVoiceCache;
 }
 
+/**
+ * The live readout, written only when a value CHANGES.
+ *
+ * `#note` is the page's polite live region, and a frame handler would otherwise
+ * re-assign its text dozens of times a second while one note is held: an
+ * unchanged string announced at that rate is noise, not a reading. The Hz line
+ * sits BESIDE the region rather than inside it for the same reason — it moves
+ * on every frame.
+ */
+function setReadout(name, hz) {
+  const note = $("note");
+  if (note.textContent !== name) note.textContent = name;
+  const line = $("hz");
+  if (line.textContent !== hz) line.textContent = hz;
+}
+
 function onBlock(block) {
   if (!stream) return;
   lastT = (processed + block.length) / stream.sr;
@@ -209,8 +231,7 @@ function onBlock(block) {
   const reading = stream.seg.confirmed() ?? stream.seg.current();
   // An empty slot, not a dash: the readout is where a NOTE goes, and a 52 px
   // em dash reads as a stray rule on the page.
-  $("note").textContent = reading ? midiToName(reading.midi) : "";
-  $("hz").textContent = reading && Number.isFinite(reading.hz) ? `${reading.hz.toFixed(1)} Hz` : "";
+  setReadout(reading ? midiToName(reading.midi) : "", formatHz(reading?.hz, lang));
   scheduleDraw();
 }
 
@@ -347,7 +368,7 @@ function drawRoll() {
     painter.moveTo(secondX, 0);
     painter.lineTo(secondX, height - 14);
     painter.stroke();
-    painter.fillText(`${second.toFixed(0)} s`, secondX + 4, height - 3);
+    painter.fillText(`${formatNumber(second, 0, lang)} s`, secondX + 4, height - 3);
   }
   painter.strokeStyle = colors.rule;
   painter.font = "11px Georgia, 'Times New Roman', serif";
@@ -429,8 +450,7 @@ function tickPlayhead() {
   playhead = Math.min(playheadDuration, playbackContext.currentTime - playheadStartedAt);
   const notes = stream ? stream.seg.notes : [];
   const index = noteIndexAt(notes, playhead);
-  $("note").textContent = index >= 0 ? midiToName(notes[index].midi) : "";
-  $("hz").textContent = "";
+  setReadout(index >= 0 ? midiToName(notes[index].midi) : "", "");
   updateClock(playhead);
   setPlayingIndex(index);
   drawRoll();
@@ -440,8 +460,10 @@ function tickPlayhead() {
 /**
  * The row of the note being heard. Marked without rebuilding the table (a
  * rebuild per frame would drop the selection and cost a hundred nodes a
- * frame) and scrolled only when the row CHANGES, with `nearest` so a row
- * already on screen never makes the list jump.
+ * frame), and the PAGE follows it only when the reader is already reading the
+ * table — `playingRowScroll` answers the vertical gap, 0 included. The row is
+ * marked without `scrollIntoView`, which scrolls the document whatever the
+ * reader is watching and would also reset the table's own sideways scroll.
  */
 function setPlayingIndex(index) {
   if (index === playingIndex) return;
@@ -449,7 +471,18 @@ function setPlayingIndex(index) {
   paintPlayingRow();
   if (index < 0) return;
   const row = $("rows").querySelector(`tr[data-index="${index}"]`);
-  if (row) row.scrollIntoView({ block: "nearest" });
+  if (!row) return;
+  const box = row.getBoundingClientRect();
+  const table = $("notes-table").getBoundingClientRect();
+  const gap = playingRowScroll({
+    rowTop: box.top,
+    rowBottom: box.bottom,
+    tableTop: table.top,
+    tableBottom: table.bottom,
+    viewHeight: window.innerHeight,
+  });
+  if (gap === 0) return;
+  window.scrollBy(0, gap);
 }
 
 function paintPlayingRow() {
@@ -489,11 +522,7 @@ function renderIntonation(notes) {
     $("position").textContent = "";
     return;
   }
-  const sentence = fill(t("intonation_line"), {
-    in_tune: String(summary.inTune),
-    n: String(summary.n),
-    share: String(Math.round(summary.share * 100)),
-  });
+  const sentence = fill(t("intonation_line"), intonationNumbers(summary, lang));
   const tendency = tendencyText(summary.tendency);
   line.textContent = tendency ? `${sentence} — ${tendency}` : sentence;
   line.hidden = false;
@@ -553,9 +582,11 @@ function drawRows() {
     const row = document.createElement("tr");
     row.dataset.index = String(i);
     const cells = [
-      String(i + 1),
-      `${note.start.toFixed(2)} s`,
-      `${note.duration.toFixed(2)} s`,
+      // A row number is still a number the page writes: through the ONE
+      // formatter, so no cell can be the one that keeps a dot in French.
+      formatNumber(i + 1, 0, lang),
+      `${formatNumber(note.start, 2, lang)} s`,
+      `${formatNumber(note.duration, 2, lang)} s`,
       midiToName(note.midi),
       // the note's own distance from the key it was rounded to, so the lit row
       // answers "just or off, and by how much" while it sounds
@@ -582,6 +613,7 @@ function drawRows() {
   paintPlayingRow();
   renderIntonation(notes);
   $("roll").classList.toggle("seekable", notes.length > 0);
+  updateSeekSurface();
   $("empty").hidden = notes.length > 0;
   // An empty table with its header row is a table OF nothing: no check can
   // pass it (`th-has-data-cells` only ever reports "incomplete"), and a
@@ -638,6 +670,22 @@ function logCaptureFailure(stage, error) {
   const name = error?.name || "unknown error";
   const message = error?.message ? `: ${error.message}` : "";
   console.error(`capture failed [${stage}]: ${name}${message}`);
+}
+
+/**
+ * The console line for a playback that failed.
+ *
+ * The page answers `error_play` and says nothing else, so a bug report has no
+ * facts to send. The STAGE names the step that was running (the take's own
+ * render, the graph, its wiring, the first sample), and the graph's state says
+ * whether an output ever opened: `suspended` past the bound is a dead output,
+ * while `running` with a throw is a bug in this page — the same two facts the
+ * microphone path prints, which is what makes the two lines readable together.
+ */
+function logPlaybackFailure(stage, error, state) {
+  const name = error?.name || "unknown error";
+  const message = error?.message ? `: ${error.message}` : "";
+  console.error(`playback failed [${stage}]: AudioContext ${state}; ${name}${message}`);
 }
 
 /**
@@ -915,10 +963,18 @@ function applyBalance(smoothing = 0.02) {
 }
 
 function updateClock(position) {
-  const separator = lang === "fr" ? "," : ".";
-  $("clock-pos").textContent = formatClock(position, separator);
-  $("clock-total").textContent = formatClock(playheadDuration, separator);
+  $("clock-pos").textContent = formatClock(position, lang);
+  $("clock-total").textContent = formatClock(playheadDuration, lang);
   $("clock").hidden = false;
+  // The roll is a seek slider while a take exists: the second on the clock is
+  // the value a screen reader reads when an arrow moves it.
+  const roll = $("roll");
+  if (roll.hasAttribute("role")) {
+    // `aria-valuenow` is a MACHINE number: assistive tech parses a dot value,
+    // never the page's separator. `aria-valuetext` carries the readable one.
+    roll.setAttribute("aria-valuenow", Math.min(position, playheadDuration).toFixed(1));
+    roll.setAttribute("aria-valuetext", formatClock(position, lang));
+  }
 }
 
 function updateDemoLabel() {
@@ -974,6 +1030,9 @@ async function startListening(mode, offset = 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     // A stop during the paint must not start a take the singer already ended.
     if (listening !== mode) return;
+  // The step a throw came from: set BEFORE the call it names, so the line
+  // reports what was running rather than the last thing that succeeded.
+  let stage = "render";
   try {
     // The piano is rendered at the RECORDING's rate when both are played:
     // resampling one side would shift its timing against the other.
@@ -985,9 +1044,18 @@ async function startListening(mode, offset = 0) {
     // A click in the roll starts the SAME buffer part-way: the take is not
     // re-rendered per seek, and the playhead resumes where the gesture is.
     const startAt = Math.max(0, Math.min(offset, Math.max(0, duration - 0.001)));
+    stage = "audio engine";
     playbackContext = new AudioContext();
-    if (playbackContext.state === "suspended") await playbackContext.resume();
+    // A browser with no output device leaves `resume()` pending for good, and
+    // an unbounded await leaves the page on its preparing-playback sentence
+    // with nothing playing. `startedContext` bounds that wait for the capture
+    // path; the playback graph takes the SAME bound, and the catch below turns
+    // it into the page's own playback sentence.
+    if (!(await startedContext(playbackContext))) {
+      throw new Error("the bound expired before the output started");
+    }
 
+    stage = "wiring";
     // Two sources, one limiter. The limiter replaces the whole-sum scaling a
     // baked mix could do: live faders cannot know the sum, so peaks that would
     // have clipped are tamed instead — below its threshold the graph is a wire.
@@ -1035,9 +1103,13 @@ async function startListening(mode, offset = 0) {
       }
       setStatus("listened");
     };
+    stage = "start";
     player.start(0, startAt);
     if (voicePlayer) voicePlayer.start(0, startAt);
     playheadDuration = duration;
+    // The take's duration is the slider's range: publish it once here, so a
+    // take whose tail runs past its last note still caps the value.
+    updateSeekSurface();
     // the clock is offset by the seek, so `playhead` stays true for the
     // whole playback instead of jumping to the start
     playheadStartedAt = playbackContext.currentTime - startAt;
@@ -1045,10 +1117,46 @@ async function startListening(mode, offset = 0) {
     updateClock(startAt);
     requestAnimationFrame(tickPlayhead);
     setStatus("playing");
-  } catch {
+  } catch (error) {
+    // Read the graph BEFORE `stopListening` closes it: the whole point of the
+    // line is the state a bug report cannot see from a screenshot.
+    const state = playbackContext ? playbackContext.state : "none";
     stopListening();
     setStatus("error_play");
+    logPlaybackFailure(stage, error, state);
   }
+}
+
+/**
+ * The roll's Tab stop and slider value, kept with the take it describes.
+ *
+ * With no notes there is nothing to hear, so the canvas keeps no tabindex and
+ * no role: a slider that seeks nothing is the kind of control the page refuses
+ * elsewhere (a reset with no take is disabled, not merely useless).
+ */
+function updateSeekSurface() {
+  const notes = stream ? stream.seg.notes : [];
+  const canvas = $("roll");
+  if (!notes.length) {
+    for (const name of [
+      "tabindex",
+      "role",
+      "aria-valuemin",
+      "aria-valuemax",
+      "aria-valuenow",
+      "aria-valuetext",
+    ]) {
+      canvas.removeAttribute(name);
+    }
+    return;
+  }
+  const end = playheadDuration || notes[notes.length - 1].end;
+  canvas.setAttribute("tabindex", "0");
+  canvas.setAttribute("role", "slider");
+  canvas.setAttribute("aria-valuemin", "0");
+  canvas.setAttribute("aria-valuemax", end.toFixed(1));
+  canvas.setAttribute("aria-valuenow", (playhead ?? 0).toFixed(1));
+  canvas.setAttribute("aria-valuetext", formatClock(playhead ?? 0, lang));
 }
 
 /** A click in the roll hears the take from that second (see timeAtX). */
@@ -1056,17 +1164,64 @@ function seekFromRoll(event) {
   if (!stream || !stream.seg.notes.length || node !== null) return;
   const rect = $("roll").getBoundingClientRect();
   const [t0, t1] = viewRange();
-  const seconds = timeAtX(event.clientX - rect.left, t0, t1, rect.width);
-  const mode = resumeMode({ stored: lastMode, hasVoice: takeChunks.length > 0 });
-  // A seek repositions the demo loop instead of ending it, so the passage can
-  // be re-heard while the balance is adjusted by ear.
-  const keepLooping = looping;
-  if (listening) stopListening();
-  startListening(mode, seconds);
-  if (demoLoopsAfterSeek({ looping: keepLooping, playing: Boolean(listening) })) {
-    looping = true;
-    updateDemoLabel();
+  void seekTo(timeAtX(event.clientX - rect.left, t0, t1, rect.width));
+}
+
+/**
+ * Hears the take from `seconds` — the one path a click and an arrow share.
+ *
+ * A seek restarts the SAME rendered take at a new offset (see
+ * `startListening`), and the status names the second, so a reader who pressed
+ * an arrow hears where playback resumed; `aria-valuetext` carries the same
+ * second to a screen reader on the slider itself.
+ */
+async function seekTo(seconds) {
+  if (seeking) return;
+  if (!stream || !stream.seg.notes.length || node !== null) return;
+  seeking = true;
+  try {
+    const [t0, t1] = viewRange();
+    const target = Math.max(0, Math.min(seconds, t1));
+    const mode = resumeMode({ stored: lastMode, hasVoice: takeChunks.length > 0 });
+    // A seek repositions the demo loop instead of ending it, so the passage can
+    // be re-heard while the balance is adjusted by ear.
+    const keepLooping = looping;
+    if (listening) stopListening();
+    await startListening(mode, target);
+    if (demoLoopsAfterSeek({ looping: keepLooping, playing: Boolean(listening) })) {
+      looping = true;
+      updateDemoLabel();
+    }
+    if (listening) {
+      $("status").textContent = t("seek_at").replace("{time}", formatClock(target, lang));
+    }
+  } finally {
+    seeking = false;
   }
+}
+
+/** Home, End and the two arrows: one second per press, the unit the hint names. */
+function keySeek(event) {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  const [t0, t1] = viewRange();
+  const here = playhead ?? t0;
+  const target =
+    event.key === "ArrowLeft"
+      ? here - 1
+      : event.key === "ArrowRight"
+        ? here + 1
+        : event.key === "Home"
+          ? t0
+          : event.key === "End"
+            ? t1
+            : null;
+  if (target === null) return;
+  event.preventDefault(); // an arrow moves the take, never the page
+  // A held arrow fires keydown over and over: the browser's auto-repeat is ONE
+  // gesture, not one full restart per repeat. `seekTo` also refuses to start
+  // while a restart is in flight, which covers a click landing mid-seek.
+  if (event.repeat) return;
+  void seekTo(target);
 }
 
 function toggleListening(mode) {
@@ -1081,10 +1236,15 @@ function toggleListening(mode) {
 function download(bytes, name, type) {
   const blob = new Blob([bytes], { type });
   const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
+  link.href = url;
   link.download = name;
   link.click();
-  URL.revokeObjectURL(link.href);
+  // The click STARTS the download, it does not finish it: the browser still
+  // has to fetch the blob. Revoking in this same task can cancel that fetch
+  // before a byte is read — a click that produces no file at all — so the URL
+  // outlives the task it was handed to and is released a moment later.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // One clock for every exported name: two files of the same take must sort
@@ -1133,6 +1293,12 @@ async function exportBundle() {
     download(bundle.bytes, bundle.name, "application/zip");
   } catch {
     setStatus("error_bundle");
+  } finally {
+    // The archive has already copied the samples it packs. Keeping this
+    // concatenation would leave the page holding the take TWICE for the rest
+    // of the session — the blocks ARE the take, this was only a view of them,
+    // and a second listen or export rebuilds it when it is asked for.
+    takeVoiceCache = null;
   }
 }
 
@@ -1166,6 +1332,7 @@ async function init() {
   $("listen").addEventListener("click", () => toggleListening("piano"));
   $("voice").addEventListener("click", () => toggleListening("mix"));
   $("roll").addEventListener("click", seekFromRoll);
+  $("roll").addEventListener("keydown", keySeek);
   $("balance").addEventListener("input", () => {
     balance = Number($("balance").value) / 100;
     // Live faders: the take keeps sounding, no render and no seek, because

@@ -194,7 +194,7 @@ STRINGS = {
         "ui show live details": "＋ Afficher les détails",
         "ui hide live details": "− Masquer les détails",
         "ui take summary": "Votre transcription",
-        "ui summary facts": "{notes} notes · {duration:.1f} s · {tempo} · {key}",
+        "ui summary facts": "{notes} notes · {duration} s · {tempo} · {key}",
         "ui show details": "＋ Afficher les détails",
         "ui hide details": "− Masquer les détails",
         "ui metronome": "Métronome",
@@ -245,7 +245,7 @@ STRINGS = {
         "ui finish replacement": "Terminer le remplacement",
         "ui edit hint": "Sélectionnez une note ou une suite contiguë. Cliquez une touche pour corriger une note.",
         "ui edit selection": "Notes {first}–{last} sélectionnées : vous pouvez les remplacer en chantant.",
-        "ui selection label": "Sélection : {n} note(s) · {t0:.1f}–{t1:.1f} s",
+        "ui selection label": "Sélection : {n} note(s) · {t0}–{t1} s",
         "ui replacement prompt": "Chantez la phrase de remplacement, puis cliquez « Terminer le remplacement ».",
         "ui replacement analyzing": "Mise à jour de la prise…",
         "ui replacement pending": "Remplacement prêt : écoutez la phrase, puis gardez-la ou annulez.",
@@ -405,10 +405,10 @@ STRINGS = {
         "ui diff added row": "  #{i} → {after} — {status}",
         "ui diff suspects header": "Suspects de la lecture courante ({n}) :",
         "ui diff suspect row": (
-            "  midi {midi} cache midi {plateau} ({dur:.2f} s, {offset}) {tag}{conf}"
+            "  midi {midi} cache midi {plateau} ({dur} s, {offset}) {tag}{conf}"
         ),
-        "ui diff suspect resolved": "  RESOLU — le doute sur {midi} ({dur:.2f} s) ne se reproduit pas",
-        "ui diff confidence": " · confiance pYIN {c:.2f} (contexte, pas un verdict)",
+        "ui diff suspect resolved": "  RESOLU — le doute sur {midi} ({dur} s) ne se reproduit pas",
+        "ui diff confidence": " · confiance pYIN {c} (contexte, pas un verdict)",
         "diff status stable": "identique",
         "diff status near": "arrondi proche",
         "diff status changed": "modifiée",
@@ -442,8 +442,8 @@ STRINGS = {
         "coh take clean": "  {stem}  contrôlées {checked}  — propre",
         "coh take suspects": "  {stem}  contrôlées {checked}  {rate}/100  suspects {n}",
         "coh take divergent": "  {stem}  contrôlées {checked}  — ARTEFACTS DIVERGENTS (WAV/JSON, voir verify)",
-        "coh suspect row": "    midi {midi:>3}  portée {span:.2f}st  plateau {dur:.2f}s {at}→ midi {target} ({offset})",
-        "coh plateau at": "à {t:.2f}s ",
+        "coh suspect row": "    midi {midi:>3}  portée {span}st  plateau {dur}s {at}→ midi {target} ({offset})",
+        "coh plateau at": "à {t}s ",
         "coh verdict clean": "Aucun suspect sur {takes} prise(s) ({notes} notes contrôlées) : aucune note longue ne cache de plateau secondaire.",
         "coh verdict clean nonotes": "Aucun suspect sur {takes} prise(s) : aucune note longue ne cache de plateau secondaire (> 120 ms tenus à plus d'un demi-ton de l'étiquette).",
         "coh verdict suspects": "{suspects} suspect(s) au total sur {takes} prise(s) ({notes} notes contrôlées) — détail par prise ci-dessus.",
@@ -456,10 +456,10 @@ STRINGS = {
         ),
         "ui calibrate heard": "micro : {note}",
         "ui calibrate silent": "micro : rien de tenu pour l'instant (l'application écoute…)",
-        "ui calibrate found": "Écart mesuré : {cents:+.1f} cents — enregistrez-le comme référence pour les prochaines prises.",
+        "ui calibrate found": "Écart mesuré : {cents} cents — enregistrez-le comme référence pour les prochaines prises.",
         "ui calibrate none": "Aucun écart systématique détecté : vos notes ne nomment pas une habitude de l'appareil (le bruit ne se calibre pas).",
         "ui calibrate counts": "tours retenus : {used} · sautés : {skipped}",
-        "ui calibrate saved": "calibrage enregistré : {cents:+.1f} cents (il y a {age_s} s)",
+        "ui calibrate saved": "calibrage enregistré : {cents} cents (il y a {age_s} s)",
         "ui calibrate saved now": "Enregistré — il apparaîtra comme contexte sur les prochaines prises (jamais dans la reconnaissance).",
         "ui calibrate forgotten": "Calibrage supprimé : les prochaines prises repartent sans référence.",
         "ui calibrate context": "L'offset reste un CONTEXTE d'affichage : la reconnaissance ne s'en sert jamais (ADR 0032).",
@@ -700,7 +700,7 @@ STRINGS = {
         "ui show live details": "＋ Show details",
         "ui hide live details": "− Hide details",
         "ui take summary": "Your transcription",
-        "ui summary facts": "{notes} notes · {duration:.1f} s · {tempo} · {key}",
+        "ui summary facts": "{notes} notes · {duration} s · {tempo} · {key}",
         "ui show details": "＋ Show details",
         "ui hide details": "− Hide details",
         "ui metronome": "Metronome",
@@ -751,7 +751,7 @@ STRINGS = {
         "ui finish replacement": "Finish replacement",
         "ui edit hint": "Select one note or a continuous range. Click a key to correct one note.",
         "ui edit selection": "Notes {first}–{last} selected: you can replace them by singing.",
-        "ui selection label": "Selection: {n} note(s) · {t0:.1f}–{t1:.1f} s",
+        "ui selection label": "Selection: {n} note(s) · {t0}–{t1} s",
         "ui replacement prompt": "Sing the replacement phrase, then click “Finish replacement”.",
         "ui replacement analyzing": "Updating the take…",
         "ui replacement pending": "Replacement ready: audition the phrase, then keep it or cancel.",
@@ -909,10 +909,10 @@ STRINGS = {
         "ui diff added row": "  #{i} → {after} — {status}",
         "ui diff suspects header": "Current reading's suspects ({n}):",
         "ui diff suspect row": (
-            "  midi {midi} hides midi {plateau} ({dur:.2f} s, {offset}) {tag}{conf}"
+            "  midi {midi} hides midi {plateau} ({dur} s, {offset}) {tag}{conf}"
         ),
-        "ui diff suspect resolved": "  RESOLVED — the doubt on {midi} ({dur:.2f} s) no longer shows",
-        "ui diff confidence": " · pYIN confidence {c:.2f} (context, not a verdict)",
+        "ui diff suspect resolved": "  RESOLVED — the doubt on {midi} ({dur} s) no longer shows",
+        "ui diff confidence": " · pYIN confidence {c} (context, not a verdict)",
         "diff status stable": "identical",
         "diff status near": "near rounding",
         "diff status changed": "changed",
@@ -946,8 +946,8 @@ STRINGS = {
         "coh take clean": "  {stem}  audited {checked}  — clean",
         "coh take suspects": "  {stem}  audited {checked}  {rate}/100  suspects {n}",
         "coh take divergent": "  {stem}  audited {checked}  — DIVERGING ARTIFACTS (WAV/JSON, see verify)",
-        "coh suspect row": "    midi {midi:>3}  span {span:.2f}st  plateau {dur:.2f}s {at}→ midi {target} ({offset})",
-        "coh plateau at": "at {t:.2f}s ",
+        "coh suspect row": "    midi {midi:>3}  span {span}st  plateau {dur}s {at}→ midi {target} ({offset})",
+        "coh plateau at": "at {t}s ",
         "coh verdict clean": "No suspect over {takes} take(s) ({notes} audited notes): no long note hides a secondary plateau.",
         "coh verdict clean nonotes": "No suspect over {takes} take(s): no long note hides a secondary plateau (> 120 ms held more than a semitone off the label).",
         "coh verdict suspects": "{suspects} suspect(s) total over {takes} take(s) ({notes} audited notes) — per-take detail above.",
@@ -959,10 +959,10 @@ STRINGS = {
         ),
         "ui calibrate heard": "mic: {note}",
         "ui calibrate silent": "mic: nothing held yet (listening…)",
-        "ui calibrate found": "Measured offset: {cents:+.1f} cents — save it as reference for upcoming takes.",
+        "ui calibrate found": "Measured offset: {cents} cents — save it as reference for upcoming takes.",
         "ui calibrate none": "No systematic offset detected: your rounds do not name a device habit (noise is never calibrated).",
         "ui calibrate counts": "rounds used: {used} · skipped: {skipped}",
-        "ui calibrate saved": "calibration saved: {cents:+.1f} cents ({age_s} s ago)",
+        "ui calibrate saved": "calibration saved: {cents} cents ({age_s} s ago)",
         "ui calibrate saved now": "Saved — it will show as context on upcoming takes (never in recognition).",
         "ui calibrate forgotten": "Calibration cleared: upcoming takes start without a reference.",
         "ui calibrate context": "The offset stays a DISPLAY context: recognition never reads it (ADR 0032).",
@@ -1098,6 +1098,25 @@ def tr(key: str) -> str:
             print(f"[v2m i18n] clé absente de la table « {_current} » : {key!r}", file=sys.stderr)
         return key
     return STRINGS[_current][key]
+
+
+def format_number(value: float, digits: int = 0, sign: bool = False) -> str:
+    """Write one displayed number in the current language.
+
+    The desktop twin of the page's single `Intl.NumberFormat`: a Python
+    f-string writes a dot in every language, so a French window printed
+    "3.2 s" beside a French page reading "3,2 s". Every number carrying a
+    decimal goes through this one formatter instead of a call-site format
+    spec. Grouping stays OFF — these are seconds, hertz and cents inside a
+    measure, never thousands — and a non-finite reading prints as 0 rather
+    than "nan".
+    """
+    if not isinstance(value, (int, float)):
+        value = 0.0
+    elif value != value or value in (float("inf"), float("-inf")):  # NaN, ±inf
+        value = 0.0
+    text = f"{value:{'+' if sign else ''}.{digits}f}"
+    return text.replace(".", ",") if _current == "fr" else text
 
 
 def note_display(midi: int) -> str:

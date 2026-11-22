@@ -120,3 +120,21 @@ def test_the_in_tune_band_is_the_one_the_gui_meter_uses():
     assert report["in_tune_share"] == 1.0
     assert report["tendency"] == "even"
     assert abs(report["mean_cents"]) < MIN_CENTS
+
+
+def test_a_note_without_a_measurement_is_not_counted_as_in_tune():
+    """No reading is not evidence of being on pitch, and not a note either.
+
+    The page's port skips such a note (`centsOf` answers null); counting it as
+    0.0 here would report an in-tune share from notes nobody measured.
+    """
+    from types import SimpleNamespace
+
+    measured = _notes([-0.30] * 4)
+    unread = [SimpleNamespace(midi=72), SimpleNamespace(midi=64, deviation=None)]
+    report = summarize([*measured, *unread])
+    assert report["n_notes"] == 4
+    assert report["mean_cents"] == -30.0
+    assert report["in_tune_share"] == 0.0
+    assert summarize([SimpleNamespace(midi=60)])["n_notes"] == 0
+    assert summarize([])["n_notes"] == 0

@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.accuracy import AccuracyHistory
-from ..core.i18n import note_display_pair, tr
+from ..core.i18n import format_number, note_display_pair, tr
 from ..core.intonation_live import LiveIntonation
 from ..core.liveseg import LiveNote
 from ..core.music import on_piano
@@ -803,7 +803,9 @@ class LivePage(QWidget):
         if not items:
             self.label_accuracy.setText(tr("ui accuracy empty"))
             return
-        parts = "  ".join(f"{note_display_pair(m)} {v:.0f}¢" for m, v in reversed(items[-6:]))
+        parts = "  ".join(
+            f"{note_display_pair(m)} {format_number(v, 0)}¢" for m, v in reversed(items[-6:])
+        )
         self.label_accuracy.setText(tr("ui accuracy title") + " " + parts)
 
     def on_live_note_closed(self, note: LiveNote) -> None:

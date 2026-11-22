@@ -26,9 +26,15 @@ A copy drifts. These tests make the drift loud instead of slow:
   the fixtures are regenerated AND the JavaScript still agrees
   (`node --test web/test/segmenter.test.mjs`, run by the Pages workflow);
 - the page stays dependency-free and self-contained (no CDN, no build);
+- the archive the page exports, and the parity fixtures its reading is
+  compared against, are pinned in `tests/test_web_export.py`;
 - the workflow actually publishes `web/` and runs that test first;
 - both languages of the page carry the same keys, and every key the page
-  asks for exists.
+  asks for exists;
+- the page's craft floors that need no browser — a visible focus ring on every
+  interactive selector, and one reduced-motion block that silences every
+  transition — are read from the sheet itself, so a deleted rule fails the
+  ordinary suite before Chrome is ever started.
 """
 
 from __future__ import annotations
@@ -164,7 +170,7 @@ def test_the_generated_values_guard_bites(tmp_path, monkeypatch):
 
 
 def test_the_page_is_a_self_contained_folder():
-    for name in ("index.html", "style.css", "app.js", "strings.json"):
+    for name in ("index.html", "style.css", "app.js", "strings.json", "theme-init.js"):
         assert (WEB / name).is_file(), f"web/{name} is missing"
     html = (WEB / "index.html").read_text(encoding="utf-8")
     assert 'src="app.js"' in html
@@ -174,6 +180,13 @@ def test_the_page_is_a_self_contained_folder():
         assert pattern not in html
     for path in WEB.glob("*.js"):
         assert "http://" not in path.read_text(encoding="utf-8")
+    # ... and the driver BORROWS the one dependency it needs instead of adding
+    # it to the folder: Playwright is installed by the workflow, and the module
+    # the page owns must stay free of it.
+    assert "playwright" not in (WEB / "test" / "browser.mjs").read_text(encoding="utf-8"), (
+        "the page's own driver grew a dependency"
+    )
+    assert "/node_modules/" in (REPO / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_the_web_theme_speaks_the_desktop_s_preference_language():
@@ -343,6 +356,123 @@ def _web_rule(selector: str) -> str:
     return rule.group(1)
 
 
+def _web_sheet() -> str:
+    """`web/style.css` without its comments: prose cannot style a control."""
+    return re.sub(r"/\*.*?\*/", "", (WEB / "style.css").read_text(encoding="utf-8"), flags=re.S)
+
+
+def _web_blocks(css: str) -> list[tuple[str, str]]:
+    """Every `selectors { declarations }` pair, in sheet order.
+
+    A media query's prelude is skipped by the pattern itself: it opens a brace
+    before its first rule, so `[^{}]*` never reaches a closing one.
+    """
+    return [
+        (selectors.strip(), body) for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+    ]
+
+
+def _web_media(query: str) -> str:
+    """The body of one `@media` block, its braces matched rather than guessed."""
+    css = _web_sheet()
+    at = css.find(query)
+    assert at != -1, f"web/style.css no longer declares {query}"
+    start = css.index("{", at)
+    depth = 0
+    for index in range(start, len(css)):
+        if css[index] == "{":
+            depth += 1
+        elif css[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[start + 1 : index]
+    raise AssertionError(f"{query} never closes")
+
+
+# Each interactive control on the page, the selector that draws its ring, and
+# the markup that proves the control still exists. `button` carries the masthead
+# pills, the tutorial's two text links and the reset: the page styles them as
+# buttons, so the grouped rule is their ring. The file input's own box is
+# invisible, so its ring is painted on the label beside it.
+WEB_FOCUS_CONTROLS = (
+    ("the buttons", "button", "<button"),
+    ("the roll", "#roll", 'id="roll"'),
+    ("the tutorial's summary", ".guide > summary", "<summary"),
+    ("the file input's label", ".file input", 'type="file"'),
+    ("the balance slider", 'input[type="range"]', 'type="range"'),
+    ("the notes scroller", ".table-scroll", 'class="table-scroll"'),
+)
+
+
+def test_every_interactive_control_has_a_visible_focus_ring():
+    # The browser walk (`web/test/craft-floor.test.mjs`) proves this on a
+    # rendered page, but it needs Chrome; this pins the same floor in the
+    # ordinary suite, so deleting a focus rule fails here first. A renamed
+    # control or selector is caught from both sides: the markup must still
+    # carry the control, and the sheet must still draw a ring on it.
+    css = _web_sheet()
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    focus_rules = [
+        (selectors, body) for selectors, body in _web_blocks(css) if ":focus-visible" in selectors
+    ]
+    assert len(focus_rules) >= 4, f"only {len(focus_rules)} focus rules are left"
+    for label, selector, evidence in WEB_FOCUS_CONTROLS:
+        assert evidence in html, f"{label}: the control left the page"
+        entry = f"{selector}:focus-visible"
+        body = next(
+            (
+                body
+                for selectors, body in focus_rules
+                if any(
+                    piece.strip() == entry or piece.strip().startswith(entry)
+                    for piece in selectors.split(",")
+                )
+            ),
+            None,
+        )
+        assert body is not None, f"{label}: no `{entry}` rule draws its ring"
+        ring = re.search(r"outline:\s*(\d+)px\s+solid\s+([^;]+);", body)
+        assert ring and int(ring.group(1)) >= 2, f"{label}: the focus rule draws no visible ring"
+        assert ring.group(2).strip() != "transparent", f"{label}: the focus ring is transparent"
+    # A later `outline: none` on a focus state would erase the ring the grouped
+    # rule draws, so the sheet may not carry one.
+    for selectors, body in focus_rules:
+        assert not re.search(r"outline:\s*(0px|none)\b", body), (
+            f"{selectors}: this focus rule erases the ring instead of drawing one"
+        )
+
+
+def test_the_reduced_motion_block_silences_every_transition():
+    # Every family the sheet animates must be switched off inside the ONE
+    # `prefers-reduced-motion` block: a transition added outside it keeps moving
+    # for a reader who asked it not to. The browser test reads the same block;
+    # this is the copy that runs without Chrome.
+    block = _web_media("@media (prefers-reduced-motion: reduce)")
+    assert re.search(r"transition:\s*none", block), (
+        "the reduced-motion block no longer removes the transitions"
+    )
+    silenced = {
+        piece.strip() for selectors, _ in _web_blocks(block) for piece in selectors.split(",")
+    }
+
+    def animates(body: str) -> bool:
+        """True when a block declares a transition that actually runs."""
+        values = re.findall(r"transition:\s*([^;]+);", body)
+        return any(value.strip() not in {"none", "0s"} for value in values)
+
+    animated = {
+        piece.strip()
+        for selectors, body in _web_blocks(_web_sheet())
+        if animates(body)
+        for piece in selectors.split(",")
+    }
+    assert {"button", ".link", ".meter-fill"} <= animated, (
+        "the control transitions are gone: the block would silence nothing"
+    )
+    missing = animated - silenced
+    assert not missing, f"these transitions keep moving under reduced motion: {sorted(missing)}"
+
+
 def test_every_control_boundary_is_visible_in_both_palettes():
     # axe decides text contrast and never non-text contrast (1.4.11), so the
     # page's control boundaries are measured here instead: the analysis-rate
@@ -355,6 +485,18 @@ def test_every_control_boundary_is_visible_in_both_palettes():
         for foreground, background in WEB_CONTROL_EDGES:
             ratio = _web_contrast(tokens[foreground], tokens[background])
             assert ratio >= 3.0, f"{theme}: {foreground} on {background} reads {ratio:.2f}:1"
+
+
+def test_the_copper_focus_ring_reads_on_the_paper_in_both_palettes():
+    # The ring is 2 px of `--copper` drawn OUTSIDE the control, so on the page
+    # it sits on `--paper` rather than on the control's fill. WCAG 1.4.11 asks
+    # non-text indicators for 3:1, and the existing pair clears it with room:
+    # 3.74:1 in the light palette, 8.19:1 in the dark one. The colours are
+    # pinned, never adjusted — a future palette edit must keep the ring visible.
+    for theme, selector in (("light", ":root"), ("dark", '[data-theme="dark"]')):
+        tokens = _web_tokens(selector)
+        ratio = _web_contrast(tokens["copper"], tokens["paper"])
+        assert ratio >= 3.0, f"{theme}: the focus ring reads {ratio:.2f}:1 on the paper"
 
 
 def test_secondary_controls_are_fills_not_strokes():
@@ -414,6 +556,76 @@ def test_a_disabled_field_keeps_its_label_readable():
     dark = _web_tokens('[data-theme="dark"]')
     assert root["button-off"] != root["button"], "the light disabled field is the enabled one"
     assert dark["button-off"] != dark["button"], "the dark disabled field is the enabled one"
+
+
+def test_the_two_text_links_disable_through_the_button_rule():
+    # `#balance-reset` and the tutorial's `#guide-demo` are buttons painted as
+    # text links. `button:disabled` already outranks either class's own ink and
+    # background, so a per-class copy of the pair would be a second declaration
+    # to keep in sync; what must hold is that they stay buttons and their base
+    # rules do not fade the word themselves.
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for control_id in ("balance-reset", "guide-demo"):
+        assert re.search(rf'<button[^>]*id="{control_id}"[^>]*>', html), (
+            f"#{control_id} is no longer a button, so button:disabled no longer paints it"
+        )
+    rule = _web_rule("button:disabled")
+    assert "var(--button-off)" in rule, "the disabled field is a fade again, not a surface"
+    assert "var(--button-off-ink)" in rule, "the disabled label lost its readable ink"
+    assert "opacity" not in rule, "the disabled control fades its own label again"
+    assert "transition: none" in rule, "a disabled control can be caught mid-change"
+    for selector in (".balance-reset", ".guide-link"):
+        assert "opacity" not in _web_rule(selector), f"{selector} fades its word again"
+    # The underline is the promise of a click, and an inactive control makes none.
+    # ONE shared rule drops it for both links, and it carries the line ALONE: the
+    # field and the word stay `button:disabled`'s pair, so no contrast moves.
+    dropping = [
+        (selectors, body)
+        for selectors, body in _web_blocks(_web_sheet())
+        if ".balance-reset:disabled" in selectors and ".guide-link:disabled" in selectors
+    ]
+    assert len(dropping) == 1, "the two text links no longer drop their underline in one rule"
+    declarations = {
+        part.split(":", 1)[0].strip() for part in dropping[0][1].split(";") if ":" in part
+    }
+    assert declarations == {"text-decoration"}, (
+        f"the disabled text link repaints more than the line: {declarations}"
+    )
+    for selector in (".balance-reset", ".guide-link"):
+        assert "text-decoration: underline" in _web_rule(selector), (
+            f"{selector} lost the underline its ENABLED state acts through"
+        )
+    # The pair's own 4.5:1 is measured ONCE, on the shared rule, by
+    # `test_a_disabled_field_keeps_its_label_readable`: the links add nothing
+    # to that pair, and a second copy of one measurement is a second place to
+    # keep in step.
+
+
+def test_the_playing_row_never_takes_the_page_away_from_the_roll():
+    # `scrollIntoView` on the playing row scrolls every ancestor, the DOCUMENT
+    # included, so the page would leave the roll and its playhead to show a row
+    # the reader was not looking at. The page asks `playingRowScroll` first
+    # (pure, in `web/playhead.js`, measured by `web/test/table-follow.test.mjs`)
+    # and scrolls by the gap it answers, so the table's own sideways scroll
+    # survives — and the direction is not rebuilt at the call site.
+    code = re.sub(
+        r"/\*.*?\*/|//[^\n]*", "", (WEB / "app.js").read_text(encoding="utf-8"), flags=re.S
+    )
+    assert "scrollIntoView" not in code, "the playing row scrolls the page without asking"
+    assert "playingRowScroll" in code, "the playing row no longer asks before moving the page"
+    assert re.search(
+        r'import \{[^}]*playingRowScroll[^}]*\} from "\./playhead\.js"', code, re.S
+    ), "the follow policy does not come from the page's own view module"
+    assert "window.scrollBy" in code, "the follow moves more than the vertical gap"
+    # The pure function answers the GAP, sign included; rebuilding the direction
+    # here was the second owner of the rule (`box.bottom <= 0 ? … : …`).
+    assert "box.bottom - window.innerHeight" not in code, (
+        "the page recomputes the gap instead of scrolling by the one it was given"
+    )
+    assert "box.bottom <= 0" not in code, "the page still decides the direction itself"
+    assert "export function playingRowScroll" in (WEB / "playhead.js").read_text(
+        encoding="utf-8"
+    ), "the follow policy left the module that owns the view's decisions"
 
 
 def test_the_tutorial_opens_the_demo_from_its_first_step():
@@ -573,11 +785,6 @@ def test_the_page_adapts_to_every_resolution_class():
         "the masthead still eats half a landscape phone before the first control"
     )
 
-    # Motion is a preference, not decoration: the system's "reduce motion"
-    # must switch off the control transitions too.
-    assert "@media (prefers-reduced-motion: reduce)" in css, (
-        "the page ignores the reader's reduced-motion setting"
-    )
 
 
 def test_a_wide_window_gets_a_wider_measure_without_longer_lines():
@@ -650,93 +857,6 @@ def test_the_page_opens_on_a_complete_tutorial():
     assert "five" in strings["en"]["guide_title"]
 
 
-def test_the_page_can_export_the_whole_take_as_one_archive():
-    # The MIDI says what should be PLAYED; only the recording says what was
-    # SUNG, and only the JSON says how it was measured. Re-analysing a take,
-    # comparing two of them or improving the algorithm needs all three together
-    # — so the page writes one archive, and the notice inside it says what each
-    # file is without assuming the reader knows a format.
-    html = (WEB / "index.html").read_text(encoding="utf-8")
-    assert 'id="bundle"' in html and 'data-i18n="bundle"' in html, (
-        "the page lost its whole-take export button"
-    )
-    app = (WEB / "app.js").read_text(encoding="utf-8")
-    assert 'import { buildBundle } from "./bundle.js";' in app, "app.js no longer builds a bundle"
-    assert '"click", exportBundle' in app, "the bundle button is not wired"
-    # A control that never enables is a dead button; the audio is required, so a
-    # take with notes but no kept signal cannot offer an archive.
-    assert '$("bundle").disabled = notes.length === 0 || takeChunks.length === 0;' in app, (
-        "the bundle button is enabled without a take to put in it"
-    )
-
-    # The AUDIO must be the first entry: the notes are a reading of it and the
-    # MIDI a reading of those, so an archive that opens on `notes.json` invites
-    # exactly the mistake this feature exists to prevent.
-    source = (WEB / "bundle.js").read_text(encoding="utf-8")
-    order = [
-        source.index(f"name: {name}")
-        for name in ("AUDIO_NAME", "NOTES_NAME", "MIDI_NAME")
-    ]
-    assert order == sorted(order), "the archive no longer puts the recording first"
-
-    # Both languages, or a French reader gets a notice full of keys.
-    strings = json.loads((WEB / "strings.json").read_text(encoding="utf-8"))
-    for language in ("fr", "en"):
-        for key in (
-            "bundle",
-            "bundle_readme_intro",
-            "bundle_readme_audio",
-            "bundle_readme_notes",
-            "bundle_readme_midi",
-        ):
-            assert strings[language].get(key), f"{language}: {key} is missing or empty"
-
-
-def test_the_archive_compresses_when_the_browser_can_and_stores_when_it_cannot():
-    # A take is a few seconds of 16-bit audio: deflate roughly halves the
-    # download for every browser that offers a raw stream, and a browser that
-    # does not must still get a valid archive. The stored fallback is the
-    # writer this page shipped before compression, byte for byte, so an archive
-    # written today and one written in that browser are the same file. What the
-    # guard refuses is the silent middle: compressing WITHOUT probing first,
-    # zlib-wrapping a stream into a file an unzip tool turns into garbage, and
-    # a CRC taken over the compressed bytes.
-    source = (WEB / "zip.js").read_text(encoding="utf-8")
-    assert 'new CompressionStream("deflate-raw")' in source, (
-        "the archive no longer asks for RAW deflate"
-    )
-    probe = source.index('new CompressionStream("deflate-raw")')
-    assert "try {" in source[:probe] and "catch {" in source[probe:], (
-        "the raw-deflate probe lost its try/catch: an unsupported format throws"
-    )
-    assert 'new CompressionStream("deflate")' not in source, (
-        "a zlib-wrapped stream is not ZIP method 8"
-    )
-    assert "export async function zipArchive(" in source
-    assert "compress = browserDeflate" in source, "the compressor is not the browser's by default"
-    assert "packed.length < bytes.length" in source, (
-        "an entry that does not shrink is deflated anyway, and grows the archive"
-    )
-    assert "crc32(entry.bytes)" in source, "the CRC must be taken over the original bytes"
-    fallback = source[source.index("export function zipStore(") :]
-    assert "method: 0" in fallback, "the stored fallback is gone"
-
-    bundle = (WEB / "bundle.js").read_text(encoding="utf-8")
-    assert "export async function buildBundle(" in bundle
-    assert "await zipArchive(entries" in bundle, "the bundle no longer awaits its archive"
-    app = (WEB / "app.js").read_text(encoding="utf-8")
-    assert "async function exportBundle(" in app and "await buildBundle({" in app, (
-        "the download still reads a promise as bytes"
-    )
-    assert 'setStatus("error_bundle");' in app, "a failed archive has no message of its own"
-    strings = json.loads((WEB / "strings.json").read_text(encoding="utf-8"))
-    for language in ("fr", "en"):
-        assert strings[language].get("error_bundle"), f"{language}: error_bundle is missing"
-        assert strings[language]["error_bundle"] != strings[language]["error_file"], (
-            f"{language}: the archive failure borrows another failure's sentence"
-        )
-
-
 def test_the_notes_scroll_region_is_reachable_by_keyboard():
     # axe's `scrollable-region-focusable`: a box that scrolls sideways must be in
     # the TAB CHAIN, or a keyboard user simply cannot see the columns past the
@@ -791,12 +911,16 @@ def test_the_dark_theme_repaints_every_colour_token():
 def test_the_theme_is_painted_before_the_first_frame_and_remembered():
     # The page module is deferred, so a stored dark page would flash its light
     # paper while the strings are fetched: the head script must set the
-    # attribute itself, from the SAME key and the same two names.
+    # attribute itself, from the SAME key and the same two names. It is a file
+    # of its own, which is what lets the page's policy carry no inline
+    # exception — the head must LOAD it, and it must still say all three things.
     html = (WEB / "index.html").read_text(encoding="utf-8")
     head = html.split("<body", 1)[0]
-    assert "dataset.theme" in head
-    assert 'localStorage.getItem("v2m_theme")' in head
-    assert "prefers-color-scheme: dark" in head
+    assert '<script src="theme-init.js"></script>' in head
+    init = (WEB / "theme-init.js").read_text(encoding="utf-8")
+    assert "dataset.theme" in init
+    assert 'localStorage.getItem("v2m_theme")' in init
+    assert "prefers-color-scheme: dark" in init
     app = (WEB / "app.js").read_text(encoding="utf-8")
     prefs = (WEB / "prefs.js").read_text(encoding="utf-8")
     assert 'THEME_KEY = "v2m_theme"' in prefs  # the one key, one spelling
@@ -853,6 +977,30 @@ def test_the_conformance_cases_are_what_the_python_segmenter_decides():
     for field in ("peak", "rms"):
         assert fresh[field] == pytest.approx(checked[field]), regenerate
     assert fresh["samples"] == pytest.approx(checked["samples"], abs=1e-9), regenerate
+
+
+def test_the_intonation_fixture_is_what_the_python_summarizer_decides():
+    # `web/intonation.js` is the one port with no conformity proof of its own:
+    # it decides a VISIBLE line out of thresholds, and no other check compares
+    # it to anything. The fixture is the desktop's own summary over the traps
+    # (fewer than MIN_NOTES notes, a mean under MIN_CENTS, identically-pitched
+    # notes, an odd count, both inclusive bars, an empty take), replayed by
+    # `node --test web/test/intonation.test.mjs`.
+    from scripts.export_web_fixtures import INTONATION_CASES, intonation_reference
+
+    regenerate = (
+        "web/test/intonation.json is stale: run "
+        "`./.venv/Scripts/python.exe -m scripts.export_web_fixtures`"
+    )
+    checked_in = json.loads((WEB / "test" / "intonation.json").read_text(encoding="utf-8"))
+    assert intonation_reference() == checked_in, regenerate
+    for name in (
+        "fewer_than_four_notes_never_leans",
+        "a_mean_under_twelve_cents_is_not_a_habit",
+        "identical_pitches_divide_no_register",
+        "an_odd_count_gives_its_extra_note_to_the_end",
+    ):
+        assert name in INTONATION_CASES, f"{regenerate}: the {name} trap left the fixture"
 
 
 def _yin_spans_the_take(excerpts) -> bool:
@@ -1276,24 +1424,62 @@ def test_a_graph_that_never_starts_is_reported_instead_of_awaited_forever():
     # a permission problem, and a prompt would ask the reader for nothing.
     assert "getUserMedia" not in crashed[: crashed.index("await stopCapture(true)")]
 
+    # PLAYBACK had the same dead end and now has the same bound: `startListening`
+    # awaited `resume()` bare, so a machine with no output sat on "Préparation de
+    # l'écoute…" for good. It must wait through `startedContext` and let its own
+    # catch name the playback failure.
+    play = app[app.index("async function startListening(") :]
+    play = play[: play.index("\nasync function ")]
+    assert "await playbackContext.resume()" not in play, "an unbounded playback resume is back"
+    assert "await startedContext(playbackContext)" in play, (
+        "playback awaits resume bare: a dead output is never reported"
+    )
+    assert 'setStatus("error_play");' in play, "the playback branch lost its own sentence"
+    # ... and a console line, like the microphone's: the step that was running
+    # and the graph's own state, so a bug report can say why without a
+    # screenshot ("suspended" past the bound is a dead output, "running" with a
+    # throw is this page's bug).
+    assert "logPlaybackFailure(stage, error, state)" in play, (
+        "a failed playback leaves no console line to report"
+    )
+    log = app[app.index("function logPlaybackFailure(") :]
+    log = log[: log.index("\n}\n")]
+    assert "playback failed [${stage}]" in log, "the console line does not name the step"
+    assert "AudioContext ${state}" in log, "the console line does not name the graph's state"
+
 
 def test_the_pages_workflow_tests_before_it_publishes():
     workflow = (REPO / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
     assert "node --test web/test/segmenter.test.mjs" in workflow
     assert "node --test web/test/yin.test.mjs" in workflow
     assert "node --test web/test/yin-rates.test.mjs" in workflow
+    assert "node --test web/test/parity.test.mjs" in workflow, (
+        "the page is published without comparing it to the desktop on audio"
+    )
     assert "path: web" in workflow  # the artifact IS the page folder
     assert "actions/deploy-pages@v4" in workflow
     assert "branches: [main]" in workflow
-    # The port's conformance must gate the deploy. The microphone capture does
-    # NOT: its PulseAudio provisioning is unproven, so it stands in its own job
-    # and `MIC_CAPTURE_REQUIRED` decides whether a red capture blocks — unset,
-    # publication proceeds; set after a green run, it becomes the gate.
+    # BOTH jobs gate the deploy. The microphone capture used to be an OPT-IN
+    # gate (a repository variable nothing in the tree could set), which meant a
+    # red capture published anyway; the default is now refusal, and the only
+    # escape is an explicit waiver.
     assert "needs: [verify, capture]" in workflow
     assert "needs.verify.result == 'success'" in workflow
     assert "needs.capture.result == 'success'" in workflow
-    assert "vars.MIC_CAPTURE_REQUIRED != 'true'" in workflow
+    assert "vars.MIC_CAPTURE_WAIVED == 'true'" in workflow, (
+        "the microphone gate is not on by default"
+    )
+    assert "MIC_CAPTURE_REQUIRED" not in workflow, (
+        "the old opt-in is back: a gate that must be switched on is off by default"
+    )
+    assert workflow.count("vars.MIC_CAPTURE_WAIVED") == 1, "the waiver must be the one door"
     assert "!cancelled()" in workflow
+    # And using the waiver is LOUD: the deploy job annotates the run with what
+    # was not proven. A quiet bypass is how the coverage stops being honest.
+    deploy_job = workflow[workflow.index("\n  deploy:") :]
+    waiver_step = deploy_job[deploy_job.index("needs.capture.result != 'success'") :]
+    assert "::warning" in waiver_step, "a waived capture passes in silence"
+    assert "waived" in waiver_step.lower()
 
     jobs = workflow[workflow.index("\njobs:") :]
     verify_job = jobs[jobs.index("\n  verify:") : jobs.index("\n  capture:")]
@@ -1301,6 +1487,34 @@ def test_the_pages_workflow_tests_before_it_publishes():
     assert "node --test web/test/capture.test.mjs" in capture_job
     assert "node --test web/test/capture.test.mjs" not in verify_job, (
         "the microphone path still holds the publication hostage"
+    )
+    # The chosen file needs no device, so it GATES the publication: it is the
+    # one reading a reader picks, and the deploy must stop on it.
+    assert "node --test web/test/file.test.mjs" in verify_job, (
+        "the chosen-file path does not stop a deploy"
+    )
+    # The keyboard walk gates the deploy too: a focus chain that skips a
+    # control, or a Space that does two things, is a page half the readers
+    # cannot use. Its playback half needs an output device, so it runs a second
+    # time in `capture`, where the null sink exists.
+    assert "node --test web/test/keyboard.test.mjs" in verify_job, (
+        "the keyboard journey does not stop a deploy"
+    )
+    assert "node --test web/test/keyboard.test.mjs" in capture_job, (
+        "the Space-on-playback half never runs with an output device"
+    )
+    # The page's own Content-Security-Policy is a gate in its own right: a
+    # policy that refuses the worklet's blob: breaks the only recording path.
+    assert "node --test web/test/csp.test.mjs" in verify_job, (
+        "the page is published without proving its own policy refuses nothing"
+    )
+    assert "node --test web/test/csp.test.mjs" in capture_job, (
+        "the worklet is never proven under the policy"
+    )
+    # A playback graph that never starts must say so: the page used to wait on
+    # `resume()` forever on a machine with no output.
+    assert "node --test web/test/playback-failure.test.mjs" in verify_job, (
+        "a dead output device would leave the page on \"preparing\" again"
     )
     assert "module-null-sink" in capture_job
     assert 'V2M_REQUIRE_AUDIO: "1"' in capture_job
@@ -1325,6 +1539,30 @@ def test_the_pages_workflow_tests_before_it_publishes():
     # a bare call would repeat.
     deploy = workflow[workflow.index("\n  deploy:") :]
     assert deploy.count("actions/configure-pages@v5") == 1, "the deploy configures Pages twice"
+    # The PUBLISHED page is read back from its own url, after the deployment:
+    # every other check serves `web/` from this machine, so a project site that
+    # lives under /<repo>/, a module served as text/plain or a `strings.json`
+    # missing from the artifact would only show in a visitor's console.
+    assert "node web/test/published.mjs" in deploy, "the deployment is never read back"
+    assert deploy.index("actions/deploy-pages@v4") < deploy.index("web/test/published.mjs"), (
+        "the published page must be read AFTER it is deployed"
+    )
+    assert "steps.deployment.outputs.page_url" in deploy, (
+        "the check reads some other url than the one that was published"
+    )
+    # A published page that is not a SECURE CONTEXT has no microphone at all:
+    # the browser hides `navigator.mediaDevices`, so the page renders and can
+    # never be sung into. Both halves of the browser's rule are read from the
+    # published origin, and BEFORE the demo is driven — a check that runs after
+    # the work it guards reports a usable page that no singer can use.
+    published = (WEB / "test" / "published.mjs").read_text(encoding="utf-8")
+    assert "isSecureContext" in published, "the published page's secure context is never read"
+    assert "location.protocol" in published and '"https:"' in published, (
+        "the published page's scheme is never read"
+    )
+    assert published.index("isSecureContext") < published.index("await pressDemo("), (
+        "the secure-context check runs after the demo instead of gating it"
+    )
     # The wide layout has no unit test: a 1600 px shot on every push, kept in
     # the run's artifacts, and the step REFUSES the wide facts itself.
     assert "node web/test/wide-shot.mjs wide-1600.png" in workflow

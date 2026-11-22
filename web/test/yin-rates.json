@@ -1,5 +1,5 @@
 {
- "generated_by": "scripts.export_web_fixtures",
+ "generated_by": "scripts/export_web_fixtures.py",
  "rates": [
   {
    "fft_size": 2048,

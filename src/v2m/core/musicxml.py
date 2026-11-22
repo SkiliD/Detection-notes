@@ -24,11 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
-from .grid import BeatGrid, CATALOGUE
+from .grid import CATALOGUE, BeatGrid
 from .grid import MUSICXML_DIVISIONS as DIVISIONS
-from .music import NOTE_NAMES, midi_to_name_fr
 from .i18n import tr_chord_label
-
+from .music import NOTE_NAMES, midi_to_name_fr
 
 # Below this overlap a "note" on a beat is a segmentation artifact, not a
 # sound: the beat is written without it.
@@ -349,7 +348,7 @@ def build_score_xml(
     harmony_by_measure: dict[int, str] = {}
     harmony_words_by_measure: dict[int, str] = {}
     if chord_progression:
-        for m0, m1, c in chord_progression:
+        for m0, _m1, c in chord_progression:
             if m0 < 1:
                 continue
             harmony_by_measure.setdefault(m0, _harmony_xml(c.root, c.quality))
@@ -364,7 +363,8 @@ def build_score_xml(
             f"Tempo: {bpm:.1f} BPM",
             f"Key: {key_label}" if key_label else None,
             f"Meter: {meter.label}",
-            f"Chord: {chord_progression and ' / '.join(c.label for _, _, c in chord_progression[:8])}",
+            "Chord: "
+            f"{chord_progression and ' / '.join(c.label for _, _, c in chord_progression[:8])}",
         )
         if part
     )
@@ -387,7 +387,8 @@ def build_score_xml(
         "      <attributes>\n",
         f"        <divisions>{divisions}</divisions>\n",
         f"        <key><fifths>{fifths}</fifths></key>\n",
-        f"        <time><beats>{meter.beats_per_measure}</beats><beat-type>{meter.beat_unit}</beat-type></time>\n",
+        f"        <time><beats>{meter.beats_per_measure}</beats>"
+        f"<beat-type>{meter.beat_unit}</beat-type></time>\n",
         "        <clef><sign>G</sign><line>2</line></clef>\n",
         "      </attributes>\n",
         "      <direction placement='above'>\n",
@@ -529,7 +530,9 @@ def save_musicxml(
     with_solfa_lyrics: bool = True,
     rests=None,
 ) -> None:
-    with open(path, "w", encoding="utf-8") as f:
+    # LF on every platform, for the same reason as `report.export_result`: the
+    # reference hashes are the artifact bytes, not the OS's line-ending habit.
+    with open(path, "w", newline="\n", encoding="utf-8") as f:
         f.write(
             build_score_xml(
                 notes,

@@ -19,7 +19,8 @@ import { centsVerdict, formatCents } from "../cents.js";
 import { GATE_RMS } from "../constants.js";
 import { DEMO_NOTES, DEMO_SR, demoLoopsAfterSeek, demoRepeats, demoTake } from "../demo.js";
 import { balanceGains, normalizeVoice, peakOf } from "../mix.js";
-import { formatClock, noteIndexAt, playheadX, timeAtX } from "../playhead.js";
+import { noteIndexAt, playheadX, timeAtX } from "../playhead.js";
+import { formatClock } from "../readout.js";
 import { MIN_CENTS, MIN_NOTES, summarizeIntonation } from "../intonation.js";
 import { readStoredBalance, readStoredChoice, resumeMode, themeFor } from "../prefs.js";
 import { spaceTogglesPlayback } from "../shortcuts.js";
@@ -368,7 +369,7 @@ test("the playback clock reads m:ss.s and carries its minute exactly", () => {
   assert.equal(formatClock(61.5), "1:01.5");
   assert.equal(formatClock(-2), "0:00.0");
   assert.equal(formatClock(NaN), "0:00.0");
-  assert.equal(formatClock(3.2, ","), "0:03,2", "French writes a comma");
+  assert.equal(formatClock(3.2, "fr"), "0:03,2", "French writes a comma");
 });
 
 test("the balance moves two live faders as a crossfade", () => {

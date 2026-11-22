@@ -57,7 +57,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import capture_failure
-from ..core.i18n import note_display, note_display_pair, tr
+from ..core.i18n import format_number, note_display, note_display_pair, tr
 from ..core.music import PIANO_MAX_MIDI, PIANO_MIN_MIDI, on_piano
 from . import widgets
 from .display_stabilizer import DisplayStabilizer
@@ -663,7 +663,9 @@ class FinderPage(QWidget):
             self.label_tuning.setText("")
             return
         self.label_tuning.setStyleSheet(f"color: {widgets.TEXT}; font-size: 11pt;")
-        self.label_tuning.setText(f"{cents:+.0f} ¢ — {tuning_advice(cents)}")
+        self.label_tuning.setText(
+            f"{format_number(cents, 0, sign=True)} ¢ — {tuning_advice(cents)}"
+        )
 
     # ------------------------------------------------------------------
     # the keyboard's span

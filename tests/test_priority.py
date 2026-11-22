@@ -11,9 +11,17 @@ worker thread.
 
 from __future__ import annotations
 
+import sys
 import threading
 
+import pytest
+
 from v2m.gui import priority
+
+# The lowering path is `ctypes.windll` itself, which does not exist off
+# Windows: the two tests below fake that API, so they can only run where it
+# exists. The cross-platform half (a new thread, a silent degradation) stays
+# unmarked.
 
 
 def _in_thread(fn) -> list:
@@ -32,6 +40,7 @@ def _in_thread(fn) -> list:
     return out
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="ctypes.windll: Windows API")
 def test_a_lowering_platform_reports_true_once_then_noop(monkeypatch):
     # a platform that ACCEPTS the call: the first answer is True, the
     # second call in the same thread is a no-op (False) — the once-per-
@@ -72,6 +81,7 @@ def test_a_new_thread_is_lowered_again():
     assert len(results2) == 1 and not isinstance(results2[0], Exception)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="ctypes.windll: Windows API")
 def test_a_raising_platform_degrades_to_the_status_quo(monkeypatch):
     # best-effort by contract: a priority API that raises leaves the thread
     # at the default priority, the function returns False, NO exception

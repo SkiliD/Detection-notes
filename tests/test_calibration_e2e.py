@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from v2m.core import audio_io
-from v2m.core.i18n import tr
+from v2m.core.i18n import format_number, tr
 
 pytestmark = pytest.mark.slow
 
@@ -197,7 +197,15 @@ def test_calibration_flow_names_the_offset_and_persists(qapp, monkeypatch, isola
             ), f"round {round_index + 1} did not advance on the held note"
 
         # the verdict names the offset; saving opens up
-        assert card.prompt.text() == tr("ui calibrate found").format(cents=OFFSET)
+        assert card.prompt.text() == tr("ui calibrate found").format(
+            cents=format_number(OFFSET, 1, sign=True)
+        )
+        # ...and the SENTENCE the singer reads, written out: recomposing it
+        # above pins the wiring, never the comma a French window prints.
+        assert card.prompt.text() == (
+            "Écart mesuré : -22,0 cents — enregistrez-le comme référence "
+            "pour les prochaines prises."
+        )
         assert card.btn_save.isVisible(), "a recordable verdict offers saving"
         assert mic_cal.read() is None, "nothing persists before the explicit save"
 
@@ -271,7 +279,15 @@ def test_the_card_opens_its_own_mic_without_a_take(qapp, monkeypatch, isolated_c
                 f"round {round_index + 1} did not advance without a take"
             )
 
-        assert card.prompt.text() == tr("ui calibrate found").format(cents=OFFSET)
+        assert card.prompt.text() == tr("ui calibrate found").format(
+            cents=format_number(OFFSET, 1, sign=True)
+        )
+        # the rendered French sentence too: a comma that stops being written
+        # must fail here rather than only in the recomposition above.
+        assert card.prompt.text() == (
+            "Écart mesuré : -18,0 cents — enregistrez-le comme référence "
+            "pour les prochaines prises."
+        )
         assert card.btn_save.isVisible()
         # the card SHOWED what it heard (a dead mic and a wrong note must
         # not look the same)
@@ -423,16 +439,16 @@ def test_a_dead_mic_is_said_on_the_card(qapp, monkeypatch, isolated_cal):
             win._calibration_thread.wait(3000)
 
 
-def test_a_stale_hold_never_advances_a_round(qapp, monkeypatch, isolated_cal):
-    """A round counts a pitch only while the note still sounds.
+def test_a_single_frame_is_not_a_held_note(qapp, monkeypatch, isolated_cal):
+    """A round counts a pitch only once the note has HELD, and while it lasts.
 
-    The collector's 400 ms tick used the LAST pitch seen: a note the
-    singer had already released (or a passing glide) stayed in the slot
-    and could be graded — "a sustained pitch only" was a comment, not a
-    rule. The pitch now carries its arrival time.
+    The collector's 400 ms tick graded whatever frame was latest when it
+    fired. One frame is not a note: the ~23 ms analysis window can straddle
+    a note change, and the frame it produces reads off the new tone (measured
+    on the real chain at 44.1 kHz: -14.19 where the note sits at -22). A tick
+    landing there charged that round with the blend, which is how a
+    five-round mean came out at -20.4 instead of -22.0.
     """
-    import time
-
     from v2m.core.i18n import tr
     from v2m.gui import main_window as mw
 
@@ -443,20 +459,79 @@ def test_a_stale_hold_never_advances_a_round(qapp, monkeypatch, isolated_cal):
         win.page_home.btn_calibrate.click()
         card = win.page_home.calibration_card
         assert card._round == 0
+        target = card._targets[-1]
 
-        # a pitch the singer holds: it arrives fresh
-        win._calibration_hz = card._targets[-1]
-        win._calibration_at = time.monotonic()
+        # one frame, however fresh, is not evidence of a held note
+        win._remember_calibration_pitch(target)
+        win._calibration_feed_tick()
+        assert card._round == 0, "a single frame must not advance a round"
+
+        # the same pitch still there after the hold: the round counts
+        win._calibration_stable_since -= mw.MainWindow.CALIBRATION_HOLD_S + 0.05
+        win._remember_calibration_pitch(target)
         win._calibration_feed_tick()
         assert card._round == 1, "a held note must advance its round"
 
         # ...and one that ARRIVED long ago: the note is over, no round
-        win._calibration_hz = card._targets[-1]
-        win._calibration_at = time.monotonic() - (mw.MainWindow.CALIBRATION_FRESH_S + 1.0)
+        win._remember_calibration_pitch(target)
+        win._calibration_at -= mw.MainWindow.CALIBRATION_FRESH_S + 1.0
         win._calibration_feed_tick()
         assert card._round == 1, "a released note must not be graded"
         assert card.heard_line.text() == tr("ui calibrate silent"), (
             "a released note must not be reported as heard"
+        )
+    finally:
+        if win._calibration_thread is not None and win._calibration_thread.isRunning():
+            win._calibration_thread.stop()
+            win._calibration_thread.wait(3000)
+        if win.live_thread is not None and win.live_thread.isRunning():
+            win.live_thread.stop()
+            win.live_thread.wait(3000)
+
+
+def test_the_frame_between_two_tones_never_sets_a_round(qapp, monkeypatch, isolated_cal):
+    """The splice frame of a note change must never be graded.
+
+    `HeldMic` queues the next tone behind the one still sounding, so the
+    real chain meets back-to-back tones; a singer slides instead, and the
+    window at that passage blends both. On the real chain at 44.1 kHz the
+    abrupt switch reads -14.19 cents from the NEW target where the tone sits
+    at -22, and a CONTINUOUS change reads further out still — a 150 ms
+    crossfade produced -36.42 (a 200 ms glide -34.84), the value injected
+    here because it is the worst a real passage produces. Grading it once
+    moves a five-round mean to -24.9. The hold clock restarts on the jump,
+    so the seam cannot count.
+    """
+    from v2m.gui import main_window as mw
+
+    win = mw.MainWindow()
+    try:
+        win.show()
+        win.stack.setCurrentWidget(win.page_home)
+        win.page_home.btn_calibrate.click()
+        card = win.page_home.calibration_card
+        target = card._targets[-1]
+        assert card._round == 0
+
+        old_note = target * 2 ** (-122.0 / 1200.0)  # the previous round's tone
+        splice = target * 2 ** (-36.42 / 1200.0)  # measured crossfade frame
+        held = target * 2 ** (-22.0 / 1200.0)  # the note the singer holds
+
+        win._remember_calibration_pitch(old_note)
+        win._calibration_stable_since -= 1.0  # the old note had long held
+        win._remember_calibration_pitch(splice)  # the change: ONE frame
+        win._calibration_feed_tick()
+        assert card._round == 0, "a seam frame must not charge the round"
+
+        win._remember_calibration_pitch(held)  # the new tone, still sounding
+        win._calibration_feed_tick()
+        assert card._round == 0, "the seam restarted the hold clock"
+
+        win._calibration_stable_since -= mw.MainWindow.CALIBRATION_HOLD_S + 0.02
+        win._calibration_feed_tick()
+        assert card._round == 1, "the held tone must advance the round"
+        assert card._heard[-1] == pytest.approx(held, rel=1e-6), (
+            "the round must carry the tone, not the seam's blend"
         )
     finally:
         if win._calibration_thread is not None and win._calibration_thread.isRunning():

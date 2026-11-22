@@ -8,7 +8,8 @@ against the previous session, per-take WAV/JSON verification via
 `verify_take`); this script is only the COMMAND-LINE ADAPTER — the same
 numbers as the GUI page, without launching the application. Labels go
 through the fr/en i18n tables (`v2m --lang` / ~/.v2m_lang) like every
-visible string.
+visible string — labels AND numbers (`i18n.format_number`), so a French
+run reads "1,25" wherever an English one reads "1.25".
 
 Usage:
     python -X utf8 scripts/coherence_summary.py
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 
 from v2m.core.coherence import LIVE_TAKES_DIR, build_snapshot, render
-from v2m.core.i18n import get_language, set_language, tr
+from v2m.core.i18n import get_language, tr
 
 
 def main(argv: list[str] | None = None) -> int:

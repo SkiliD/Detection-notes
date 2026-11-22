@@ -19,8 +19,9 @@ dist/
 .git/
 .gitignore
 
-# Freebuff (données locales de l'assistant)
-.freebuff/
+# Local dot-folders at the root (machine-local data, never shipped)
+.*/
+!.github/
 
 # Artefacts audio du projet
 demo.wav

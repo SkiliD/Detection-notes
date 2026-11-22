@@ -24,15 +24,19 @@ const ticks = (seconds) => Math.round((seconds * BPM * PPQ) / 60);
 
 /**
  * `notes` need {start, end, midi, strength?}. Returns a Uint8Array.
- * Note-offs sort before note-ons at the same tick so a repeated pitch never
- * swallows its own retrigger.
+ * Note-offs sort before note-ons at the same tick. A take's notes meet exactly
+ * at their boundary (the segmenter clamps each end to the next start), so a
+ * re-attack of one pitch shares a tick with the end of the note before it; an
+ * ON written first would land on the pitch that is still sounding, and the
+ * reader or player would close the NEW note instead of the old one — the tone
+ * disappears and only its fragment survives.
  */
 export function writeMidi(notes) {
   const events = [];
   for (const n of notes) {
     const velocity = Math.round(64 + 56 * Math.min(1, Math.max(0, n.strength ?? 0.6)));
-    events.push({ tick: ticks(n.start), order: 0, data: [0x90, n.midi & 0x7f, velocity] });
-    events.push({ tick: ticks(n.end), order: 1, data: [0x80, n.midi & 0x7f, 64] });
+    events.push({ tick: ticks(n.start), order: 1, data: [0x90, n.midi & 0x7f, velocity] });
+    events.push({ tick: ticks(n.end), order: 0, data: [0x80, n.midi & 0x7f, 64] });
   }
   events.sort((a, b) => a.tick - b.tick || a.order - b.order);
 

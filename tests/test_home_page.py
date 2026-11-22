@@ -20,7 +20,58 @@ import pytest
 from v2m.core import coherence as coh
 from v2m.core.i18n import set_language
 from v2m.gui import main_window, widgets
-from v2m.gui.home_page import ACTION_COLUMN_MAX
+from v2m.gui.home_page import (
+    ACTION_COLUMN_MAX,
+    QUIET_BUTTON_PADDING,
+    action_pair_fits,
+    quiet_footer_fits,
+)
+
+FIXED_ADVANCE = 200
+FIXED_THEME_WIDTH = 80
+
+
+@pytest.fixture
+def fixed_home_metrics(page, monkeypatch):
+    """Pin the measurements the Qt layout reads; the rules are tested directly."""
+    from PyQt6.QtCore import QSize
+
+    from v2m.gui import home_page
+
+    class FixedMetrics:
+        def __init__(self, _font):
+            pass
+
+        def horizontalAdvance(self, _text):
+            return FIXED_ADVANCE
+
+    monkeypatch.setattr(home_page, "QFontMetrics", FixedMetrics)
+    monkeypatch.setattr(
+        page.theme_selector,
+        "sizeHint",
+        lambda: QSize(FIXED_THEME_WIDTH, 32),
+    )
+
+
+def _settle_page(page) -> None:
+    """Run the footer's own reflow until the measured layout is stable."""
+    from PyQt6.QtWidgets import QApplication
+
+    for _ in range(4):
+        page._arrange_footer()
+        page.scroll.widget().layout().activate()
+        page.scroll.widget().adjustSize()
+        page.scroll.updateGeometry()
+        QApplication.processEvents()
+
+
+def _apply_action_pair(page, paired: bool) -> None:
+    """Apply one branch of the pair layout, independent of font metrics."""
+    from PyQt6.QtWidgets import QApplication
+
+    page._set_action_pair(paired)
+    page._measure.layout().activate()
+    QApplication.processEvents()
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +148,8 @@ def test_the_home_names_driver_effects_for_the_next_capture(page, driver_note):
 def test_singing_is_the_first_primary_action(page):
     from v2m.gui.widgets import action_button_style
 
+    _settle_page(page)
+    _apply_action_pair(page, paired=True)
     # the primary action and the pair live in different hosts: compare page
     # coordinates, never each button's local y
     live_top = page.btn_live.mapTo(page, page.btn_live.rect().topLeft()).y()
@@ -185,6 +238,8 @@ def test_the_home_is_a_masthead_with_one_left_edge(page):
 
 def test_the_primary_action_spans_the_measure_and_the_pair_splits_it(page):
     """One measure: the primary plate spans it, the pair halves it."""
+    _settle_page(page)
+    _apply_action_pair(page, paired=True)
     width = page._measure.width()
     assert 0 < width <= ACTION_COLUMN_MAX, f"measure {width} escapes the column"
     assert page.btn_live.width() == width
@@ -198,34 +253,51 @@ def test_the_primary_action_spans_the_measure_and_the_pair_splits_it(page):
     assert abs(left - (page.width() - right)) <= 2
 
 
-@pytest.mark.parametrize("language", ["fr", "en"])
-def test_the_secondary_pair_stacks_when_its_labels_do_not_fit(page, language):
-    """A narrow window drops the pair to a column instead of overflowing."""
-    from PyQt6.QtWidgets import QApplication
+def test_the_secondary_pair_fits_exactly_at_its_measured_width():
+    """One pixel less than the two labels and the gap turns the pair into a column."""
+    widths = [100, 120]
+    assert action_pair_fits(232, widths, 12)
+    assert not action_pair_fits(231, widths, 12)
 
-    set_language(language)
-    page.retranslate()
-    page.resize(320, 700)
-    for _ in range(4):
-        page._arrange_footer()
-        page.scroll.widget().layout().activate()
-        page.scroll.widget().adjustSize()
-        QApplication.processEvents()
+
+def test_the_quiet_footer_fits_exactly_at_its_measured_width():
+    """One pixel less than the buttons, selector and gaps stacks the footer."""
+    widths = [100, 120, 90]
+    assert quiet_footer_fits(436, widths, 90, 12)
+    assert not quiet_footer_fits(435, widths, 90, 12)
+
+
+def test_the_secondary_pair_applies_column_and_row_layouts(page):
+    """The chosen branch becomes a column, then one shared line."""
+    _apply_action_pair(page, paired=False)
     assert not page._actions_paired
     assert page.btn_file.mapTo(page, page.btn_file.rect().topLeft()).y() < (
         page.btn_finder.mapTo(page, page.btn_finder.rect().topLeft()).y()
     )
     assert page.btn_file.width() == page._measure.width()
     assert page.btn_finder.width() == page._measure.width()
-    set_language("fr")
-    page.retranslate()
+
+    _apply_action_pair(page, paired=True)
+    assert page._actions_paired
+    assert page.btn_file.y() == page.btn_finder.y()
 
 
-def test_the_quiet_controls_share_one_footer_row(page):
+def test_the_quiet_controls_share_one_footer_row(page, fixed_home_metrics):
     """Language and follow-ups form one row, on the headline's left edge."""
+    _settle_page(page)
     buttons = (page.btn_lang, page.btn_coherence, page.btn_calibrate)
+    widths = [FIXED_ADVANCE + QUIET_BUTTON_PADDING] * len(buttons)
+    available = page.width() - 18 - page.scroll.verticalScrollBar().sizeHint().width()
+    assert quiet_footer_fits(
+        available,
+        widths,
+        FIXED_THEME_WIDTH,
+        page._footer.spacing(),
+    )
     assert {button.styleSheet() for button in buttons} == {widgets.quiet_button_style()}
     assert len({button.y() for button in buttons}) == 1
+    assert [button.minimumWidth() for button in buttons] == widths
+    assert [button.maximumWidth() for button in buttons] == widths
     assert all(button.height() < page.btn_file.height() for button in buttons)
     left = buttons[0].mapTo(page, buttons[0].rect().topLeft()).x()
     measure_left = page._measure.mapTo(page, page._measure.rect().topLeft()).x()
@@ -238,25 +310,40 @@ def test_the_footer_row_sits_below_the_action_column(page):
     footer_top = page.btn_lang.mapTo(page, page.btn_lang.rect().topLeft()).y()
     assert footer_top >= bottom - 2
 
+
 @pytest.mark.parametrize("language", ["fr", "en"])
 @pytest.mark.parametrize("width", [320, 360, 400, 480, 640, 800, 1024])
-def test_home_controls_fit_on_narrow_and_laptop_windows(page, language, width):
+def test_home_controls_fit_on_narrow_and_laptop_windows(
+    page, language, width, fixed_home_metrics
+):
     """Translated controls fit without overflow and keep the footer compact."""
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QBoxLayout
 
     set_language(language)
     page.retranslate()
     page.resize(width, 700)
-    for _ in range(4):
-        page._arrange_footer()
-        page.scroll.widget().layout().activate()
-        page.scroll.widget().adjustSize()
-        page.scroll.updateGeometry()
-        QApplication.processEvents()
+    _settle_page(page)
     assert page.scroll.horizontalScrollBar().maximum() == 0
     # one row while the labels fit; the strip spans the measure either way
     available = page.width() - 18 - page.scroll.verticalScrollBar().sizeHint().width()
     assert page._footer_row.width() == min(ACTION_COLUMN_MAX, available)
+    quiet_widths = [FIXED_ADVANCE + QUIET_BUTTON_PADDING] * 3
+    expected_direction = (
+        QBoxLayout.Direction.LeftToRight
+        if quiet_footer_fits(
+            available,
+            quiet_widths,
+            FIXED_THEME_WIDTH,
+            page._footer.spacing(),
+        )
+        else QBoxLayout.Direction.TopToBottom
+    )
+    assert page._footer.direction() == expected_direction, (
+        language,
+        width,
+        available,
+        quiet_widths,
+    )
     footer_left = page._footer_row.mapTo(page, page._footer_row.rect().topLeft()).x()
     measure_left = page._measure.mapTo(page, page._measure.rect().topLeft()).x()
     assert abs(footer_left - measure_left) <= 2

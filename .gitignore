@@ -34,8 +34,24 @@ htmlcov/
 .nox/
 coverage.xml
 
-# --- Freebuff (assistant local data) ---
-.freebuff/
+# --- Machine-local dot-folders at the root ---
+# The project's own dot-folder (.github/) is whitelisted just below; any other
+# dot-file or dot-folder at the root is local data, never a source to version.
+/.*
+!/.github/
+!/.gitignore
+!/.gitattributes
+
+# --- Vendored third-party folder ---
+# ONE third-party folder is vendored on purpose, so every clone reviews the
+# same instructions: it travels with its MIT license, and `vendor-lock.json`
+# pins the upstream commit it was copied from (see AGENTS.md). Everything
+# else under vendor/ stays machine-local; the project's own rules live in
+# AGENTS.md.
+/vendor/*
+!/vendor/make-interfaces-feel-better/
+!/vendor/make-interfaces-feel-better/**
+!/vendor/make-interfaces-feel-better-LICENSE
 
 # --- Generated audio artifacts (analysis, demo, tests) ---
 # Live take folders include immutable automatic/corrected reading archives.
@@ -68,12 +84,17 @@ prises_live/
 # it is a fingerprint, not an analysis output — it must be tracked.
 !tests/data/*.wav
 !tests/reference/*.json
-# the web page's own sources: its two-language labels and the conformance
-# cases the JavaScript port replays (web/, see AGENTS.md)
+# the vendored folder's lockfile (see AGENTS.md): an upstream pin, not an
+# analysis output — and it must come AFTER the `*.json` rule to win
+!/vendor-lock.json
+# the web page's own sources: its two-language labels and the frozen answers
+# the JavaScript port replays (web/, see AGENTS.md) — the segmentation cases,
+# the two YIN readings, and the intonation summary the visible line prints
 !/web/strings.json
 !/web/test/cases.json
 !/web/test/yin.json
 !/web/test/yin-rates.json
+!/web/test/intonation.json
 # NB: demo.wav stays ignored (make_demo.py regenerates it), so yin.json and
 # yin-rates.json are the committed half of those comparisons and must NEVER be
 # ignored.
@@ -111,21 +132,32 @@ docker-compose.override.yml
 /shot_*.png
 # the Pages workflow's 1600 px screenshot (web/test/wide-shot.mjs)
 /wide-*.png
-/_*.txt
+# the home page's before/after captures: evidence for a UI review, not sources
+/page-prise-*.png
+# Root docs: only the NAMED files are sources. AGENTS.md (project rules),
+# CONTEXT.md (domain glossary), SKILLS.md (procedures), the two READMEs and
+# constraints.txt travel with a clone; any other root .md/.txt — audit,
+# diagnostic or proposal reports, the throwaway notes about the problems
+# being worked on — stays local, and their conclusions live in AGENTS.md,
+# CONTEXT.md and the ADRs.
+/*.md
+/*.txt
+!/AGENTS.md
+!/CONTEXT.md
+!/SKILLS.md
+!/README.md
+!/README.fr.md
+!/constraints.txt
 /_dbg.log
 /out_dir
 adr/
-docs/*
-docs/adr/
-!/docs/
+# Design notes that travel with the code: the docs under docs/project/ and
+# the hardware recipe are part of the project. The ADRs, dated reports, captures,
+# docs/engine-drift.md and docs/superpowers/ stay local and are ignored.
 /docs/*
-!/docs/agents/
-/docs/agents/*
-!/docs/agents/issue-tracker.md
-!/docs/agents/domain.md
-!/docs/superpowers/
-!/docs/superpowers/specs/
-!/docs/superpowers/specs/2026-10-25-analysis-workflow-design.md
+!/docs/project/
+!/docs/project/**
+!/docs/recette-materielle-navigateurs.md
 /out*
 # prises_verite: the TAKES and truths stay personal (wav/json), but the
 # README committing the format and the non-drift fingerprints are tracked
@@ -133,3 +165,5 @@ docs/adr/
 !/prises_verite/README.md
 !/prises_verite/*.fingerprint.json
 .superpowers
+# the web matrix job borrows Playwright at test time; the page stays dependency-free
+/node_modules/

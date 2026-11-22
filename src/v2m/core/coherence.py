@@ -680,10 +680,15 @@ def render(
     rows: list[dict] | None = None,
     days: list[dict] | None = None,
 ) -> str:
-    """The full report, in the current language: sessions, days, takes."""
+    """The full report, in the current language: sessions, days, takes.
+
+    The NUMBERS follow the same choice as the labels (`i18n.format_number`):
+    the command-line adapter prints this text as-is and is bilingual too, so a
+    French run must not read a localized column beside a dotted one.
+    """
     import io
 
-    from .i18n import tr
+    from .i18n import format_number, tr
 
     out = io.StringIO()
     if not takes:
@@ -713,21 +718,33 @@ def render(
     }
     for r in rows:
         checked = f"{r['checked']}" if r["checked"] is not None else "-"
-        rate = f"{r['rate_per_100']:.2f}" if r["rate_per_100"] is not None else "-"
-        delta = f"{r['delta_vs_prev']:+.2f}" if r["delta_vs_prev"] is not None else "-"
-        contours = f"{r['contour_rate'] * 100:.0f}%" if r["contour_rate"] is not None else "-"
+        rate = (
+            format_number(r["rate_per_100"], 2) if r["rate_per_100"] is not None else "-"
+        )
+        delta = (
+            format_number(r["delta_vs_prev"], 2, sign=True)
+            if r["delta_vs_prev"] is not None
+            else "-"
+        )
+        contours = (
+            f"{format_number(round(r['contour_rate'] * 100), 0)}%"
+            if r["contour_rate"] is not None
+            else "-"
+        )
         bad = f"{r['verify_bad']}" if r["verify_bad"] else "ok"
         out.write(
             f"{r['label']:<16}{r['takes']:>7}{checked:>12}{r['suspects']:>10}"
             f"{rate:>8}{delta:>8}{contours:>9}  {trend_by_label.get(r['label'], ''):<10}"
-            f"{r['plateau_mean_s']:>13.2f}"
-            f"{r['plateau_max_s']:>13.2f}{bad:>8}\n"
+            f"{format_number(r['plateau_mean_s'], 2):>13}"
+            f"{format_number(r['plateau_max_s'], 2):>13}{bad:>8}\n"
         )
     out.write("-" * 96 + "\n")
     out.write(tr("coh days title") + "\n")
     for d in days:
         checked = f"{d['checked']}" if d["checked"] is not None else "-"
-        rate = f"{d['rate_per_100']:.2f}" if d["rate_per_100"] is not None else "-"
+        rate = (
+            format_number(d["rate_per_100"], 2) if d["rate_per_100"] is not None else "-"
+        )
         out.write(
             tr("coh day row").format(
                 date=d["date"],
@@ -742,7 +759,7 @@ def render(
     out.write(tr("coh takes title") + "\n")
     for t in takes:
         checked = f"{t.checked}" if t.checked is not None else "-"
-        rate = f"{t.rate_per_100:.2f}" if t.rate_per_100 is not None else "-"
+        rate = format_number(t.rate_per_100, 2) if t.rate_per_100 is not None else "-"
         if t.verify_ok is False:
             out.write(
                 tr("coh take divergent").format(stem=t.stem, checked=checked, rate=rate) + "\n"
@@ -761,18 +778,20 @@ def render(
         )
         for s in t.suspects:
             at = (
-                tr("coh plateau at").format(t=s["secondary_plateau_start_s"])
+                tr("coh plateau at").format(
+                    t=format_number(s["secondary_plateau_start_s"], 2)
+                )
                 if s.get("secondary_plateau_start_s") is not None
                 else ""
             )
             out.write(
                 tr("coh suspect row").format(
                     midi=s["midi"],
-                    span=s["inner_range_st"],
-                    dur=s["secondary_plateau_s"],
+                    span=format_number(s["inner_range_st"], 2),
+                    dur=format_number(s["secondary_plateau_s"], 2),
                     at=at,
                     offset=(
-                        f"{s['secondary_plateau_offset_st']:+.2f}st"
+                        f"{format_number(s['secondary_plateau_offset_st'], 2, sign=True)}st"
                         if s.get("secondary_plateau_offset_st") is not None
                         else "?"
                     ),
@@ -816,7 +835,7 @@ def session_table_text(
     """Render the session table, optionally using a prebuilt evidence snapshot."""
     import io
 
-    from .i18n import tr
+    from .i18n import format_number, tr
 
     out = io.StringIO()
     rows = rows if rows is not None else session_rows(takes)
@@ -827,9 +846,19 @@ def session_table_text(
     )
     for i, r in enumerate(rows):
         checked = f"{r['checked']}" if r["checked"] is not None else "-"
-        rate = f"{r['rate_per_100']:.2f}" if r["rate_per_100"] is not None else "-"
-        delta = f"{r['delta_vs_prev']:+.2f}" if r["delta_vs_prev"] is not None else "-"
-        contours = f"{r['contour_rate'] * 100:.0f}%" if r["contour_rate"] is not None else "-"
+        rate = (
+            format_number(r["rate_per_100"], 2) if r["rate_per_100"] is not None else "-"
+        )
+        delta = (
+            format_number(r["delta_vs_prev"], 2, sign=True)
+            if r["delta_vs_prev"] is not None
+            else "-"
+        )
+        contours = (
+            f"{format_number(round(r['contour_rate'] * 100), 0)}%"
+            if r["contour_rate"] is not None
+            else "-"
+        )
         trend = sparkline(
             [x["rate_per_100"] for x in rows[: i + 1] if x["rate_per_100"] is not None],
             width=12,
@@ -853,7 +882,7 @@ def session_table_text(
                 tr("coh week row").format(
                     week=w["week"],
                     takes=w["takes"],
-                    rate=f"{w['contour_rate'] * 100:.0f}%",
+                    rate=f"{format_number(round(w['contour_rate'] * 100), 0)}%",
                     live=w["live_notes"] if w["live_notes"] is not None else "-",
                     final=w["final_notes"] if w["final_notes"] is not None else "-",
                 )

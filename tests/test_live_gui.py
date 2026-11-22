@@ -19,6 +19,7 @@ import pytest
 
 from v2m.core import audio_io
 from v2m.core import take_export as te
+from v2m.core.i18n import format_number
 
 MELODY_HZ = [220.0, 261.63, 293.66, 329.63]  # A3 C4 D4 E4
 TONE_S = 0.35
@@ -161,8 +162,8 @@ def test_live_take_reaches_results_and_export(qapp, monkeypatch):
         summary = win.page_results.label_summary.text()
         assert summary == tr("ui summary facts").format(
             notes=len(result.notes),
-            duration=result.duration_s,
-            tempo=f"{result.tempo.bpm:.0f} BPM",
+            duration=format_number(result.duration_s, 1),
+            tempo=f"{format_number(result.tempo.bpm, 0)} BPM",
             key=tr_key_label(result.key.best.label) if result.key is not None else "—",
         )
         assert win.page_results.summary_card.title() == tr("ui take summary")
@@ -822,10 +823,14 @@ def test_the_toolbar_readout_reports_the_selected_notes(qapp):
 
         win.page_results.results._notes_table.selectRow(1)
         assert not label.isHidden()
-        assert label.text() == tr("ui selection label").format(n=1, t0=0.8, t1=1.0)
+        assert label.text() == tr("ui selection label").format(
+            n=1, t0=format_number(0.8, 1), t1=format_number(1.0, 1)
+        )
 
         win.page_results.results._notes_table.selectAll()
-        assert label.text() == tr("ui selection label").format(n=2, t0=0.2, t1=1.0)
+        assert label.text() == tr("ui selection label").format(
+            n=2, t0=format_number(0.2, 1), t1=format_number(1.0, 1)
+        )
 
         win.page_results.results._notes_table.clearSelection()
         assert label.isHidden()
@@ -833,7 +838,9 @@ def test_the_toolbar_readout_reports_the_selected_notes(qapp):
         win.page_results.results._notes_table.selectRow(0)
         before = label.text()
         win.on_toggle_language()
-        assert label.text() == tr("ui selection label").format(n=1, t0=0.2, t1=0.7)
+        assert label.text() == tr("ui selection label").format(
+            n=1, t0=format_number(0.2, 1), t1=format_number(0.7, 1)
+        )
         assert label.text() != before  # the other language's wording
         win.on_toggle_language()  # leave the shared language as it was
         assert label.text() == before
@@ -985,7 +992,7 @@ def test_results_page_final_render_sets_name_progress_and_signal(qapp, monkeypat
         assert page.label_file.text() == "song.wav"
         assert page.summary_card.title() == tr("ui take summary")
         assert page.label_summary.text() == tr("ui summary facts").format(
-            notes=0, duration=1.0, tempo="—", key="—"
+            notes=0, duration=format_number(1.0, 1), tempo="—", key="—"
         )
         assert page.details_toggle.text() == tr("ui show details")
         assert page.details_scroll.isHidden()

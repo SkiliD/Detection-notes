@@ -12,7 +12,9 @@
 // The deviation each note contributes is the cents the TABLE prints
 // (`cents.centsOf`), not the raw float: the line describes the column the
 // singer is reading, so a note painted "in tune" cannot be missing from the
-// in-tune count one line below it.
+// in-tune count one line below it. A note with NO reading (`dev` null, absent
+// or not finite) is skipped rather than counted as 0: no measurement is not
+// evidence of being in tune, and the desktop's `summarize` skips it too.
 
 import { IN_TUNE_CENTS, MIN_CENTS, MIN_NOTES } from "./constants.js";
 import { centsOf } from "./cents.js";

@@ -283,7 +283,10 @@ def export_result(
         with_pitch_curve=with_pitch_curve,
         live_notes=live_notes,
     )
-    with open(str(stem) + ".json", "w", encoding="utf-8") as f:
+    # LF on every platform: the frozen reference hashes are the artifact
+    # BYTES, and Windows' text mode writes CRLF into the same report — one
+    # reference could then only ever match the OS it was frozen on.
+    with open(str(stem) + ".json", "w", newline="\n", encoding="utf-8") as f:
         json.dump(rep, f, indent=2, ensure_ascii=False)
     with open(str(stem) + ".csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

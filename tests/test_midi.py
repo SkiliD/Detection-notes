@@ -81,6 +81,31 @@ def test_repeated_key_releases_before_restrike_at_the_same_tick(tmp_path, quanti
     assert events == ["note_off", "note_on"]
 
 
+def test_a_restrike_inside_one_tick_still_releases_first(tmp_path):
+    """Two times inside ONE tick are one tick in the file: OFF must still lead.
+
+    The analysis clamps a note's end to the next start, so a re-attack shares
+    its time exactly (pinned above). An edit can leave a sub-tick overlap
+    instead — a note moved onto the one before it — and the two events then
+    round to the same tick, where writing them in time order puts the ON
+    first and closes the new note at once. The order is decided on the TICK.
+    """
+    notes = [
+        Note(start=0.0, end=0.5004, midi=60, confidence=0.9),
+        Note(start=0.5000, end=1.0, midi=60, confidence=0.9),
+    ]
+    mid = build_midi(notes, GRID, key=None)
+    path = tmp_path / "sub-tick.mid"
+    mid.save(path)
+    tick = 0
+    events = []
+    for event in mido.MidiFile(path).tracks[1]:
+        tick += event.time
+        if tick == 480 and event.type in ("note_on", "note_off"):
+            events.append(event.type)
+    assert events == ["note_off", "note_on"]
+
+
 @pytest.mark.parametrize(
     "mode,tonic,shift,expected",
     [

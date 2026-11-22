@@ -18,7 +18,6 @@ labels, sessions, rates, verify) are pinned in
 """
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -138,6 +137,56 @@ def test_empty_and_missing_folders_do_not_raise(tmp_path, capsys):
     assert "Aucun" in coh.render([]) or "rien" in coh.render([])
     assert coherence_summary.main([str(tmp_path)]) == 0
     assert coherence_summary.main([str(tmp_path / "n_existe_pas")]) == 2
+
+
+def test_the_summary_writes_its_numbers_in_the_current_language():
+    """A French run reads "1,25", an English one "1.25" — one row, one language.
+
+    The adapter is bilingual (`main` follows ~/.v2m_lang and every label comes
+    from the fr/en tables), so the numbers go through `i18n.format_number` too:
+    a localized column must never sit beside a hand-dotted one.
+    """
+    from v2m.core import coherence as coh
+    from v2m.core.i18n import get_language, set_language
+
+    take = coh.TakeAudit(
+        stem="live_20260926_120000",
+        date="2026-09-26",
+        clock="12:00",
+        epoch_s=0.0,
+        suspects=[],
+        checked=80,
+    )
+    rows = [
+        {
+            "label": "2026-09-26 12:00",
+            "takes": 1,
+            "checked": 80,
+            "suspects": 0,
+            "rate_per_100": 1.25,
+            "delta_vs_prev": 0.5,
+            "contour_rate": 0.9425,
+            "verify_bad": 0,
+            "plateau_mean_s": 3.5,
+            "plateau_max_s": 4.5,
+        }
+    ]
+    original = get_language()
+    try:
+        set_language("fr")
+        french = coh.render([take], rows=rows, days=[])
+        set_language("en")
+        english = coh.render([take], rows=rows, days=[])
+    finally:
+        set_language(original)
+
+    # rate, delta and both plateau columns: one separator per run
+    assert "1,25" in french and "+0,50" in french and "3,50" in french
+    assert "1.25" in english and "+0.50" in english and "3.50" in english
+    assert "1.25" not in french, "a French row mixed a dot into a comma table"
+    assert "1,25" not in english
+    # a whole-point share has no separator to translate
+    assert "94%" in french and "94%" in english
 
 
 def test_first_run_guides_instead_of_confusing(capsys):

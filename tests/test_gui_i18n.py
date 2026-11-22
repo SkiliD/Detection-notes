@@ -241,7 +241,7 @@ def test_results_panel_shows_the_tuning_offset_with_advice(qapp):
         set_language("fr")
         panel.set_results(res)
         txt = panel._values["key tuning offset"].text()
-        assert "-14.0 c" in txt and "bas" in txt, txt
+        assert "-14,0 c" in txt and "bas" in txt, txt
         # in tune: no injunction, just the encouragement
         panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": 5.0}))
         assert "juste" in panel._values["key tuning offset"].text()
@@ -253,7 +253,7 @@ def test_results_panel_shows_the_tuning_offset_with_advice(qapp):
         # a take without an offset measure reads 0.0 (the absorbed offset
         # default) — the line stays informative, never empty
         panel.set_results(SimpleNamespace(**{**res.__dict__, "tuning_offset_cents": None}))
-        assert "+0.0 c" in panel._values["key tuning offset"].text()
+        assert "+0,0 c" in panel._values["key tuning offset"].text()
     finally:
         panel.deleteLater()
 

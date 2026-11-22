@@ -23,6 +23,14 @@ real samples instead of only on hand-built pitch sequences — and
 `web/test/yin-rates.json`, the same comparison at the two CAPTURE rates
 (44.1 and 48 kHz), where the frame geometry is not the analysis rate's.
 
+It also writes `tests/data/parity.wav` and its reading
+(`tests/reference/parity.json`): the ONE fixture where the page is compared
+to the desktop on AUDIO instead of on frames. `cases.json` hands pitch frames
+to the segmenter and `yin.json` hands samples to the estimator; neither says
+what the whole chain — YIN, gate, attacks, segmenter, flush — decides about a
+sung phrase, and that reading is what a reader of the page's `notes.json`
+trusts.
+
 Run `./.venv/Scripts/python.exe -m scripts.export_web_fixtures` after ANY
 change to liveseg.py, pitch.py or onsets.py; `tests/test_web_build.py` fails
 until the checked-in JSON matches this script again.
@@ -30,6 +38,7 @@ until the checked-in JSON matches this script again.
 
 from __future__ import annotations
 
+import io
 import json
 import math
 from pathlib import Path
@@ -38,7 +47,31 @@ REPO = Path(__file__).resolve().parent.parent
 DEST = REPO / "web" / "test" / "cases.json"
 YIN_DEST = REPO / "web" / "test" / "yin.json"
 YIN_RATES_DEST = REPO / "web" / "test" / "yin-rates.json"
+INTONATION_DEST = REPO / "web" / "test" / "intonation.json"
 CONSTANTS_DEST = REPO / "web" / "constants.js"
+# The parity pair. The WAV is COMMITTED (`tests/data/*.wav` is the one audio
+# exception in `.gitignore`) because a fixture a machine has to build is a
+# fixture CI cannot compare with — the web job builds no take at all.
+PARITY_WAV = REPO / "tests" / "data" / "parity.wav"
+# The reading lives with the other FROZEN reference (`.gitignore` keeps
+# `tests/reference/*.json` and `test_docs_guard.py` tracks no other JSON), not
+# beside the audio it describes: it is a fingerprint of the Python engine, not
+# an artifact of a run.
+PARITY_GOLDEN = REPO / "tests" / "reference" / "parity.json"
+PARITY_SR = 44_100
+# The page reads a file in fixed 2048-sample blocks (`FILE_BLOCK` in app.js):
+# the desktop twin must be fed the very same geometry, or the comparison would
+# measure two different FEEDS instead of two implementations.
+PARITY_BLOCK = 2048
+# The rates the page can read that file AT. `decodeAudioData` resamples to the
+# AudioContext's rate, which is the DEVICE's, so the browser feeds the chain
+# the same phrase at 44.1 kHz, 48 kHz, or 96 kHz on a desk whose file is
+# 44.1 — measured: 96 kHz here. That is not a drift of the port, and a golden
+# written at one rate would read a red test as one; each rate therefore gets
+# its own frozen reading, from the SAME linear interpolation `yin-rates.json`
+# uses (the browser's resampler is not reproducible on either side).
+# Measured, the desktop at the page's rate reproduces the page's notes exactly.
+PARITY_RATES = (22_050, 44_100, 48_000, 96_000)
 # Python module -> the attributes the page reads. Every name keeps its own
 # spelling on both sides: a renamed threshold must fail here, not silently
 # become a different number.
@@ -233,6 +266,113 @@ def render(cases: dict) -> dict:
         "frame_s": FRAME_S,
         "cases": out,
     }
+
+
+# The trap cases the page's visible summary line must decide like the desktop,
+# as (midi, cents) per note. The four traps the line can get wrong are all
+# here — fewer than MIN_NOTES notes (nothing is systematic), a mean under
+# MIN_CENTS (intonation, not a habit), identically-pitched notes (no extent to
+# divide into registers) and an ODD count (the extra note belongs to the end
+# half) — plus the two inclusive bars and an empty take.
+#
+# Every deviation is a WHOLE number of cents on purpose. The page summarises
+# the cents its table PRINTS (`centsOf`, a rounded integer) while
+# `core.intonation.summarize` reads the raw float, and that difference is
+# deliberate: a note painted "in tune" must not be missing from the in-tune
+# count one line below it. A fixture built on fractional cents would compare
+# those two POLICIES; whole cents make both sides read the same numbers, so
+# every disagreement left is the port's own logic — thresholds, bands, halves
+# and shares.
+INTONATION_CASES: dict[str, tuple[tuple[int, int | None], ...]] = {
+    "fewer_than_four_notes_never_leans": ((60, 30), (62, 30), (64, 30)),
+    "a_mean_under_twelve_cents_is_not_a_habit": (
+        (60, 7),
+        (60, 7),
+        (60, 7),
+        (60, 7),
+        (61, 7),
+        (62, 7),
+    ),
+    "identical_pitches_divide_no_register": (
+        (67, 20),
+        (67, 20),
+        (67, 20),
+        (67, 20),
+        (67, -20),
+        (67, -20),
+        (67, -20),
+        (67, -20),
+    ),
+    "an_odd_count_gives_its_extra_note_to_the_end": (
+        (60, 20),
+        (61, 20),
+        (62, 20),
+        (63, 20),
+        (64, -20),
+        (65, -20),
+        (66, -20),
+        (67, -20),
+        (68, -20),
+    ),
+    "the_three_registers_split_the_extent": (
+        (60, -20),
+        (60, -20),
+        (60, -20),
+        (60, -20),
+        (66, 0),
+        (66, 0),
+        (66, 0),
+        (66, 0),
+        (72, 20),
+        (72, 20),
+        (72, 20),
+        (72, 20),
+    ),
+    "exactly_twelve_cents_is_a_habit": ((60, 12), (62, 12), (64, 12), (65, 12)),
+    "exactly_ten_cents_is_in_tune": ((60, 10), (62, 10), (64, 10), (65, 10)),
+    "no_notes_says_nothing": (),
+    # A note with NO measurement is not evidence of being in tune: the page
+    # skips it (`centsOf` answers null), so the desktop has to count the same
+    # notes or the visible line describes a different take.
+    "a_note_without_a_measurement_is_not_in_tune": ((60, 20), (62, None), (64, 20), (65, 20)),
+}
+
+
+def intonation_reference() -> dict:
+    """What `core.intonation.summarize` decides on each trap, frozen.
+
+    `web/intonation.js` is the one port with no conformity proof of its own: it
+    is pure logic over notes the segmenter already produced, so nothing moved
+    when the segmenter or the YIN was compared. The line it writes is VISIBLE
+    ("N of M notes in tune"), and its rules are thresholds — exactly the kind
+    of port that drifts to a different sentence while every other check stays
+    green.
+    """
+    from types import SimpleNamespace
+
+    from v2m.core.intonation import summarize
+
+    cases = []
+    for name, notes in INTONATION_CASES.items():
+        summary = summarize(
+            [
+                SimpleNamespace(midi=midi)
+                if cents is None
+                else SimpleNamespace(midi=midi, deviation=cents / 100)
+                for midi, cents in notes
+            ]
+        )
+        cases.append(
+            {
+                "name": name,
+                "notes": [
+                    {"midi": midi, "dev": None if cents is None else cents / 100}
+                    for midi, cents in notes
+                ],
+                "summary": summary,
+            }
+        )
+    return {"generated_by": "scripts/export_web_fixtures.py", "cases": cases}
 
 
 def piano_reference() -> dict:
@@ -520,7 +660,7 @@ def yin_rates_reference(take: Path = DEMO_TAKE) -> dict | None:
             }
         )
     return {
-        "generated_by": "scripts.export_web_fixtures",
+        "generated_by": "scripts/export_web_fixtures.py",
         "source": {
             "name": take.name,
             "sha256": hashlib.sha256(take.read_bytes()).hexdigest(),
@@ -533,21 +673,190 @@ def yin_rates_reference(take: Path = DEMO_TAKE) -> dict | None:
     }
 
 
+def parity_audio():
+    """A 2.9 s voice-like phrase the whole live chain must read the same way.
+
+    Synthetic on purpose. A short excerpt of a real take would be the stronger
+    fixture, but the takes this repository holds are PERSONAL (`*.wav` stays
+    ignored, `prises_verite/` too): committing one would publish a voice the
+    singer never offered. So the phrase is built here, deterministically, and
+    it carries exactly the facts the two engines have to agree on:
+
+    - a HELD note with vibrato (a note, not a wobble),
+    - a LEGATO GLIDE into the next one (followed, never a note of its own),
+    - a consonant BURST on the SAME pitch (a re-articulation: two notes),
+    - a below-gate breath (silence for the level meter AND the pitch),
+    - two more pitch changes after it.
+    """
+    import numpy as np
+
+    def voice(f0_from, f0_to, seconds, *, amp=0.4, attack=0.02, release=0.05):
+        n = int(round(seconds * PARITY_SR))
+        t = np.arange(n) / PARITY_SR
+        glide = f0_from * (f0_to / f0_from) ** (t / seconds)
+        vibrato = 0.2 * np.sin(2 * np.pi * 5.0 * t)  # ±20 cents, as make_demo
+        phase = 2 * np.pi * np.cumsum(glide * 2.0 ** (vibrato / 12.0)) / PARITY_SR
+        y = np.zeros(n)
+        for k, a in enumerate((1.0, 0.5, 0.25, 0.12, 0.06), start=1):
+            y += a * np.sin(k * phase)
+        env = np.ones(n)
+        head, tail = int(attack * PARITY_SR), int(release * PARITY_SR)
+        env[:head] = np.linspace(0.0, 1.0, head)
+        env[-tail:] = np.linspace(1.0, 0.0, tail)
+        return (amp * y * env).astype(np.float32)
+
+    def consonant(seconds=0.04, amp=0.5):
+        """A bright burst on ONE pitch: the consonant of a re-attacked note.
+
+        Differenced noise is the bright part (the vowel above is the harmonic
+        stack); the rising/falling window keeps it inside its own four hundred
+        samples, so the pitch frames it covers come back unvoiced — the break
+        a same-pitch re-articulation is split on.
+        """
+        n = int(round(seconds * PARITY_SR))
+        noise = np.random.default_rng(7).standard_normal(n + 1).astype(np.float32)
+        burst = np.diff(noise) * amp
+        return (burst * np.hanning(len(burst))).astype(np.float32)
+
+    def breath(seconds=0.15, rms=0.004):
+        """Air UNDER the gate: silence for the level meter and the pitch.
+
+        A gap has to be silent for both engines the same way; noise loud
+        enough to pass the gate would let one engine's YIN read a plateau in
+        it and the other none, and the disagreement would be the fixture's,
+        not either side's.
+        """
+        n = int(round(seconds * PARITY_SR))
+        noise = np.random.default_rng(11).standard_normal(n).astype(np.float32)
+        level = float(np.sqrt((noise.astype("float64") ** 2).mean())) or 1.0
+        return (noise / level * rms).astype(np.float32)
+
+    c4, d4, e4, g4 = 261.63, 293.66, 329.63, 392.0
+    return np.concatenate(
+        [
+            voice(c4, c4, 0.60),  # a held C4
+            voice(c4, e4, 0.22),  # a glide up: no note of its own
+            voice(e4, e4, 0.46),  # the E4 it lands on
+            consonant(),  # the consonant of the re-attack
+            voice(e4, e4, 0.48, attack=0.005, release=0.04),  # the SAME E4, again
+            breath(),  # a breath: silence, not a note
+            voice(d4, d4, 0.50),  # D4
+            voice(g4, g4, 0.50),  # G4
+        ]
+    )
+
+
+def parity_wav_bytes() -> bytes:
+    """The committed fixture, as 16-bit mono PCM at the analysis rate."""
+    import soundfile as sf
+
+    buffer = io.BytesIO()
+    sf.write(buffer, parity_audio(), PARITY_SR, format="WAV", subtype="PCM_16")
+    return buffer.getvalue()
+
+
+def parity_reference() -> dict:
+    """The desktop's LIVE reading of the fixture, block for block, per rate.
+
+    The page has no offline pipeline: a chosen file goes through
+    `LivePitchStream` in 2048-sample blocks, exactly like a capture. The twin
+    is therefore the desktop's SAME class — not `analyze_file`, whose pYIN and
+    look-ahead rules are a second, desktop-only reader the page never claims
+    to be.
+
+    One reading per `PARITY_RATES` entry, because the chain is fed the phrase
+    at the rate the BROWSER decoded it to, and the note boundaries of a glide
+    are a function of that rate (measured on this fixture: the C4 hands over
+    to the glide at 0.580 s at 44.1 kHz and 0.650 s at 96 kHz, both engines
+    agreeing at each). A single-rate golden would fail on a desk and pass on
+    CI while saying nothing about either implementation.
+    """
+    import hashlib
+
+    from v2m.core.audio_io import GATE_RMS
+    from v2m.core.liveseg import LivePitchStream
+
+    signal = parity_audio()
+    rates = []
+    for sr in PARITY_RATES:
+        samples = (
+            signal
+            if sr == PARITY_SR
+            else _upsample_linear(signal, PARITY_SR, sr).astype("float32")
+        )
+        stream = LivePitchStream(sr, gate_rms=GATE_RMS)
+        last_t = 0.0
+        for offset in range(0, len(samples), PARITY_BLOCK):
+            block = samples[offset : offset + PARITY_BLOCK]
+            last_t = (offset + len(block)) / sr
+            stream.feed(block, last_t)
+        stream.seg.flush(last_t)
+        rates.append(
+            {
+                "sr": sr,
+                "samples": int(len(samples)),
+                "notes": [
+                    {
+                        "start": round(note.start, 4),
+                        "end": round(note.end, 4),
+                        "midi": note.midi,
+                        "articulated": bool(note.articulated),
+                        "strength": round(note.strength, 4),
+                        "voice_doubt": bool(note.voice_doubt),
+                    }
+                    for note in stream.seg.notes
+                ],
+            }
+        )
+    return {
+        "generated_by": "scripts/export_web_fixtures.py",
+        "source": {
+            "name": PARITY_WAV.name,
+            "sha256": hashlib.sha256(parity_wav_bytes()).hexdigest(),
+            "sr": PARITY_SR,
+            "samples": int(len(signal)),
+        },
+        "chain": {
+            "reader": "v2m.core.liveseg.LivePitchStream",
+            "block": PARITY_BLOCK,
+            "gate_rms": GATE_RMS,
+            "flush": True,
+        },
+        "rates": rates,
+    }
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Write a fixture with LF on every platform.
+
+    The fixtures are compared as bytes by both halves of the gate: the browser
+    parses these files and `tests/test_web_export.py` re-derives the golden
+    from the Python engine. Windows' text mode (CRLF) would leave one
+    checkout matching and the other reading as drift.
+    """
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def main(dest: Path = DEST, yin_dest: Path = YIN_DEST) -> None:
-    CONSTANTS_DEST.write_text(constants_source(), encoding="utf-8")
+    _write_text(CONSTANTS_DEST, constants_source())
     print(f"ported constants -> {CONSTANTS_DEST}")
 
     payload = render(build_cases())
     payload["piano"] = piano_reference()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    _write_text(dest, json.dumps(payload, indent=1, sort_keys=True) + "\n")
     print(f"{len(payload['cases'])} cases -> {dest}")
+
+    _write_text(
+        INTONATION_DEST, json.dumps(intonation_reference(), indent=1, sort_keys=True) + "\n"
+    )
+    print(f"{len(INTONATION_CASES)} intonation cases -> {INTONATION_DEST}")
 
     reference = yin_reference()
     if reference is None:
         print(f"{DEMO_TAKE.name} is absent: {yin_dest.name} left untouched")
         return
-    yin_dest.write_text(json.dumps(reference, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    _write_text(yin_dest, json.dumps(reference, indent=1, sort_keys=True) + "\n")
     excerpt_frames = sum(len(excerpt["frames"]) for excerpt in reference["excerpts"])
     print(f"{excerpt_frames} YIN frames in {len(reference['excerpts'])} excerpts -> {yin_dest}")
 
@@ -555,10 +864,21 @@ def main(dest: Path = DEST, yin_dest: Path = YIN_DEST) -> None:
     if rates is None:
         print(f"{DEMO_TAKE.name} is absent: {YIN_RATES_DEST.name} left untouched")
         return
-    YIN_RATES_DEST.write_text(json.dumps(rates, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    _write_text(YIN_RATES_DEST, json.dumps(rates, indent=1, sort_keys=True) + "\n")
     print(
         f"{sum(len(rate['frames']) for rate in rates['rates'])} YIN frames at "
         f"{', '.join(str(rate['sr']) for rate in rates['rates'])} Hz -> {YIN_RATES_DEST}"
+    )
+
+    PARITY_WAV.parent.mkdir(parents=True, exist_ok=True)
+    PARITY_WAV.write_bytes(parity_wav_bytes())
+    reading = parity_reference()
+    _write_text(PARITY_GOLDEN, json.dumps(reading, indent=1, sort_keys=True) + "\n")
+    print(
+        f"{sum(len(rate['notes']) for rate in reading['rates'])} notes read by "
+        f"{reading['chain']['reader']} at "
+        f"{', '.join(str(rate['sr']) for rate in reading['rates'])} Hz -> "
+        f"{PARITY_WAV.name} + {PARITY_GOLDEN.name}"
     )
 
 

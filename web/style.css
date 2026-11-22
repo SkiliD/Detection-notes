@@ -20,8 +20,9 @@
   --deck-ink: #cfc4b1;
   --paper: #f8f1e3;
   --ink: #1d2430;
-  /* Deep enough for the worst row, not just bare paper: a playing row washes
-     the row with a 14% copper tint, and the old #6f6656 fell to 4.29:1 there. */
+  /* The dim text, measured on the WORST row it is read on: a playing row
+     washes the list with the copper tint below, and this ink still clears
+     4.5:1 there. */
   --muted: #655c4d;
   --rule: #e3d6bd;
   --rule-strong: #cdb894;
@@ -32,12 +33,11 @@
   --copper: #b06b34;
   --copper-deep: #8a4f24;
   /* The intonation scale, at the desktop's own bands (< 10 cents, < 25,
-     beyond). The desktop paints them as fills; here they are 13 px text on
-     paper, so the same green / amber / red are deepened to stay legible. */
-  /* The verdicts are read on rows, not on paper: the zebra and playing washes
-     darken the row, so these are deepened to stay above 4.5:1 on a playing row
-     (the old three read 3.92, 4.27 and 4.48 there — a green that only looked
-     just-tuned because the page was light). */
+     beyond): green / amber / red as 13 px text, deeper than the desktop's
+     fills so each one clears 4.5:1 on paper. */
+  /* The verdicts are read on ROWS, not on paper: the zebra and playing washes
+     darken the row, so each colour has to clear 4.5:1 on a playing row as well
+     as on the bare page. */
   --tune-ok: #3d6449;
   --tune-near: #7d5416;
   --tune-off: #8a4a38;
@@ -62,8 +62,8 @@
   --link-fill-hover: #7a6a4c;
   /* An INACTIVE control keeps its field and loses its ink: the field goes quiet
      (1.17:1 on the paper — WCAG 1.4.11 exempts inactive components) while the
-     label stays a readable WORD at 5.73:1. Fading the whole control to 45 %
-     left the label at 1.71:1 over the washed field — a smudge, not a word. */
+     label stays a readable WORD at 5.73:1. An opacity fade takes the label
+     down with the field, which is how a word becomes a smudge. */
   --button-off: #ecdfc4;
   --button-off-ink: #5c5344;
   --plate: #a4622b;
@@ -112,8 +112,8 @@
   --muted: #c2bbad;
   --rule: #3a332b;
   --rule-strong: #7a6749;
-  /* The warm rule already clears 3:1 on night paper (3.26); kept as its own
-     name so both palettes answer the same question. */
+  /* The warm rule clears 3:1 on night paper (3.26) and keeps its own name, so
+     both palettes answer the same question. */
   --control-edge: #7a6749;
   --copper: #d9a76c;
   --copper-deep: #e9c99b;
@@ -150,7 +150,7 @@
   --roll-grid: rgba(244, 239, 230, 0.06);
   --roll-rule: rgba(217, 167, 108, 0.32);
   --roll-label: rgba(233, 201, 155, 0.9);
-  /* 0.55 read 4.1:1 on the night roll; 0.7 reads 5.5. */
+  /* 0.7 keeps the second marks at 5.5:1 on the night roll. */
   --roll-time: rgba(201, 194, 179, 0.7);
   --roll-bar: rgba(217, 167, 108, 0.9);
   --roll-bar-preview: rgba(217, 167, 108, 0.3);
@@ -178,12 +178,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* The measure: a page of text has one, and at 720 px the roll and its own hints
-   never sit on opposite shores. A WIDE window is the one exception this used to
-   deny — held at 720 px on a 1600 px screen, the column became a ribbon with its
-   masthead rule and its notes row answering nothing, so the measure grows with
-   the window past 1000 px. Only the MEASURE grows: every block made of prose
-   keeps its own `ch` limit below, so no line of text stretches with it. */
+/* The reading measure: 720 px keeps the roll and its hints on one column.
+   Past 1000 px it grows with the window, so the masthead rule and the notes row
+   keep answering the page. Only the MEASURE grows: prose keeps its own `ch`
+   limit below, so no line of text stretches with it. */
 :root {
   --measure: 720px;
   --measure-wide: 1040px;
@@ -199,10 +197,10 @@ body {
     width: min(var(--measure-wide), calc(100% - 72px));
   }
 
-  /* A level meter is a gauge: stretched to the wide column it became a 900 px
-     hairline floating under an empty readout, longer than anything it
-     measures. Only here, where it was one: at the narrow measure the bar
-     spanning the column is what the readout looks like. */
+  /* A level meter is a gauge, so it is capped here: stretched across the wide
+     column it is a hairline longer than anything it measures, floating under
+     an empty readout. At the narrow measure the bar spanning the column is
+     what the readout looks like. */
   .meter {
     max-width: 420px;
   }
@@ -228,12 +226,14 @@ h1 {
   font-weight: 400;
   line-height: 1.05;
   letter-spacing: -0.012em;
+  text-wrap: balance;
 }
 
 .deck {
   margin: 14px 0 0;
   max-width: 46ch;
   color: var(--deck-ink);
+  text-wrap: pretty;
 }
 
 /* The two pills — appearance and language — share one corner, so neither can
@@ -248,8 +248,8 @@ h1 {
 
 .link {
   /* No stroke: the fill is the boundary (3:1 against the night band), and the
-     label is ivory rather than the deck's grey, which the fill no longer
-     carries at 4.5:1. */
+     label is ivory rather than the deck's grey, which does not reach 4.5:1 on
+     that fill. */
   border: 0;
   border-radius: 2px;
   background: var(--link-fill);
@@ -258,7 +258,7 @@ h1 {
   font-size: 12px;
   padding: 4px 9px;
   cursor: pointer;
-  transition: background-color 90ms ease;
+  transition: background-color 90ms ease-out;
 }
 
 .link:hover,
@@ -284,6 +284,7 @@ h2 {
   font-size: 19px;
   font-weight: 400;
   letter-spacing: 0.002em;
+  text-wrap: balance;
 }
 
 /* --------------------------------------------------------------- transport */
@@ -309,7 +310,7 @@ button {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
   /* background-color, not the shorthand: the shorthand is not animatable, so
      the hover would jump instead of settling. */
-  transition: background-color 90ms ease;
+  transition: background-color 90ms ease-out;
 }
 
 button:hover:not(:disabled) {
@@ -322,9 +323,9 @@ button:active:not(:disabled) {
 }
 
 button:focus-visible,
-.link:focus-visible,
+#roll:focus-visible,
+.guide > summary:focus-visible,
 .file input:focus-visible + span,
-.balance-reset:focus-visible,
 input[type="range"]:focus-visible {
   outline: 2px solid var(--copper);
   outline-offset: 2px;
@@ -344,15 +345,27 @@ button.primary:hover:not(:disabled) {
 }
 
 /* An inactive control keeps its FIELD and drops its ink — it does not fade
-   away. At 45 % the label became a smudge on a washed field; now the surface is
-   deliberately quiet and the word on it stays a word (measured in
-   `test_a_disabled_field_keeps_its_label_readable`). No stroke comes back: the
-   fill is still the boundary. */
+   away. The surface is deliberately quiet and the word on it stays a word
+   (measured in `test_a_disabled_field_keeps_its_label_readable`). No stroke
+   comes back: the fill is still the boundary. */
 button:disabled {
   background: var(--button-off);
   color: var(--button-off-ink);
   cursor: default;
+  /* An inactive control must not be caught mid-change: the 90 ms settling of
+     the enabled button would show a transparent field for its first frames. */
+  transition: none;
   box-shadow: none;
+}
+
+/* A text link that disables drops its underline: the line is the promise of a
+   click, and a control that refuses the press must not draw it. It is the one
+   thing their disabled state changes — the field and the word stay
+   `button:disabled`'s own pair above, so no contrast moves — and the rule is
+   shared by both links so neither can keep a stale line by copy-paste. */
+.balance-reset:disabled,
+.guide-link:disabled {
+  text-decoration: none;
 }
 
 .file input {
@@ -523,9 +536,8 @@ canvas.seekable {
   font-size: 12px;
 }
 
-/* WCAG 2.2 AA (2.5.8): a pointer target is at least 24 px. The box used to BE
-   the 6 px track, so the only thing a thumb could grab was that strip; the
-   target is now 24 px tall with the same thin line drawn inside it. */
+/* WCAG 2.2 AA (2.5.8): the pointer target is a 24 px box, and the 6 px track
+   is drawn inside it with the thumb centred on that line. */
 .balance-row input[type="range"] {
   width: 180px;
   height: 24px;
@@ -576,14 +588,46 @@ canvas.seekable {
   box-shadow: 0 0 0 2px var(--paper), 0 1px 3px rgba(90, 60, 30, 0.32);
 }
 
+/* The slider disables too, and follows the same pattern as every other
+   control: no fade. The track becomes the quiet field (`--button-off`, flat
+   and shadowless like `button:disabled`) and the thumb keeps a readable ink
+   (`--button-off-ink` on that field: 5.73:1 in the light palette, 6.98:1 in
+   the dark one). The paper ring and the drop shadow go: an inactive knob is
+   still a shape, not a smudge.
+
+   ONE RULE PER ENGINE, as the enabled track and thumb above. A browser drops
+   a whole grouped rule when one selector in the list names a pseudo-element
+   it does not know, so sharing the rule with the other engine's pseudo left
+   the disabled slider with its enabled track and ring in the engine the page
+   is actually read in — the file still read as declared. */
 .balance-row input[type="range"]:disabled {
-  opacity: 0.45;
   cursor: default;
+}
+
+.balance-row input[type="range"]:disabled::-webkit-slider-runnable-track {
+  background: var(--button-off);
+  box-shadow: none;
+}
+
+.balance-row input[type="range"]:disabled::-moz-range-track {
+  background: var(--button-off);
+  box-shadow: none;
+}
+
+.balance-row input[type="range"]:disabled::-webkit-slider-thumb {
+  background: var(--button-off-ink);
+  box-shadow: none;
+}
+
+.balance-row input[type="range"]:disabled::-moz-range-thumb {
+  background: var(--button-off-ink);
+  box-shadow: none;
 }
 
 /* One gesture back to the reference: a 5-cent step makes the exact middle a
    fine-motor task the default should not require. Quiet, underlined text so
-   it never competes with the slider it corrects. */
+   it never competes with the slider it corrects — and an INACTIVE one drops
+   the line, which promises a press it can no longer take. */
 .balance-reset {
   /* WCAG 2.2 AA (2.5.8): bare underlined text is 18 px tall, and 11 px type is
      not a target a thumb can find; the box is 24 px while the word keeps its
@@ -600,11 +644,6 @@ canvas.seekable {
   text-decoration: underline;
   text-underline-offset: 3px;
   cursor: pointer;
-}
-
-.balance-reset:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 
 /* The notes list keeps its six columns readable instead of squeezing them:
@@ -737,6 +776,7 @@ tr.playing td:nth-child(4) {
   font-family: var(--serif);
   font-style: italic;
   font-size: 13.5px;
+  text-wrap: pretty;
   line-height: 1.6;
   max-width: 66ch;
 }
@@ -756,6 +796,8 @@ tr.playing td:nth-child(4) {
   font-family: var(--serif);
   font-size: 15px;
   line-height: 1.5;
+  /* A control like any button: the 24 px floor, not the line's own height. */
+  min-height: 24px;
 }
 
 .guide > summary::marker {
@@ -806,11 +848,6 @@ tr.playing td:nth-child(4) {
 .guide-link:hover,
 .guide-link:focus-visible {
   text-decoration-color: var(--copper);
-}
-
-.guide-link:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 
 .guide-print {
@@ -926,13 +963,13 @@ tr.playing td:nth-child(4) {
   }
 }
 
-/* The page's one motion is a control settling under the pointer. A reader who
-   asked the system for less motion gets none of it — and the painting, the
-   playhead and the meter are canvas frames, not transitions, so nothing they
-   rely on stops. */
+/* A control settles under the pointer and the level meter smooths its bar:
+   both are CSS transitions, and a reader who asked for less motion gets
+   neither (the painting and the playhead are canvas frames, and keep going). */
 @media (prefers-reduced-motion: reduce) {
   button,
-  .link {
+  .link,
+  .meter-fill {
     transition: none;
   }
 }

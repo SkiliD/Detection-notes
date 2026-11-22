@@ -4,7 +4,8 @@ Contracts that require automated enforcement:
 
 1. **The repo tracks NO generated artifact** (the .gitignore header:
    "ignore everything that is not a source"). The only versioned JSONs
-   are the tests' frozen references. An artifact committed by accident
+   are the tests' frozen references, the page's own table and fixtures, and
+   the vendored folder's lockfile. An artifact committed by accident
    (out.mid, live_20260923_….json) is exactly the regression this test
    refuses — reviewing .gitignore at every new output path is not enough
    when it depends on memory.
@@ -69,12 +70,20 @@ Contracts that require automated enforcement:
     `*.sh text eol=lf` and `docker-entrypoint.sh` carries no CR — the
     entry point runs through bash inside the Linux image, where a CRLF
     file fails with `env: '\r': No such file or directory`.
+
+11. **AGENTS.md names selectors the page declares**: every backticked
+    class/id/pseudo selector in the whole file (extension names, dotfiles,
+    hex colours, JS calls, JS properties, markup ids/attributes and Qt states
+    excluded) must appear in `web/style.css`'s selector text — a renamed
+    control fails here instead of sending a reviewer to a rule that no longer
+    exists.
 """
 
 from __future__ import annotations
 
 import ast
 import io
+import json
 import re
 import subprocess
 import tempfile
@@ -83,7 +92,11 @@ import tokenize
 from pathlib import Path
 from types import SimpleNamespace
 
+from scripts.check_vendor_lock import folder_files, folder_hash
+
 REPO = Path(__file__).resolve().parent.parent
+AGENTS = REPO / "AGENTS.md"
+WEB_SHEET = REPO / "web" / "style.css"
 
 # French accented letters — a CODE literal (docstrings excluded) carrying
 # one outside i18n.py is a user message that did not go through `tr()`.
@@ -132,13 +145,196 @@ WEB_JSON = (
     "web/test/cases.json",
     "web/test/yin.json",
     "web/test/yin-rates.json",
+    "web/test/intonation.json",
 )
+# The one committed AUDIO fixture: the parity phrase, under the single audio
+# exception `.gitignore` writes for it. It is not a take — it is synthesised by
+# `scripts/export_web_fixtures.py` and digested in the golden that freezes its
+# reading, so a hand-edited WAV fails `test_web_build.py` instead of silently
+# comparing two different signals. The singer's own takes stay personal.
+PARITY_AUDIO = "tests/data/parity.wav"
+# The vendored folder's lockfile: a SOURCE that pins the upstream commit of
+# `vendor/make-interfaces-feel-better/` (MIT, license beside it). It is
+# not an analysis output; `.gitignore` whitelists it after its `*.json` rule.
+VENDORED_JSON = ("vendor-lock.json",)
+# The vendored folder itself, hashed by `computedHash` in that lock.
+VENDORED_FOLDER = "vendor/make-interfaces-feel-better"
+# Its MIT license travels BESIDE the hashed folder: inside it, the digest would
+# be ours instead of upstream's and the lock would read the copy as modified.
+VENDORED_LICENSE = "vendor/make-interfaces-feel-better-LICENSE"
+
+
+def test_the_vendored_folder_matches_its_locked_hash():
+    """An edited vendored folder must fail the gate, not ship silently.
+
+    `vendor-lock.json` records the digest of the upstream copy; the suite
+    recomputes the same digest, so an in-place edit is refused on any machine.
+    Re-vendoring is deliberate: copy the folder from the upstream source
+    instead of editing it. The license is checked separately: it lives outside
+    the hashed folder, so the folder can stay byte-identical to upstream while
+    the attribution still travels with a clone. The digest has ONE owner,
+    `scripts/check_vendor_lock.py`, imported here, so the offline check and
+    this gate can never disagree about what the lock means.
+    """
+    # The documented vector: a one-file folder hashes as its framing
+    # says, so this test cannot pass with a differently-framed digest.
+    assert folder_hash([("SKILL.md", b"# hi\n")]) == (
+        "93c36952d8843b33e68ae970ebabcc03e1687c9bb0dd1ecaf357060318952f55"
+    ), "the vendored-folder digest no longer follows the pinned framing"
+
+    lock = json.loads((REPO / "vendor-lock.json").read_text(encoding="utf-8"))
+    locked = lock["vendored"]["make-interfaces-feel-better"]["computedHash"]
+    folder = REPO / VENDORED_FOLDER
+    assert folder.is_dir(), f"the vendored folder is gone: {VENDORED_FOLDER}"
+    assert not (folder / "LICENSE").exists(), (
+        f"{VENDORED_FOLDER} carries a LICENSE inside the hashed folder: the copy is no "
+        "longer byte-identical to upstream, and the lock would read it as modified"
+    )
+    license_file = REPO / VENDORED_LICENSE
+    assert license_file.is_file(), (
+        f"the vendored license is gone: {VENDORED_LICENSE}"
+    )
+    license_text = license_file.read_text(encoding="utf-8")
+    assert license_text.startswith("MIT License") and "Jakub Krehel" in license_text, (
+        "the vendored license is no longer the upstream MIT text with its copyright line"
+    )
+    assert locked == folder_hash(folder_files(folder)), (
+        f"{VENDORED_FOLDER} no longer matches vendor-lock.json — re-vendor it from "
+        "the upstream source instead of editing the copy, or the stored hash is stale"
+    )
+
+
+def test_the_vendored_license_and_the_lock_travel_and_stay_lf():
+    """The READMEs promise the attribution travels; only the index travels.
+
+    `git check-ignore --no-index` reads the ignore PATTERNS, so a path can pass
+    that guard and still never enter a commit — this one asks the index itself.
+    The lock is what the vendor check compares byte for byte, so it must be
+    tracked and LF on disk, not merely pinned by `.gitattributes` (checked next door).
+    """
+    tracked = set(_tracked())
+    folder_md = f"{VENDORED_FOLDER}/SKILL.md"
+    assert folder_md in tracked, (
+        f"the vendored folder is not tracked: {folder_md} would not travel with a clone"
+    )
+    assert VENDORED_LICENSE in tracked, (
+        f"its license is not tracked: {VENDORED_LICENSE} would not travel with a clone"
+    )
+    assert VENDORED_LICENSE.startswith("vendor/"), (
+        "the license moved out of vendor/: both READMEs name it there"
+    )
+    license_text = (REPO / VENDORED_LICENSE).read_text(encoding="utf-8")
+    assert license_text.startswith("MIT License") and "Jakub Krehel" in license_text, (
+        "the file the READMEs cite as the MIT license is no longer that text"
+    )
+    assert "vendor-lock.json" in tracked, (
+        "vendor-lock.json is not tracked: a clone could not pin the vendored commit and hash"
+    )
+    raw = (REPO / "vendor-lock.json").read_bytes()
+    assert b"\r\n" not in raw, (
+        "vendor-lock.json carries CRLF: the folder it pins would read as modified"
+    )
+    assert not raw.startswith(b"\xef\xbb\xbf"), (
+        "vendor-lock.json opens with a BOM: the lock stops parsing as JSON"
+    )
+
+
+def test_the_offline_lock_check_answers_0_on_a_match_and_1_when_it_moved(tmp_path, capsys):
+    """The script the READMEs tell a reader to run, on a pair it can be wrong about.
+
+    The vendored folder is pinned above; this proves the CHECK itself, against
+    a temporary folder and lock, so an edit that makes it always answer 0 (or
+    always 1) fails here. In-process: no subprocess, no network, no pytest on
+    the other side — the check exists for machines that have none of the three.
+    """
+    from scripts import check_vendor_lock
+
+    folder = tmp_path / "vendor" / "demo"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(b"# demo\n")
+    expected = folder_hash(folder_files(folder))
+    lock = tmp_path / "vendor-lock.json"
+    lock.write_text(
+        json.dumps({"vendored": {"demo": {"computedHash": expected}}}),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    assert check_vendor_lock.main(folder, lock, "demo") == 0, "a matching digest failed"
+    said = capsys.readouterr()
+    assert expected in said.out, f"the success line never named the digest: {said.out!r}"
+
+    # One byte in the copy: same file name, a digest that no longer matches.
+    (folder / "SKILL.md").write_bytes(b"# demo!\n")
+    assert check_vendor_lock.main(folder, lock, "demo") == 1, "a moved digest passed"
+    said = capsys.readouterr()
+    assert "no longer matches" in said.err and expected[:12] in said.err, (
+        f"the refusal did not name the digest it expected: {said.err!r}"
+    )
+
+    # A folder outside the repository must be reported, not crash the label.
+    assert check_vendor_lock.main(tmp_path / "gone", lock, "demo") == 1, (
+        "a missing folder passed"
+    )
+    said = capsys.readouterr()
+    assert "folder is gone" in said.err, f"the refusal never named the folder: {said.err!r}"
+
+
+def test_only_the_vendored_folder_is_versioned_and_pinned_to_lf():
+    """ADR 0044 rests on two files' PATTERNS, so those patterns are pinned.
+
+    The ignore question is asked of the patterns (`--no-index`), not of the
+    index: a path that is already tracked is never reported ignored, which
+    would let a broken negation look right. `check-attr` resolves the LF pin
+    the same way a checkout would.
+    """
+
+    def ignored(path: str) -> bool:
+        return subprocess.run(
+            ["git", "check-ignore", "--no-index", "-q", path], cwd=REPO
+        ).returncode == 0
+
+    assert not ignored("vendor/make-interfaces-feel-better/SKILL.md"), (
+        "the vendored folder is ignored again: the copy would not travel with a clone"
+    )
+    assert not ignored(VENDORED_LICENSE), (
+        "the vendored license is ignored: attribution would not travel with a clone"
+    )
+    assert not ignored("vendor-lock.json"), (
+        "the lock is ignored: nothing would pin the vendored commit and its hash"
+    )
+    # Every other folder under vendor/ stays machine-local.
+    assert ignored("vendor/some-other-folder/SKILL.md"), (
+        "a blanket whitelist would version any folder placed there later"
+    )
+    assert ignored("vendor/some-other-folder/notes.md")
+
+    def eol(path: str) -> str:
+        result = subprocess.run(
+            ["git", "check-attr", "eol", "--", path],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.rpartition(": ")[2].strip()
+
+    assert eol("vendor/make-interfaces-feel-better/SKILL.md") == "lf", (
+        "the vendored folder lost its LF pin: a CRLF checkout would read as modified"
+    )
+    assert eol("vendor-lock.json") == "lf", (
+        "the lock lost its LF pin: the folder hash is compared with its bytes"
+    )
 
 
 def test_repo_tracks_no_generated_artifacts():
     """No generated artifact tracked: sources + configs + frozen reference."""
     tracked = _tracked()
-    offenders = [f for f in tracked if f.endswith((".mid", ".musicxml", ".csv", ".pdf", ".wav"))]
+    offenders = [
+        f
+        for f in tracked
+        if f.endswith((".mid", ".musicxml", ".csv", ".pdf", ".wav")) and f != PARITY_AUDIO
+    ]
     # JSON: only the tests' frozen references and the web port's own table and
     # fixtures have standing.
     offenders += [
@@ -147,6 +343,7 @@ def test_repo_tracks_no_generated_artifacts():
         if f.endswith(".json")
         and not f.startswith("tests/reference/")
         and f not in WEB_JSON
+        and f not in VENDORED_JSON
     ]
     assert not offenders, f"generated artifacts tracked : {offenders}"
 
@@ -1185,3 +1382,205 @@ def test_shell_scripts_keep_lf_for_the_linux_image():
     )
     entrypoint = (REPO / "docker-entrypoint.sh").read_bytes()
     assert b"\r" not in entrypoint, "docker-entrypoint.sh carries CR line endings"
+
+
+# Guard 11: AGENTS.md names page selectors, so every one it names must still
+# exist. The token pattern deliberately stops at class/id/pseudo selectors: a
+# hex colour, a file extension, a JS call, a bare markup attribute
+# (`[tabindex]`), a markup id the page's tests name, a JS property and a Qt QSS
+# state are prose about the page, not names web/style.css can answer.
+_SELECTOR_TOKEN = re.compile(
+    r"^(?:"
+    r"[.#][A-Za-z_][\w-]*(?::[a-z-]+(?:\([^)]*\))?)*"
+    r"|:[a-z-]+(?:\([^)]*\))?"
+    r"|[a-z][\w-]*(?:\[[^\]]+\]|:[a-z-]+(?:\([^)]*\))?)"
+    r"|[.#][A-Za-z_][\w-]*\s*[>+~]\s*[a-z][\w-]*"
+    r")$"
+)
+_FILE_EXTENSIONS = frozenset(
+    {
+        "json",
+        "npz",
+        "wav",
+        "mid",
+        "musicxml",
+        "css",
+        "py",
+        "md",
+        "js",
+        "html",
+        "txt",
+        "pdf",
+        "csv",
+        "zip",
+        "app",  # a macOS application bundle, not a class
+    }
+)
+_DOTFILES = frozenset({"gitignore", "gitattributes"})
+# Tokens that look like selectors but are another language's vocabulary. They
+# are listed by EXACT value on purpose: a new page class must not hide here.
+_NOT_WEB_SELECTORS = frozenset(
+    {
+        ":pressed",  # Qt QSS state, never a page pseudo-class
+        ".notes",  # a JS property: before.result.notes[index]
+        "#demo",  # markup ids the page's tests name, not styled selectors
+        "#status",
+        "#file",
+        "#guide-demo",
+    }
+)
+
+
+_SIMPLE_SELECTOR = (
+    r"(?:[.#][A-Za-z_][\w-]*"
+    r"|\[[^\]]+\]"
+    r"|::?[a-z-]+(?:\([^)]*\))?"
+    r"|[a-z][\w-]*"
+    r"|\*)"
+)
+_SELECTOR_PART = re.compile(rf"\s+|{_SIMPLE_SELECTOR}|[>+~]")
+
+
+def _selector_tokens(selector: str) -> tuple[str, ...] | None:
+    """A selector as whole components, or None when it is not CSS we parse.
+
+    A component is never compared as a substring: `.link` and `.link-cta` are
+    different tokens, so a suffix rename cannot satisfy the guard.
+    """
+    tokens: list[str] = []
+    at = 0
+    for part in _SELECTOR_PART.finditer(selector):
+        if selector[at : part.start()].strip():
+            return None
+        value = part.group(0)
+        if value.isspace():
+            if tokens and tokens[-1] not in (" ", ">", "+", "~"):
+                tokens.append(" ")
+        elif value in (">", "+", "~"):
+            while tokens and tokens[-1] == " ":
+                tokens.pop()
+            tokens.append(value)
+        else:
+            tokens.append(value)
+        at = part.end()
+    if selector[at:].strip():
+        return None
+    while tokens and tokens[-1] == " ":
+        tokens.pop()
+    return tuple(tokens) if tokens else None
+
+
+def _split_selector_list(prelude: str) -> list[str]:
+    """Split a selector prelude on top-level commas, not commas inside them."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(prelude):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(prelude[start:index])
+            start = index + 1
+    parts.append(prelude[start:])
+    return parts
+
+
+def _declared_selector_tokens(css_text: str) -> list[tuple[str, ...]]:
+    """Every selector web/style.css declares, as component tuples."""
+    css = re.sub(r"/\*.*?\*/", "", css_text, flags=re.S)
+    declared: list[tuple[str, ...]] = []
+    for prelude, _body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        prelude = prelude.strip()
+        if not prelude or prelude.startswith("@"):
+            continue  # an at-rule is not a selector
+        for selector in _split_selector_list(prelude):
+            tokens = _selector_tokens(selector)
+            if tokens:
+                declared.append(tokens)
+    return declared
+
+
+def _web_selector_tokens() -> list[tuple[str, ...]]:
+    """Every selector prelude of web/style.css, as whole components."""
+    return _declared_selector_tokens(WEB_SHEET.read_text(encoding="utf-8"))
+
+
+def _selector_is_declared(selector: str, declared: list[tuple[str, ...]]) -> bool:
+    """Whether `selector` names a contiguous run of WHOLE declared components."""
+    wanted = _selector_tokens(selector)
+    if not wanted:
+        return False
+    width = len(wanted)
+    return any(
+        tokens[index : index + width] == wanted
+        for tokens in declared
+        for index in range(len(tokens) - width + 1)
+    )
+
+
+def _named_web_selectors(text: str) -> list[str]:
+    """The backticked CSS selectors a piece of prose names, in order."""
+    named: list[str] = []
+    for token in re.findall(r"`([^`\n]+)`", text):
+        token = token.strip()
+        if not _SELECTOR_TOKEN.match(token):
+            continue
+        if re.fullmatch(r"#[0-9a-fA-F]{3,8}", token):
+            continue
+        if token in _NOT_WEB_SELECTORS:
+            continue
+        if token.startswith(".") and (
+            token[1:].lower() in _FILE_EXTENSIONS or token[1:].lower() in _DOTFILES
+        ):
+            continue
+        named.append(token)
+    return named
+
+
+def test_agents_names_only_selectors_the_web_sheet_declares():
+    """Guard 11: a renamed page control cannot leave AGENTS.md pointing at it."""
+    named = _named_web_selectors(AGENTS.read_text(encoding="utf-8"))
+    assert len(named) >= 8, f"AGENTS.md stopped naming web selectors: {named}"
+    declared = _web_selector_tokens()
+    missing = [selector for selector in named if not _selector_is_declared(selector, declared)]
+    assert not missing, (
+        "AGENTS.md names selectors web/style.css no longer declares:\n  "
+        + "\n  ".join(missing)
+    )
+
+
+def test_the_agents_selector_guard_bites():
+    """Guard 11 has TEETH: a dead selector is seen, prose lookalikes are not."""
+    assert _named_web_selectors("`.ghost-control` and `#ghost-id`") == [
+        ".ghost-control",
+        "#ghost-id",
+    ]
+    assert not _selector_is_declared(".ghost-control", _web_selector_tokens())
+    # A SUFFIX rename is a different component, never a substring match.
+    suffix_only = _declared_selector_tokens(".link-cta { color: red; }")
+    assert not _selector_is_declared(".link", suffix_only), (
+        "`.link` still passes when the sheet declares only `.link-cta`"
+    )
+    assert _selector_is_declared(
+        ".link", _declared_selector_tokens(".link:hover { color: red; }")
+    ), "a real component inside a compound selector no longer matches"
+    assert _named_web_selectors("`#111827` `.json` `[tabindex]` `.clear()`") == []
+    # The same exclusions, now that the guard reads the whole file: a dotfile,
+    # two file extensions, a markup id, a JS property and a Qt state.
+    assert _named_web_selectors(
+        "`.gitignore` `.gitattributes` `.zip` `.app` `#demo` `.notes` `:pressed`"
+    ) == []

@@ -1,0 +1,201 @@
+{
+ "chain": {
+  "block": 2048,
+  "flush": true,
+  "gate_rms": 0.008,
+  "reader": "v2m.core.liveseg.LivePitchStream"
+ },
+ "generated_by": "scripts/export_web_fixtures.py",
+ "rates": [
+  {
+   "notes": [
+    {
+     "articulated": false,
+     "end": 0.6502,
+     "midi": 60,
+     "start": 0.0116,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": false,
+     "end": 1.2655,
+     "midi": 64,
+     "start": 0.8359,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 1.7995,
+     "midi": 64,
+     "start": 1.2655,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 2.4729,
+     "midi": 62,
+     "start": 1.9505,
+     "strength": 0.9092,
+     "voice_doubt": false
+    },
+    {
+     "articulated": false,
+     "end": 2.9373,
+     "midi": 67,
+     "start": 2.4729,
+     "strength": 0.0,
+     "voice_doubt": false
+    }
+   ],
+   "samples": 65047,
+   "sr": 22050
+  },
+  {
+   "notes": [
+    {
+     "articulated": false,
+     "end": 0.5805,
+     "midi": 60,
+     "start": 0.0116,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 1.2655,
+     "midi": 64,
+     "start": 0.5805,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 1.7995,
+     "midi": 64,
+     "start": 1.2655,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 2.4729,
+     "midi": 62,
+     "start": 1.9505,
+     "strength": 0.8464,
+     "voice_doubt": false
+    },
+    {
+     "articulated": false,
+     "end": 2.9373,
+     "midi": 67,
+     "start": 2.4729,
+     "strength": 0.0,
+     "voice_doubt": false
+    }
+   ],
+   "samples": 130095,
+   "sr": 44100
+  },
+  {
+   "notes": [
+    {
+     "articulated": false,
+     "end": 0.6614,
+     "midi": 60,
+     "start": 0.0116,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": false,
+     "end": 1.2765,
+     "midi": 64,
+     "start": 0.8355,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 1.7987,
+     "midi": 64,
+     "start": 1.2765,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 2.4717,
+     "midi": 62,
+     "start": 1.9147,
+     "strength": 0.1992,
+     "voice_doubt": false
+    },
+    {
+     "articulated": false,
+     "end": 2.9359,
+     "midi": 67,
+     "start": 2.4717,
+     "strength": 0.0,
+     "voice_doubt": false
+    }
+   ],
+   "samples": 141600,
+   "sr": 48000
+  },
+  {
+   "notes": [
+    {
+     "articulated": false,
+     "end": 0.6504,
+     "midi": 60,
+     "start": 0.0116,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": false,
+     "end": 1.2776,
+     "midi": 64,
+     "start": 0.8246,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 1.8003,
+     "midi": 64,
+     "start": 1.2776,
+     "strength": 0.0,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 2.4507,
+     "midi": 62,
+     "start": 1.9396,
+     "strength": 0.3056,
+     "voice_doubt": false
+    },
+    {
+     "articulated": true,
+     "end": 2.9269,
+     "midi": 67,
+     "start": 2.4507,
+     "strength": 0.725,
+     "voice_doubt": false
+    }
+   ],
+   "samples": 283200,
+   "sr": 96000
+  }
+ ],
+ "source": {
+  "name": "parity.wav",
+  "samples": 130095,
+  "sha256": "1626652c74d50812ae2e099084fe94fe52f7085588725c09539b4b8e3420ab3b",
+  "sr": 44100
+ }
+}

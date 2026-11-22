@@ -53,6 +53,33 @@ def _mido_key(tonic: str, mode: str, transpose: int = 0) -> str:
     return _MAJOR_MIDO.get(tonic, "C")
 
 
+def _release_before_restrike(written: list[tuple[int, int, mido.Message]]) -> None:
+    """Put a note-off before a same-pitch note-on that shares its TICK.
+
+    Only the colliding pair moves: every other event keeps the time order it
+    was written in, so a file without the collision keeps its bytes.
+    """
+    index = 0
+    while index < len(written):
+        tick = written[index][0]
+        end = index
+        while end < len(written) and written[end][0] == tick:
+            end += 1
+        group = written[index:end]
+        position = 0
+        while position < len(group):
+            message = group[position][2]
+            if message.type == "note_on" and message.velocity > 0:
+                for later in range(position + 1, len(group)):
+                    other = group[later][2]
+                    if other.type == "note_off" and other.note == message.note:
+                        group.insert(position, group.pop(later))
+                        break
+            position += 1
+        written[index:end] = group
+        index = end
+
+
 def build_midi(
     notes: list[Note],
     grid: BeatGrid,
@@ -117,53 +144,61 @@ def build_midi(
     sec_per_tick = grid.seconds(1.0) / tpq
     events.sort(key=lambda event: (event.time_s, event.order))
 
+    # Events are given their ABSOLUTE tick first, then ordered at that tick by
+    # kind (pedal down, note off, note on, pedal up). Ordering by time alone is
+    # not enough: two events less than one tick apart share a tick in the file,
+    # and an ON written before the OFF of the same pitch closes the new note at
+    # the instant it opens — a moved note can overlap the one before it by less
+    # than a tick. A suppressed pedal edge still advances the clock, which is
+    # why the tick is carried per message instead of folded into a delta.
+    written: list[tuple[int, int, mido.Message]] = []
     last_t = 0.0
-    pending_ticks = 0
     active_pedals = 0
+    clock_ticks = 0
     for event in events:
         dt_s = max(0.0, event.time_s - last_t)
         ticks = int(round(dt_s / sec_per_tick))
         last_t = event.time_s
+        clock_ticks += ticks
 
         if event.kind == "pedal_down":
             active_pedals += 1
             if active_pedals > 1:
-                pending_ticks += ticks
                 continue
-            voice.append(
-                mido.Message(
-                    "control_change",
-                    control=64,
-                    value=127,
-                    time=ticks + pending_ticks,
+            written.append(
+                (
+                    clock_ticks,
+                    event.order,
+                    mido.Message("control_change", control=64, value=127, time=0),
                 )
             )
-            pending_ticks = 0
             continue
 
         if event.kind == "pedal_up":
             active_pedals -= 1
             if active_pedals > 0:
-                pending_ticks += ticks
                 continue
-            voice.append(
-                mido.Message(
-                    "control_change",
-                    control=64,
-                    value=0,
-                    time=ticks + pending_ticks,
+            written.append(
+                (
+                    clock_ticks,
+                    event.order,
+                    mido.Message("control_change", control=64, value=0, time=0),
                 )
             )
-            pending_ticks = 0
             continue
 
-        ticks += pending_ticks
-        pending_ticks = 0
         if event.kind == "note_on":
-            voice.append(
-                mido.Message("note_on", note=event.pitch, velocity=event.value, time=ticks)
-            )
+            message = mido.Message("note_on", note=event.pitch, velocity=event.value, time=0)
         else:
-            voice.append(mido.Message("note_off", note=event.pitch, velocity=0, time=ticks))
+            message = mido.Message("note_off", note=event.pitch, velocity=0, time=0)
+        written.append((clock_ticks, event.order, message))
+
+    written.sort(key=lambda item: item[0])  # stable: time order inside a tick
+    _release_before_restrike(written)
+    cursor = 0
+    for tick, _order, message in written:
+        message.time = tick - cursor
+        cursor = tick
+        voice.append(message)
     voice.append(mido.MetaMessage("end_of_track", time=0))
     return mid

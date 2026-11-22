@@ -18,9 +18,14 @@ must equal its `<duration>` — two numbers coming from different paths
 
 Two accepted precautions:
 
+- the three text artifacts are written with LF on EVERY platform
+  (`newline="\n"` in `report.export_result` and `musicxml.write_score`),
+  so one frozen reference holds on Windows and Linux alike: a CRLF
+  writer would move the bytes and this test would name the move as
+  drift, which is exactly what it is;
 - the reference is tied to the audio files, which are gitignored: the
-  test is skipped when they are missing (another machine, a container)
-  rather than failing;
+test is skipped when they are missing (another machine, a container)
+rather than failing;
 - re-freezing the reference is a decision, not a reflex: run
   `V2M_FREEZE_REFERENCE=1 python -m pytest
   tests/test_reference_artifacts.py`, after SEEING what moved (the test
@@ -112,6 +117,9 @@ def test_reference_takes_still_export_the_same_bytes(fresh_reference_artifacts):
         REFERENCE.write_text(
             json.dumps(fresh, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
             encoding="utf-8",
+            # The reference is tracked: freezing it on Windows must not make
+            # every line end differ from the Linux one.
+            newline="\n",
         )
         pytest.skip(f"reference re-frozen : {REFERENCE}")
 

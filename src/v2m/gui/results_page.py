@@ -57,7 +57,7 @@ from PyQt6.QtWidgets import (
 from ..core.audio_io import SR
 from ..core.continuity import coherence_report
 from ..core.grid import BeatGrid
-from ..core.i18n import note_display_pair, tr, tr_key_label
+from ..core.i18n import format_number, note_display_pair, tr, tr_key_label
 from ..core.notes import Note
 from . import widgets
 from .staff import StaffView
@@ -988,10 +988,15 @@ class ResultsPage(QWidget):
             self.label_summary.setText("")
             return
         notes, duration, bpm, key_label = self._summary_facts
-        tempo = f"{bpm:.0f} BPM" if bpm is not None else "—"
+        tempo = f"{format_number(bpm, 0)} BPM" if bpm is not None else "—"
         key = tr_key_label(key_label) if key_label is not None else "—"
         self.label_summary.setText(
-            tr("ui summary facts").format(notes=notes, duration=duration, tempo=tempo, key=key)
+            tr("ui summary facts").format(
+                notes=notes,
+                duration=format_number(duration, 1),
+                tempo=tempo,
+                key=key,
+            )
         )
 
     def _toggle_details(self, expanded: bool) -> None:
@@ -1257,8 +1262,8 @@ class ResultsPage(QWidget):
         self.label_selection.setText(
             tr("ui selection label").format(
                 n=len(chosen),
-                t0=min(n.start for n in chosen),
-                t1=max(n.end for n in chosen),
+                t0=format_number(min(n.start for n in chosen), 1),
+                t1=format_number(max(n.end for n in chosen), 1),
             )
         )
         self.label_selection.setVisible(True)

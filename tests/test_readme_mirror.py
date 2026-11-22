@@ -154,11 +154,41 @@ def _parser_flags() -> set[str]:
     return flags - INTERNAL_FLAGS - SHORT_ALIASES - {"-h"}
 
 
+def _documented_flags(text: str) -> set[str]:
+    """The flags the READMEs document for THIS project's commands.
+
+    A `gh variable set … --body true` line documents GitHub's CLI, and a
+    `node --test …` line documents Node's runner, not ours: the guard below
+    answers "does the README invent a flag of v2m", so another program's flags
+    are not its business — reading them as ours made every operational recipe
+    (`gh`, `node`, and later anything else) fail a test about v2m. A leading
+    `V2M_LONG_TAKE=1` is an environment assignment to that same foreign
+    command, not an argument of ours.
+    """
+    FOREIGN = re.compile(r"^(?:\w+=\S+\s+)*(?:gh|node)\s")
+    flags: set[str] = set()
+    for line in text.splitlines():
+        if FOREIGN.match(line.lstrip()):
+            continue
+        flags |= set(FLAG.findall(line))
+    return flags
+
+
+def test_a_foreign_command_does_not_count_as_one_of_ours():
+    """The exclusion above is narrow, and the guard still bites next to it."""
+    text = (
+        "gh variable set MIC_CAPTURE_WAIVED --body true\n"
+        "V2M_LONG_TAKE=1 node --test web/test/long-take.test.mjs\n"
+        "v2m live --nope\n"
+    )
+    assert _documented_flags(text) == {"--nope"}
+
+
 def test_documented_flags_exist_in_cli_and_vice_versa():
     """The docs document only the real: README flags == CLI + scripts."""
     documented: set[str] = set()
     for name in ("README.md", "README.fr.md"):
-        documented |= set(FLAG.findall((REPO / name).read_text(encoding="utf-8")))
+        documented |= _documented_flags((REPO / name).read_text(encoding="utf-8"))
     actual = _parser_flags()
     assert documented == actual, (
         f"docs ≠ real — documented only : {sorted(documented - actual)}, "
@@ -215,6 +245,12 @@ RUNTIME_ONLY = {
     # the interpreter of a local virtualenv, named per platform
     ".venv/Scripts/python.exe",
     ".venv/bin/python",
+    # the local design evidence: the ADRs, the drift notes and the superpowers
+    # workspace stay on the machine that wrote them (gitignored under /docs/*),
+    # and both READMEs say so, so a clone is never sent to them as sources
+    "docs/adr/",
+    "docs/engine-drift.md",
+    "docs/superpowers/",
 }
 
 PATH_SUFFIXES = (
@@ -282,7 +318,9 @@ def test_every_path_a_readme_names_exists():
     The design notes (`AGENTS.md`, `CONTEXT.md`, `docs/adr/`) are named in the
     text AND explained as working-tree-only, so a reader knows where they
     stand; a path that exists in neither place is a dead reference, and nothing
-    in the suite saw one until this test.
+    in the suite saw one until this test. A README may also send its reader to
+    the local evidence a clone never carries; those names are in
+    `RUNTIME_ONLY`, each with its reason, so a typo cannot hide behind them.
     """
     archive = _archive_members()
     assert archive, "web/bundle.js no longer names its archive members"

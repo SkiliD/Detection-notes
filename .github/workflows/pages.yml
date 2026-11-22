@@ -40,6 +40,13 @@ jobs:
           node-version: 22
       - name: The web port decides the desktop's notes
         run: node --test web/test/segmenter.test.mjs
+      - name: The page's intonation line is the desktop's summary
+        # The one port nothing else compared: the line is VISIBLE ("N of M
+        # notes in tune") and its rules are thresholds, so a fixture generated
+        # from `core.intonation.summarize` over the traps — too few notes, a
+        # mean under 12 cents, identical pitches, an odd count — is replayed
+        # here. It needs no browser and no take.
+        run: node --test web/test/intonation.test.mjs
       - name: The web port's YIN reads the desktop's frames
         # Skips where demo.wav is absent (it is gitignored and reproducible
         # with scripts/make_demo.py); the fixture's digest refuses any other
@@ -50,6 +57,46 @@ jobs:
         # window is not a power of two: the page's own rule must still produce
         # those frozen windows and frames. Same skip as above without the take.
         run: node --test web/test/yin-rates.test.mjs
+
+      - name: The take a reader CHOOSES is read, exported and bundled
+        # The decoder's own path: a real WAV through `decodeAudioData`, then the
+        # page's chain, the table, the MIDI download and the ZIP read back
+        # through its raw headers. It needs no audio device, so it belongs in
+        # the job that decides what may be published.
+        run: node --test web/test/file.test.mjs
+      - name: A chosen phrase is read as the desktop's live chain reads it
+        # The one check that compares AUDIO instead of fixtures: the committed
+        # phrase and its per-rate desktop reading, both in the checkout, so it
+        # needs no take to build and no microphone.
+        run: node --test web/test/parity.test.mjs
+      - name: The page is driven from the file picker to the export by keyboard
+        # Tab, Enter and Space with the order a reader walks: the masthead, the
+        # tutorial, the file input, then the take's listening and export row.
+        # It needs no device — the half that toggles playback skips with its
+        # measured reason where the runner has no output, and `capture` (the
+        # job with the null sink) runs that half with `V2M_REQUIRE_AUDIO=1`.
+        run: node --test web/test/keyboard.test.mjs
+      - name: Every number the page shows, in both languages
+        # The locale floor broke twice at a call SITE, which no unit test of the
+        # formatter can see: one take is read in French and in English, and every
+        # number a reader meets — the table, the summary, the two spoken
+        # attributes and the roll's own painted marks — must carry the page's
+        # separator, with the same numbers on both sides. A page that showed no
+        # number fails too, so an empty inventory cannot pass.
+        run: node --test web/test/numbers.test.mjs
+      - name: The page's own Content-Security-Policy refuses nothing it needs
+        # The head's meta allows 'self' and the ONE blob: the worklet module is
+        # built from. The test pins the directives and drives the page — demo,
+        # playback, archive, and (where an output exists) the real capture —
+        # while the page records every securitypolicyviolation and the browser's
+        # own log is read for a refusal.
+        run: node --test web/test/csp.test.mjs
+      - name: A playback graph that never starts says so instead of waiting forever
+        # The page bounds the playback start the way it already bounds the
+        # microphone's. The test builds the dead output in the page — `state`
+        # reads `suspended`, `resume()` never settles — so it needs no sound
+        # card of its own, and requires `error_play` after the bound.
+        run: node --test web/test/playback-failure.test.mjs
 
       - name: The wide page is photographed at 1600 px
         # The layout no unit test can see: the 1040 px measure, the notes
@@ -106,14 +153,16 @@ jobs:
 
   capture:
     # The microphone path on Chrome's fake device: the one user path nothing
-    # else presses. It stands ALONE because its PulseAudio provisioning has
-    # never run on a runner — a null sink that never starts must show up as a
-    # red job, not hold the published page offline.
+    # else presses. It stands in its OWN job because its PulseAudio provisioning
+    # is the fragile part — a null sink that never starts must read as a red
+    # job with its own log, not as a mystery inside `verify`.
     #
-    # So it gates nothing yet: `deploy` runs whatever this job says, unless the
-    # repository variable `MIC_CAPTURE_REQUIRED` is `true`. Set that variable
-    # once a run here is green — from then on a red capture DOES block the
-    # publication, which is the only way the coverage stays honest.
+    # It GATES the publication: `deploy` refuses to run when this job fails.
+    # The one way past it is the repository variable `MIC_CAPTURE_WAIVED` set to
+    # `true`, which is a deliberate, logged exception (the deploy job annotates
+    # the run) and must be taken back once the recipe is green again — a page
+    # that has proven everything else and cannot record is the exact failure
+    # this job exists to catch.
     runs-on: ubuntu-latest
     timeout-minutes: 10  # a stuck browser must not hold the page hostage
     steps:
@@ -153,16 +202,58 @@ jobs:
           V2M_REQUIRE_AUDIO: "1"
         run: node --test web/test/capture.test.mjs
 
+      - name: A Space press on the take is ONE action, on a machine that can sound
+        # The focus walk already gated the deploy; the HALF that toggles
+        # playback awaits the page's audio graph, which only this job's null
+        # sink can start — so this is where `V2M_REQUIRE_AUDIO` refuses the
+        # skip instead of letting a soundless runner pass for coverage.
+        env:
+          V2M_REQUIRE_AUDIO: "1"
+        run: node --test web/test/keyboard.test.mjs
+
+      - name: A sequence of gestures keeps one graph, one source and one clock
+        # The gestures as a singer chains them — Space, a click in the roll, an
+        # arrow, a click landing DURING a restart, a held arrow, Space again —
+        # because the race they once lost lives between gestures, not inside
+        # any one of them: at every step at most one audio graph and one buffer
+        # source may be live, the sequence may never say "playback could not
+        # start", and the clock must agree with itself and with the slider.
+        env:
+          V2M_REQUIRE_AUDIO: "1"
+        run: node --test web/test/gestures.test.mjs
+
+      - name: The worklet's in-memory blob: module loads under the policy
+        # The policy's one exception is the worklet; a runner with no output
+        # cannot start the graph that loads it. This job has the null sink, so
+        # `V2M_REQUIRE_AUDIO` turns the skip into a failure here.
+        env:
+          V2M_REQUIRE_AUDIO: "1"
+        run: node --test web/test/csp.test.mjs
+
   deploy:
     needs: [verify, capture]
-    # `!cancelled()` because a failed `capture` must not skip the deploy — the
-    # capture job is the experiment here, not the gate (see its comment).
-    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.capture.result == 'success' || vars.MIC_CAPTURE_REQUIRED != 'true') }}
+    # BOTH jobs are the gate. `capture` failing means the page's only real
+    # recording path was not proven, so nothing is published — the default is
+    # refusal, not a variable somebody has to remember to set.
+    #
+    # `!cancelled()` keeps a red `capture` from silently SKIPPING this job: the
+    # waiver step below has to be able to see it and say so out loud.
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.capture.result == 'success' || vars.MIC_CAPTURE_WAIVED == 'true') }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: The microphone gate was WAIVED
+        # The one door past a red capture, and it is never quiet: the run gets a
+        # warning annotation naming what was not proven. It exists for a broken
+        # runner recipe, not for a broken page — a red capture with a working
+        # sink IS the page's bug, and waiving it publishes a page no singer can
+        # record with.
+        if: ${{ needs.capture.result != 'success' }}
+        run: |
+          echo "::warning title=Microphone gate waived::MIC_CAPTURE_WAIVED is true and the capture job did not pass — this publishes a page whose recording path was not proven. Take the waiver back once the job is green."
+
       - uses: actions/checkout@v4
       # `enablement: true` may create the Pages site on a first push, so this one
       # step both configures and enables it — a second, bare call would run the
@@ -175,3 +266,15 @@ jobs:
           path: web
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: The PUBLISHED page answers and reads a take
+        # The one check no checkout can make: every other test serves `web/`
+        # itself, so a 404 while the CDN catches up, a project site that lives
+        # under /<repo>/ instead of /, a module served as text/plain (which the
+        # browser's own import rule refuses) or a `strings.json` missing from
+        # the artifact would only ever show in a visitor's console. This reads
+        # the url a visitor gets — headers, both files, the demo chain and the
+        # language switch — so the failure surfaces in this run, not in a
+        # visitor's console. It runs AFTER the deploy, so a red here reports a
+        # site that is already online: nothing is withdrawn automatically.
+        run: node web/test/published.mjs "${{ steps.deployment.outputs.page_url }}"

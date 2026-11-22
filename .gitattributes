@@ -3,3 +3,10 @@
 # Shell scripts run inside the Linux container: a CRLF checkout would
 # break bash (`env: '\r': No such file or directory`). Keep them LF.
 *.sh text eol=lf
+# The vendored folder is hashed by its own lock, byte for byte: a checkout that
+# rewrote these files to CRLF would read as a modified copy. Same for the lock.
+vendor/make-interfaces-feel-better/** text eol=lf
+vendor-lock.json text eol=lf
+# The parity golden is read by the browser and re-derived by the Python guard:
+# both halves of the gate must see the same bytes on either OS.
+tests/reference/parity.json text eol=lf

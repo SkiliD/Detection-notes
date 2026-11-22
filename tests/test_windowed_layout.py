@@ -233,20 +233,26 @@ def test_live_primary_view_keeps_the_roll_and_details_remain_reachable(win, qapp
     _settle(qapp)
     assert not page.details_panel.isHidden()
     assert page.scroll.verticalScrollBar().maximum() > 0
-    page.scroll.verticalScrollBar().setValue(page.scroll.verticalScrollBar().maximum())
-    _settle(qapp)
-    viewport = page.scroll.viewport()
-    for widget in (page.piano_live, page.staff_live):
+    # Opening details must not fold the take's views away. The panel is taller
+    # than a 560 px window — its check box and slider now stand at the 24 px
+    # hit-area floor instead of their text height — so the very bottom of the
+    # scroll is the panel, not the roll. REACHABLE is what the arrangement
+    # promises: each view scrolls into sight and lands inside the viewport.
+    bar = page.scroll.verticalScrollBar()
+    content = page.scroll.widget()
+    for widget in (page.piano_live, page.staff_live, page.piano_live_keys):
+        # `ensureWidgetVisible` counts a half-seen widget as visible and does
+        # nothing here, so the scroll is set from the widget's own position.
+        bar.setValue(min(bar.maximum(), max(0, widget.mapTo(content, QPoint(0, 0)).y() - 4)))
+        _settle(qapp)
+        viewport = page.scroll.viewport()
         top = widget.mapTo(viewport, QPoint(0, 0))
-        assert top.y() < viewport.height() and top.y() + widget.height() > 0, (
+        assert top.y() >= -1 and top.y() + widget.height() <= viewport.height() + 1, (
             type(widget).__name__,
             top.y(),
             widget.height(),
             viewport.height(),
         )
-    keyboard_top = page.piano_live_keys.mapTo(viewport, QPoint(0, 0))
-    assert keyboard_top.y() >= -1
-    assert keyboard_top.y() + page.piano_live_keys.height() <= viewport.height() + 1
 
 
 def test_every_stacked_page_keeps_its_bottom_reachable(win, qapp):

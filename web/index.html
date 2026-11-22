@@ -3,24 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The page loads everything from its own folder and ONE blob: — the
+         audio worklet's module, built in memory (`app.js`). No CDN, no inline
+         script, no eval: the policy stays `'self'` plus that blob, and
+         `web/test/csp.test.mjs` drives the page to prove no violation is
+         logged. It must sit BEFORE the resources it governs. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
     <title>Voix → MIDI — le direct</title>
     <link rel="stylesheet" href="style.css" />
-    <!-- The theme must sit on the page before the first paint, and a module is
-         deferred: a stored dark page would flash its light paper first. This
-         reads the one stored key — the desktop's own `~/.v2m_theme` name and
-         its two words, dark or light — and the system's own preference, which
-         is exactly the rule `themeFor` (web/prefs.js) decides again below. -->
-    <script>
-      try {
-        const stored = localStorage.getItem("v2m_theme");
-        const dark =
-          stored === "dark" ||
-          (stored === null && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-      } catch {
-        // storage can be blocked; the stylesheet's light default still paints
-      }
-    </script>
+    <!-- The theme must sit on the page before the first paint (see the file's
+         own comment). External, so the policy above needs no inline exception. -->
+    <script src="theme-init.js"></script>
   </head>
   <body>
     <header class="masthead">
@@ -52,7 +48,7 @@
           </li>
           <li data-i18n="guide_2">Sans micro, ou pour essayer — « Démonstration » charge une prise d'exemple et la fait entendre. « Analyser un fichier » prend un enregistrement que vous avez déjà (WAV, MP3, M4A…) et n'écoute que la première piste.</li>
           <li data-i18n="guide_3">Lire le résultat — Le direct montre la hauteur dans le temps : plus le trait monte, plus la note est aiguë. Le tableau donne, pour chaque note, son début, sa durée, son nom, son écart en cents (0 veut dire juste, au-dessus la note est trop haute, en dessous trop basse) et un éventuel doute de voix, quand la page n'arrive pas à trancher. Sous le tableau, une phrase résume la justesse de la prise.</li>
-          <li data-i18n="guide_4">Écouter — « Écouter la prise » rejoue les notes ; la barre d'espace lance et arrête. « Voix + piano » superpose votre voix à l'accompagnement, le curseur règle l'équilibre entre les deux, et « Réinitialiser » le remet au milieu. Un clic dans le direct fait reprendre l'écoute à cette seconde.</li>
+          <li data-i18n="guide_4">Écouter — « Écouter la prise » rejoue les notes ; la barre d'espace lance et arrête. « Voix + piano » superpose votre voix à l'accompagnement, le curseur règle l'équilibre entre les deux, et « Réinitialiser » le remet au milieu. Un clic dans le direct, ou les flèches au clavier, fait reprendre l'écoute à cette seconde.</li>
           <li data-i18n="guide_5">Emporter — « Exporter le MIDI » donne un fichier à ouvrir dans un éditeur de partition. « Tout télécharger (.zip) » donne l'audio de la prise, le relevé des notes (notes.json), le MIDI et une notice : de quoi réécouter, comparer deux prises, ou refaire l'analyse ailleurs.</li>
         </ol>
         <p class="fineprint" data-i18n="guide_note">La démonstration rejoue une prise préparée d'avance, pas votre voix.</p>
@@ -77,8 +73,11 @@
         </div>
       </section>
 
-      <section class="readout" aria-live="polite">
-        <p id="note" class="note"></p>
+      <section class="readout">
+        <!-- The note name IS the announcement. The Hz line beside it moves on
+             every frame, so it sits outside this polite region: a reader
+             would hear a hundred numbers over the music. -->
+        <p id="note" class="note" aria-live="polite" aria-atomic="true"></p>
         <p id="hz" class="hz"></p>
         <div class="meter" aria-hidden="true"><div id="level" class="meter-fill"></div></div>
       </section>
@@ -90,7 +89,7 @@
             id="roll"
             height="220"
             data-i18n-aria="roll_aria"
-            aria-label="Le direct : la hauteur des notes dans le temps."
+            aria-label="Le direct : la hauteur des notes dans le temps. Flèches : écouter une seconde avant ou après."
           ></canvas>
         </div>
         <p id="clock" class="roll-clock" hidden>
@@ -100,7 +99,7 @@
         </p>
         <div class="hints">
           <p data-i18n="hint_space">Espace : écouter, puis arrêter.</p>
-          <p data-i18n="hint_seek">Clic sur le graphique : écouter à partir de cette seconde.</p>
+          <p data-i18n="hint_seek">Clic sur le graphique, ou flèches : écouter à partir de cette seconde.</p>
         </div>
       </section>
 

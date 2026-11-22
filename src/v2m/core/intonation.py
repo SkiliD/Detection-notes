@@ -14,6 +14,9 @@ chords have (`chords.detect_chords`), and the same refusal to describe noise.
 
 from __future__ import annotations
 
+import math
+from typing import Protocol
+
 # Fewer notes than this in a group: nothing is systematic, say nothing.
 MIN_NOTES = 4
 # A mean smaller than this (in cents) is intonation, not a habit.
@@ -26,9 +29,25 @@ IN_TUNE_CENTS = 10.0
 BANDS = ("low", "mid", "high")
 
 
-def _cents(note) -> float:
-    """One note's signed deviation in cents (0.0 when it carries none)."""
-    return 100.0 * float(getattr(note, "deviation", 0.0))
+class _Measured(Protocol):
+    """What a summary reads from a note: the pitch sung, and its own reading."""
+
+    midi: int
+    deviation: float | None
+
+
+def _cents(note) -> float | None:
+    """One note's signed deviation in cents, or None when it has no reading.
+
+    A note nobody measured is NOT evidence of being in tune: counting it as
+    0.0 would report a perfect take from notes with no measurement — the rule
+    the page's port already applies (`cents.js` answers null).
+    """
+    deviation = getattr(note, "deviation", None)
+    if deviation is None:
+        return None
+    cents = 100.0 * float(deviation)
+    return None if math.isnan(cents) else cents
 
 
 def _mean(values: list[float]) -> float:
@@ -63,8 +82,15 @@ def summarize(notes) -> dict:
     `by_register` uses equal-width MIDI bands over the take's extent;
     `by_position` uses note-count halves (first half / second half).
     A singer drifting flat may show up there, not in the take-wide mean.
+    A note without a measurement is not counted at all: no reading is not
+    evidence of being in tune, so it cannot fill a share or a band.
     """
-    devs = [_cents(n) for n in notes]
+    measured: list[tuple[_Measured, float]] = []
+    for note in notes:
+        cents = _cents(note)
+        if cents is not None:
+            measured.append((note, cents))
+    devs = [cents for _, cents in measured]
     n = len(devs)
     empty = {
         "n_notes": n,
@@ -93,11 +119,11 @@ def summarize(notes) -> dict:
             tendency = "sharp" if mean > 0 else "flat"
 
     # Identical pitches belong together regardless of repetitions or order.
-    lowest = min(note.midi for note in notes)
-    highest = max(note.midi for note in notes)
+    lowest = min(note.midi for note, _ in measured)
+    highest = max(note.midi for note, _ in measured)
     values: list[list[float]] = [[], [], []]
     if highest > lowest:
-        for note, deviation in zip(notes, devs, strict=True):
+        for note, deviation in measured:
             index = min(2, int(3 * (note.midi - lowest) / (highest - lowest)))
             values[index].append(deviation)
     bands = {name: _tendency(group) for name, group in zip(BANDS, values, strict=True)}

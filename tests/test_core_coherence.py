@@ -269,7 +269,11 @@ def test_a_suspect_carries_time_pitch_and_signed_offset(tmp_path):
     assert s["secondary_plateau_midi"] == 62       # at WHICH pitch
     assert s["secondary_plateau_offset_st"] == 2.0 # SIGNED interval to the label
     text = coh.render(takes)
-    assert "4.50" in text and "+2.00st" in text and "62" in text
+    from v2m.core.i18n import format_number
+
+    # the rendered row writes its numbers through the one locale formatter
+    assert format_number(4.5, 2) in text
+    assert format_number(2.0, 2, sign=True) + "st" in text and "62" in text
 
 
 def test_render_follows_the_language_tables():

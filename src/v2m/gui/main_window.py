@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import signal
 import sys
 import time
@@ -296,6 +297,9 @@ class MainWindow(QMainWindow):
         # the pitch's ARRIVAL time: a round counts only while the note is
         # still sounding (a stale value would grade a note that ended)
         self._calibration_at = 0.0
+        # when the CURRENT pitch settled: a round needs the note to hold
+        # (below CALIBRATION_HOLD_S), never one frame
+        self._calibration_stable_since = 0.0
         # the card's OWN mic, opened when no take is capturing
         self._calibration_thread: LiveThread | None = None
         self._selected_input_key: str | None = self._read_input_device_key()
@@ -1653,6 +1657,16 @@ class MainWindow(QMainWindow):
     # reports ~every 50 ms while a note sounds, so anything older means the
     # singer stopped (the tick would otherwise grade a note that ended)
     CALIBRATION_FRESH_S = 0.25
+    # ...and only after it has HELD this long. The analysis window is ~23 ms,
+    # so one frame straddling the change to the next tone blends both: on the
+    # real chain at 44.1 kHz, where the new tone sits at -22, it reads -14.19
+    # cents on an abrupt switch, -34.84 across a 200 ms glide and -36.42
+    # across a 150 ms crossfade (a so-called seam), and that frame lives one
+    # hop (~6 ms).
+    CALIBRATION_HOLD_S = 0.10
+    # the frame-to-frame step under which a pitch counts as the SAME held
+    # note: vibrato moves a few cents per frame, a note change moves ~100
+    CALIBRATION_STABLE_CENTS = 25.0
 
     def _on_live_block(self, t: float, rms: float) -> None:
         self.page_live.on_block(t, rms)
@@ -1673,13 +1687,32 @@ class MainWindow(QMainWindow):
             self._remember_calibration_pitch(hz)
 
     def _remember_calibration_pitch(self, hz: float) -> None:
-        """One heard pitch, stamped: the tick drops it once it goes stale."""
+        """One heard pitch, stamped: the tick drops it once it goes stale.
+
+        A pitch that JUMPED from the previous frame restarts the hold clock:
+        the splice frame of a note change is not the note the round is after,
+        and grading it charged the round with the window's blend of the two
+        tones. A steady note (vibrato included) keeps its clock running.
+        """
+        now = time.monotonic()
+        previous = self._calibration_hz
         self._calibration_hz = hz
-        self._calibration_at = time.monotonic()
+        self._calibration_at = now
+        jumped = (
+            previous is None
+            or not math.isfinite(previous)
+            or previous <= 0
+            or not math.isfinite(hz)
+            or hz <= 0
+            or abs(1200.0 * math.log2(hz / previous)) > self.CALIBRATION_STABLE_CENTS
+        )
+        if jumped:
+            self._calibration_stable_since = now
 
     def _calibration_round_started(self) -> None:
-        """Arms one calibration round: the next stable pitch feeds it."""
+        """Arms one calibration round: the next held pitch feeds it."""
         self._calibration_hz = None
+        self._calibration_stable_since = 0.0
 
     def _on_calibrate_toggled(self, on: bool) -> None:
         """The card's open/close starts/stops the round collector AND its mic."""
@@ -1730,6 +1763,7 @@ class MainWindow(QMainWindow):
     def _calibration_failed(self, msg: str, signal: bytes) -> None:
         """A microphone that never opened is SAID on the card."""
         self._calibration_hz = None
+        self._calibration_stable_since = 0.0
         card = self.page_home.calibration_card
         if card.isVisible():
             self._calibration_timer.stop()
@@ -1741,15 +1775,28 @@ class MainWindow(QMainWindow):
             )
 
     def _calibration_feed_tick(self) -> None:
-        """Feed the armed round its first stable pitch (a 400 ms hold)."""
+        """Feed the armed round a pitch only once the note has HELD.
+
+        The tick can land on any frame, and the analysis window is wide enough
+        to straddle two tones: on the real chain at 44.1 kHz, where the new
+        tone sits at -22, the frame at the change reads -14.19 cents on an
+        abrupt switch and -36.42 across a 150 ms crossfade, so a round that
+        graded one averaged -20.4 or -24.9 over four clean rounds at -22.
+        A splice frame lives one hop
+        (~6 ms) and the onset frame one window; neither survives
+        `CALIBRATION_HOLD_S`, while a note the singer holds does.
+        """
         card = self.page_home.calibration_card
         if not card.isVisible():
             return
         hz = self._calibration_hz
-        if hz is not None and time.monotonic() - self._calibration_at > self.CALIBRATION_FRESH_S:
+        now = time.monotonic()
+        if hz is not None and now - self._calibration_at > self.CALIBRATION_FRESH_S:
             hz = None  # the note ended: a stale hold is not evidence
         card.set_heard(hz)  # before the gate: the card shows what it hears
-        if hz is not None and card.feed(hz):
+        if hz is None or now - self._calibration_stable_since < self.CALIBRATION_HOLD_S:
+            return
+        if card.feed(hz):
             self._calibration_round_started()
 
     def _refresh_live_accuracy(self) -> None:

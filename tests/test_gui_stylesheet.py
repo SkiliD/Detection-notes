@@ -307,6 +307,26 @@ def test_stylesheet_parses_without_qt_warnings(qapp, qt_messages):
     assert not font, f"font warnings: {font}"
 
 
+def test_every_built_button_style_is_brace_balanced():
+    """A stray `}` silently kills a per-widget sheet on Qt 6.12.
+
+    Qt 6.11 tolerated the extra brace this module emitted for the plain action
+    buttons; 6.12 refuses the whole sheet ("Could not parse stylesheet of
+    object QPushButton") and paints the system default, so the Linux gate ran
+    unstyled secondary buttons while every test stayed green. The brace came
+    from a NON-f string sitting beside an f-string — the balance below is what
+    a machine without both Qt versions can still see.
+    """
+    for name, style in (
+        ("primary action", widgets.action_button_style(primary=True)),
+        ("plain action", widgets.action_button_style(primary=False)),
+        ("link", widgets.link_button_style()),
+        ("quiet", widgets.quiet_button_style()),
+        ("theme", widgets.theme_stylesheet()),
+    ):
+        assert style.count("{") == style.count("}"), f"{name} style: {style[-40:]!r}"
+
+
 def test_stylesheet_actually_applies(qapp):
     """The sheet must reach the widgets, not only parse.
 
